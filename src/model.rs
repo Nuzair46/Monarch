@@ -1,6 +1,15 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ManagerError;
+
+pub const DEFAULT_PROFILE_SHORTCUT_BASE: &str = "Ctrl+Shift";
+pub const DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE: &str = "Ctrl+Alt";
+
+fn default_global_shortcuts_enabled() -> bool {
+    true
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct DisplayId {
@@ -93,6 +102,12 @@ pub struct AppSettings {
     pub revert_timeout_secs: u64,
     pub start_with_windows: bool,
     pub startup_profile_name: Option<String>,
+    #[serde(default = "default_global_shortcuts_enabled")]
+    pub global_shortcuts_enabled: bool,
+    pub profile_shortcut_base: Option<String>,
+    pub display_toggle_shortcut_base: Option<String>,
+    pub profile_shortcuts: BTreeMap<String, String>,
+    pub display_toggle_shortcuts: BTreeMap<String, String>,
 }
 
 impl Default for AppSettings {
@@ -101,6 +116,11 @@ impl Default for AppSettings {
             revert_timeout_secs: 10,
             start_with_windows: false,
             startup_profile_name: None,
+            global_shortcuts_enabled: true,
+            profile_shortcut_base: Some(DEFAULT_PROFILE_SHORTCUT_BASE.to_string()),
+            display_toggle_shortcut_base: Some(DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE.to_string()),
+            profile_shortcuts: BTreeMap::new(),
+            display_toggle_shortcuts: BTreeMap::new(),
         }
     }
 }

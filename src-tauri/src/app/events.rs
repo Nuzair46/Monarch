@@ -7,6 +7,7 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::app::commands::{snapshot_from_manager, AppSnapshotDto};
+use crate::app::shortcuts;
 use crate::app::state::MonarchAppState;
 
 pub const EVENT_STATE_CHANGED: &str = "monarch://state-changed";
@@ -151,6 +152,7 @@ pub fn spawn_topology_state_watchdog<R: Runtime>(app: AppHandle<R>) {
                 Some(previous) if previous == &signature => {}
                 Some(_) => {
                     last_signature = Some(signature);
+                    let _ = shortcuts::sync_global_shortcuts(&app);
                     refresh_tray_menu(&app);
                     emit_state_changed(&app);
                 }
@@ -290,6 +292,62 @@ pub fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+pub fn handle_profile_apply_external_action<R: Runtime>(app: &AppHandle<R>, name: &str) {
+    let state = app.state::<MonarchAppState>();
+    let lock = state.0.lock();
+    if let Ok(mut guard) = lock {
+        if guard.manager.apply_profile(name).is_ok() {
+            let pending_timeout = guard.manager.pending_confirmation_remaining();
+            let auto_confirmed =
+                pending_timeout.is_some() && guard.manager.confirm_current_layout().is_ok();
+            drop(guard);
+            let _ = shortcuts::sync_global_shortcuts(app);
+            refresh_tray_menu(app);
+            emit_state_changed(app);
+
+            if let Some(timeout) = pending_timeout.filter(|_| !auto_confirmed) {
+                emit_confirmation(
+                    app,
+                    ConfirmationEvent::Applied {
+                        timeout_ms: timeout.as_millis() as u64,
+                    },
+                );
+                spawn_confirmation_watchdog(app.clone(), timeout);
+            }
+        }
+    }
+}
+
+pub fn handle_toggle_display_external_action<R: Runtime>(app: &AppHandle<R>, display_key: &str) {
+    let state = app.state::<MonarchAppState>();
+    let lock = state.0.lock();
+    if let Ok(mut guard) = lock {
+        if let Ok(display_id) = crate::app::state::parse_display_key(display_key) {
+            if guard.manager.toggle_display(&display_id).is_ok() {
+                let timeout = guard
+                    .manager
+                    .pending_confirmation_remaining()
+                    .unwrap_or_else(|| Duration::from_secs(10));
+                let auto_confirmed = guard.manager.confirm_current_layout().is_ok();
+                drop(guard);
+                let _ = shortcuts::sync_global_shortcuts(app);
+                refresh_tray_menu(app);
+                emit_state_changed(app);
+
+                if !auto_confirmed {
+                    emit_confirmation(
+                        app,
+                        ConfirmationEvent::Applied {
+                            timeout_ms: timeout.as_millis() as u64,
+                        },
+                    );
+                    spawn_confirmation_watchdog(app.clone(), timeout);
+                }
+            }
+        }
+    }
+}
+
 pub fn spawn_deferred_tray_refresh<R: Runtime>(app: AppHandle<R>, delay: Duration) {
     std::thread::spawn(move || {
         if !delay.is_zero() {
@@ -364,64 +422,12 @@ fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         }
         id if id.strip_prefix("profile::").is_some() => {
             if let Some(name) = id.strip_prefix("profile::") {
-                let state = app.state::<MonarchAppState>();
-                let lock = state.0.lock();
-                if let Ok(mut guard) = lock {
-                    if guard.manager.apply_profile(name).is_ok() {
-                        let pending_timeout = guard.manager.pending_confirmation_remaining();
-                        let auto_confirmed = pending_timeout.is_some()
-                            && guard.manager.confirm_current_layout().is_ok();
-                        drop(guard);
-                        refresh_tray_menu(app);
-                        emit_state_changed(app);
-
-                        // Tray actions are intended to be one-click operations and should not
-                        // require confirming in the window UI. Fall back to the standard pending
-                        // confirmation flow only if the immediate confirm fails unexpectedly.
-                        if let Some(timeout) = pending_timeout.filter(|_| !auto_confirmed) {
-                            emit_confirmation(
-                                app,
-                                ConfirmationEvent::Applied {
-                                    timeout_ms: timeout.as_millis() as u64,
-                                },
-                            );
-                            spawn_confirmation_watchdog(app.clone(), timeout);
-                        }
-                    }
-                }
+                handle_profile_apply_external_action(app, name);
             }
         }
         id if id.strip_prefix("toggle::").is_some() => {
             if let Some(display_key) = id.strip_prefix("toggle::") {
-                let state = app.state::<MonarchAppState>();
-                let lock = state.0.lock();
-                if let Ok(mut guard) = lock {
-                    if let Ok(display_id) = crate::app::state::parse_display_key(display_key) {
-                        if guard.manager.toggle_display(&display_id).is_ok() {
-                            let timeout = guard
-                                .manager
-                                .pending_confirmation_remaining()
-                                .unwrap_or_else(|| Duration::from_secs(10));
-                            let auto_confirmed = guard.manager.confirm_current_layout().is_ok();
-                            drop(guard);
-                            refresh_tray_menu(app);
-                            emit_state_changed(app);
-
-                            // Tray actions are intended to be one-click operations and should not
-                            // require confirming in the window UI. Fall back to the standard pending
-                            // confirmation flow only if the immediate confirm fails unexpectedly.
-                            if !auto_confirmed {
-                                emit_confirmation(
-                                    app,
-                                    ConfirmationEvent::Applied {
-                                        timeout_ms: timeout.as_millis() as u64,
-                                    },
-                                );
-                                spawn_confirmation_watchdog(app.clone(), timeout);
-                            }
-                        }
-                    }
-                }
+                handle_toggle_display_external_action(app, display_key);
             }
         }
         _ => {}

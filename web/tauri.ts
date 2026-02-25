@@ -224,6 +224,11 @@ function buildMockSnapshot(): AppSnapshot {
       revert_timeout_secs: 10,
       start_with_windows: false,
       startup_profile_name: null,
+      global_shortcuts_enabled: true,
+      profile_shortcut_base: "Ctrl+Shift",
+      display_toggle_shortcut_base: "Ctrl+Alt",
+      profile_shortcuts: {},
+      display_toggle_shortcuts: {},
     },
     pending_confirmation: null,
   };
@@ -441,6 +446,31 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
         settings.startup_profile_name.trim().length > 0
           ? settings.startup_profile_name.trim()
           : null,
+      global_shortcuts_enabled: settings.global_shortcuts_enabled !== false,
+      profile_shortcut_base:
+        typeof settings.profile_shortcut_base === "string" &&
+        settings.profile_shortcut_base.trim().length > 0
+          ? settings.profile_shortcut_base.trim()
+          : "Ctrl+Shift",
+      display_toggle_shortcut_base:
+        typeof settings.display_toggle_shortcut_base === "string" &&
+        settings.display_toggle_shortcut_base.trim().length > 0
+          ? settings.display_toggle_shortcut_base.trim()
+          : "Ctrl+Alt",
+      profile_shortcuts: Object.fromEntries(
+        Object.entries(settings.profile_shortcuts ?? {}).flatMap(([name, shortcut]) => {
+          const nextName = String(name ?? "").trim();
+          const nextShortcut = String(shortcut ?? "").trim();
+          return nextName && nextShortcut ? [[nextName, nextShortcut]] : [];
+        }),
+      ),
+      display_toggle_shortcuts: Object.fromEntries(
+        Object.entries(settings.display_toggle_shortcuts ?? {}).flatMap(([displayKey, shortcut]) => {
+          const nextDisplayKey = String(displayKey ?? "").trim();
+          const nextShortcut = String(shortcut ?? "").trim();
+          return nextDisplayKey && nextShortcut ? [[nextDisplayKey, nextShortcut]] : [];
+        }),
+      ),
     };
     emitMockEvent("monarch://state-changed", undefined);
     return;

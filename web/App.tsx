@@ -13,6 +13,9 @@ import { MainTab } from "@/app/components/main-tab";
 import { ProfilesTab } from "@/app/components/profiles-tab";
 import { SettingsTab } from "@/app/components/settings-tab";
 import {
+  DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
+  DEFAULT_MONITOR_SHORTCUT_BASE,
+  DEFAULT_PROFILE_SHORTCUT_BASE,
   REPO_URL,
   isView,
   type PendingDisplayToggle,
@@ -41,6 +44,54 @@ import type {
   DisplayInfo,
 } from "./types";
 
+function shortcutSlotKey(index: number): string | null {
+  if (index >= 0 && index <= 8) {
+    return String(index + 1);
+  }
+  if (index === 9) {
+    return "0";
+  }
+  return null;
+}
+
+function buildShortcutFromBase(base: string | null, slotIndex: number): string | null {
+  const trimmedBase = (base ?? "").trim();
+  if (!trimmedBase) {
+    return null;
+  }
+  const slotKey = shortcutSlotKey(slotIndex);
+  if (!slotKey) {
+    return null;
+  }
+  return `${trimmedBase}+${slotKey}`;
+}
+
+function buildProfileShortcutMap(snapshot: AppSnapshot, base: string | null): Record<string, string> {
+  const next: Record<string, string> = {};
+  snapshot.profiles.forEach((profile, index) => {
+    const shortcut = buildShortcutFromBase(base, index);
+    if (shortcut) {
+      next[profile.name] = shortcut;
+    }
+  });
+  return next;
+}
+
+function buildDisplayShortcutMap(snapshot: AppSnapshot, base: string | null): Record<string, string> {
+  const next: Record<string, string> = {};
+  snapshot.displays.forEach((display, index) => {
+    const shortcut = buildShortcutFromBase(base, index);
+    if (shortcut) {
+      next[display.id_key] = shortcut;
+    }
+  });
+  return next;
+}
+
+function normalizeShortcutBaseForCompare(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
 function App() {
   const [view, setView] = useState<View>("main");
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
@@ -52,6 +103,15 @@ function App() {
   const [revertTimeoutInput, setRevertTimeoutInput] = useState("10");
   const [startWithWindowsEnabled, setStartWithWindowsEnabled] = useState(false);
   const [startupProfileName, setStartupProfileName] = useState<string | null>(null);
+  const [globalShortcutsEnabled, setGlobalShortcutsEnabled] = useState(
+    DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
+  );
+  const [profileShortcutBaseInput, setProfileShortcutBaseInput] = useState(
+    DEFAULT_PROFILE_SHORTCUT_BASE,
+  );
+  const [displayShortcutBaseInput, setDisplayShortcutBaseInput] = useState(
+    DEFAULT_MONITOR_SHORTCUT_BASE,
+  );
   const [pendingDisplayToggle, setPendingDisplayToggle] =
     useState<PendingDisplayToggle | null>(null);
   const [pendingProfileDelete, setPendingProfileDelete] = useState<string | null>(null);
@@ -71,6 +131,15 @@ function App() {
         setRevertTimeoutInput(String(next.settings.revert_timeout_secs));
         setStartWithWindowsEnabled(next.settings.start_with_windows);
         setStartupProfileName(next.settings.startup_profile_name);
+        setGlobalShortcutsEnabled(
+          next.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
+        );
+        setProfileShortcutBaseInput(
+          next.settings.profile_shortcut_base ?? DEFAULT_PROFILE_SHORTCUT_BASE,
+        );
+        setDisplayShortcutBaseInput(
+          next.settings.display_toggle_shortcut_base ?? DEFAULT_MONITOR_SHORTCUT_BASE,
+        );
       }
       setError(null);
       return true;
@@ -242,6 +311,10 @@ function App() {
   const parsedRevertTimeout = revertTimeoutIsWholeNumber ? Number(rawRevertTimeout) : NaN;
   const revertTimeoutInRange =
     revertTimeoutIsWholeNumber && parsedRevertTimeout >= 1 && parsedRevertTimeout <= 60;
+  const duplicateShortcutBase =
+    normalizeShortcutBaseForCompare(profileShortcutBaseInput) !== "" &&
+    normalizeShortcutBaseForCompare(profileShortcutBaseInput) ===
+      normalizeShortcutBaseForCompare(displayShortcutBaseInput);
 
   const settingsDirty = useMemo(() => {
     if (!snapshot) {
@@ -255,15 +328,24 @@ function App() {
     return (
       timeoutDirty ||
       startWithWindowsEnabled !== snapshot.settings.start_with_windows ||
-      startupProfileName !== snapshot.settings.startup_profile_name
+      startupProfileName !== snapshot.settings.startup_profile_name ||
+      globalShortcutsEnabled !==
+        (snapshot.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED) ||
+      profileShortcutBaseInput.trim() !==
+        (snapshot.settings.profile_shortcut_base ?? DEFAULT_PROFILE_SHORTCUT_BASE) ||
+      displayShortcutBaseInput.trim() !==
+        (snapshot.settings.display_toggle_shortcut_base ?? DEFAULT_MONITOR_SHORTCUT_BASE)
     );
   }, [
+    displayShortcutBaseInput,
     parsedRevertTimeout,
+    profileShortcutBaseInput,
     rawRevertTimeout,
     revertTimeoutIsWholeNumber,
     snapshot,
     startWithWindowsEnabled,
     startupProfileName,
+    globalShortcutsEnabled,
   ]);
 
   useEffect(() => {
@@ -271,11 +353,18 @@ function App() {
   }, [settingsDirty]);
 
   const actionBusy = busy || pendingLayoutDecisionBusy;
-  const canSubmitSettings = Boolean(snapshot) && !actionBusy && settingsDirty && revertTimeoutInRange;
+  const canSubmitSettings =
+    Boolean(snapshot) &&
+    !actionBusy &&
+    settingsDirty &&
+    revertTimeoutInRange &&
+    !duplicateShortcutBase;
 
   const settingsValidationMessage =
     rawRevertTimeout.length === 0
       ? "Enter a whole number between 1 and 60."
+      : duplicateShortcutBase
+        ? "Profile and monitor shortcut bases must be different."
       : revertTimeoutInRange
         ? null
         : "Revert timeout must be a whole number between 1 and 60.";
@@ -422,12 +511,36 @@ function App() {
     setStartupProfileName(value);
   }
 
+  function handleGlobalShortcutsEnabledChange(checked: boolean) {
+    setError(null);
+    settingsDirtyRef.current = true;
+    setGlobalShortcutsEnabled(checked);
+  }
+
+  function handleProfileShortcutBaseChange(value: string) {
+    setError(null);
+    settingsDirtyRef.current = true;
+    setProfileShortcutBaseInput(value);
+  }
+
+  function handleDisplayShortcutBaseChange(value: string) {
+    setError(null);
+    settingsDirtyRef.current = true;
+    setDisplayShortcutBaseInput(value);
+  }
+
   function handleSettingsSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!revertTimeoutInRange) {
       const message = "Revert timeout must be a whole number between 1 and 60.";
       setError(message);
       toast.error(capitalizeToastError(message));
+      return;
+    }
+    if (duplicateShortcutBase) {
+      const message = "Profile and monitor shortcut bases must be different.";
+      setError(message);
+      toast.error(message);
       return;
     }
 
@@ -440,6 +553,12 @@ function App() {
       revert_timeout_secs: parsedRevertTimeout,
       start_with_windows: startWithWindowsEnabled,
       startup_profile_name: startupProfileName,
+      global_shortcuts_enabled: globalShortcutsEnabled,
+      profile_shortcut_base: profileShortcutBaseInput.trim() || DEFAULT_PROFILE_SHORTCUT_BASE,
+      display_toggle_shortcut_base:
+        displayShortcutBaseInput.trim() || DEFAULT_MONITOR_SHORTCUT_BASE,
+      profile_shortcuts: buildProfileShortcutMap(snapshot, profileShortcutBaseInput),
+      display_toggle_shortcuts: buildDisplayShortcutMap(snapshot, displayShortcutBaseInput),
     };
     const normalizedRevertTimeout = String(parsedRevertTimeout);
     void runAction(async () => {
@@ -448,6 +567,15 @@ function App() {
       setRevertTimeoutInput(normalizedRevertTimeout);
       setStartWithWindowsEnabled(nextSettings.start_with_windows);
       setStartupProfileName(nextSettings.startup_profile_name);
+      setGlobalShortcutsEnabled(
+        nextSettings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
+      );
+      setProfileShortcutBaseInput(
+        nextSettings.profile_shortcut_base ?? DEFAULT_PROFILE_SHORTCUT_BASE,
+      );
+      setDisplayShortcutBaseInput(
+        nextSettings.display_toggle_shortcut_base ?? DEFAULT_MONITOR_SHORTCUT_BASE,
+      );
     }, "Settings updated");
   }
 
@@ -478,6 +606,12 @@ function App() {
           activeDisplayCount={activeDisplays.length}
           actionBusy={actionBusy}
           hasPendingConfirmation={hasPendingConfirmation}
+          shortcutsEnabled={
+            snapshot?.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED
+          }
+          displayShortcutBase={
+            snapshot?.settings.display_toggle_shortcut_base ?? DEFAULT_MONITOR_SHORTCUT_BASE
+          }
           onRestoreLastLayout={() => {
             void runAction(restoreLastLayout, "Restored last layout");
           }}
@@ -498,6 +632,12 @@ function App() {
           snapshot={snapshot}
           actionBusy={actionBusy}
           hasPendingConfirmation={hasPendingConfirmation}
+          shortcutsEnabled={
+            snapshot?.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED
+          }
+          profileShortcutBase={
+            snapshot?.settings.profile_shortcut_base ?? DEFAULT_PROFILE_SHORTCUT_BASE
+          }
           newProfileName={newProfileName}
           onNewProfileNameChange={setNewProfileName}
           onSaveCurrentLayout={() => {
@@ -516,12 +656,18 @@ function App() {
           revertTimeoutInput={revertTimeoutInput}
           startWithWindows={startWithWindowsEnabled}
           startupProfileName={startupProfileName}
+          globalShortcutsEnabled={globalShortcutsEnabled}
           settingsValidationMessage={settingsValidationMessage}
           canSubmitSettings={canSubmitSettings}
           onSettingsSubmit={handleSettingsSubmit}
           onRevertTimeoutInputChange={handleRevertTimeoutInputChange}
           onStartWithWindowsChange={handleStartWithWindowsChange}
           onStartupProfileNameChange={handleStartupProfileNameChange}
+          onGlobalShortcutsEnabledChange={handleGlobalShortcutsEnabledChange}
+          profileShortcutBase={profileShortcutBaseInput}
+          displayShortcutBase={displayShortcutBaseInput}
+          onProfileShortcutBaseChange={handleProfileShortcutBaseChange}
+          onDisplayShortcutBaseChange={handleDisplayShortcutBaseChange}
           checkingUpdates={checkingUpdates}
           updateCheckResult={updateCheckResult}
           updateCheckError={updateCheckError}

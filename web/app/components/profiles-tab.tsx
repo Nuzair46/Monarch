@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { TabsContent } from "@/components/ui/tabs";
+import { indexedShortcutLabel } from "@/app/utils";
 import type { AppSnapshot } from "@/types";
 
 type ProfilesTabProps = {
@@ -15,6 +16,8 @@ type ProfilesTabProps = {
   snapshot: AppSnapshot | null;
   actionBusy: boolean;
   hasPendingConfirmation: boolean;
+  shortcutsEnabled: boolean;
+  profileShortcutBase: string | null;
   newProfileName: string;
   onNewProfileNameChange: (value: string) => void;
   onSaveCurrentLayout: () => void;
@@ -27,6 +30,8 @@ export function ProfilesTab({
   snapshot,
   actionBusy,
   hasPendingConfirmation,
+  shortcutsEnabled,
+  profileShortcutBase,
   newProfileName,
   onNewProfileNameChange,
   onSaveCurrentLayout,
@@ -70,7 +75,7 @@ export function ProfilesTab({
                   No profiles saved yet.
                 </div>
               ) : (
-                snapshot.profiles.map((profile) => (
+                snapshot.profiles.map((profile, index) => (
                   <div
                     key={profile.name}
                     className="grid gap-3 rounded-xl border p-4 sm:grid-cols-[1fr_auto] sm:items-center"
@@ -83,6 +88,12 @@ export function ProfilesTab({
                         {profile.layout.outputs.filter((output) => output.enabled).length}{" "}
                         active outputs
                       </p>
+                      {indexedShortcutLabel(profileShortcutBase, index) ? (
+                        <p className="text-xs font-mono text-muted-foreground">
+                          {shortcutsEnabled ? "Shortcut" : "Shortcut (disabled)"}:{" "}
+                          {indexedShortcutLabel(profileShortcutBase, index)}
+                        </p>
+                      ) : null}
                     </div>
 
                     <div className="flex flex-wrap gap-2 sm:justify-end">

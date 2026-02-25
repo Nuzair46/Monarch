@@ -29,6 +29,11 @@ export type AppSettings = {
   revert_timeout_secs: number;
   start_with_windows: boolean;
   startup_profile_name: string | null;
+  global_shortcuts_enabled: boolean;
+  profile_shortcut_base: string | null;
+  display_toggle_shortcut_base: string | null;
+  profile_shortcuts: Record<string, string>;
+  display_toggle_shortcuts: Record<string, string>;
 };
 
 export type PendingConfirmation = {
