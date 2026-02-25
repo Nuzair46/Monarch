@@ -33,6 +33,7 @@ Monarch lets you:
 - Save display layouts as profiles
 - Restore the previous layout quickly
 - Recover automatically with a confirmation timeout if a layout change goes wrong
+- Easy apply with hotkeys
 
 It uses Windows display topology APIs (`DisplayConfig`) to change which outputs are active.
 
