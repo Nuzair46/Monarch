@@ -102,6 +102,7 @@ pub fn run_app() {
             commands::confirm_current_layout,
             commands::rollback_pending,
             commands::update_settings,
+            commands::open_external_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
