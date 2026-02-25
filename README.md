@@ -161,12 +161,21 @@ Output:
 ### CI / Release
 
 - Workflow: `.github/workflows/ci-build-release.yml`
-- Runs on PRs to `main`, pushes to `main`, tags (`v*`), and manual dispatch
-- Publishes a GitHub Release only for tag pushes like `v0.1.0`
+- CI build runs on PRs to `main` and pushes to `main`
+- Manual release runs via `workflow_dispatch` and takes a version input
+- Release pipeline updates these files together before building:
+  - `Cargo.toml`
+  - `src-tauri/Cargo.toml`
+  - `package.json`
+  - `src-tauri/tauri.conf.json`
+- Release pipeline commits the version bump, creates tag `vX.Y.Z`, builds the Windows installer, and publishes the GitHub Release
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+Release process:
+
+1. Make sure your release commit is on `main`.
+2. Open `Actions` -> `CI Build and Release` -> `Run workflow`.
+3. Enter a version (example: `0.2.0`) or bump kind (`patch`, `minor`, `major`).
+4. Run the workflow.
+5. CI will bump all version files, commit the change, create the tag, build Windows artifacts, and publish the GitHub Release.
 
   </details>

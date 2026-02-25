@@ -7,9 +7,12 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Release version (e.g. 0.2.0) or bump kind (patch/minor/major)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -17,6 +20,7 @@ permissions:
 jobs:
   build:
     name: Build Windows App
+    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]'))
     runs-on: windows-latest
     timeout-minutes: 60
 
@@ -57,34 +61,177 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: monarch-windows-build
+          name: monarch-windows-build-ci-${{ github.sha }}
           if-no-files-found: error
           path: |
             src-tauri/target/release/monarch*.exe
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/msi/*.zip
 
-  release:
-    name: Create GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+  prepare_release:
+    name: Prepare Release (Bump + Commit + Tag)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      commit_sha: ${{ steps.commit.outputs.commit_sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure release runs from main
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Release pipeline must be run from the main branch." >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Bump version across all manifests
+        shell: bash
+        run: node tools/version-bump.mjs "${{ inputs.release_version }}"
+
+      - name: Resolve bumped version metadata
+        id: resolve
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const version = String(pkg.version || "");
+          if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+            throw new Error(`Unexpected version format after bump: ${version}`);
+          }
+          const tagName = `v${version}`;
+          const prerelease = version.includes("-") ? "true" : "false";
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag_name=${tagName}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `prerelease=${prerelease}\n`);
+          console.log(`Resolved release version: ${version}`);
+          console.log(`Resolved release tag: ${tagName}`);
+          NODE
+
+      - name: Fail if version change produced no diff
+        shell: bash
+        run: |
+          if git diff --quiet -- Cargo.toml src-tauri/Cargo.toml package.json src-tauri/tauri.conf.json; then
+            echo "No version changes detected. Provide a new version." >&2
+            exit 1
+          fi
+
+      - name: Ensure tag does not already exist
+        shell: bash
+        run: |
+          git fetch --tags origin
+          if git rev-parse -q --verify "refs/tags/${{ steps.resolve.outputs.tag_name }}" >/dev/null; then
+            echo "Tag already exists: ${{ steps.resolve.outputs.tag_name }}" >&2
+            exit 1
+          fi
+
+      - name: Commit version bump and push
+        id: commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml src-tauri/Cargo.toml package.json src-tauri/tauri.conf.json
+          git commit -m "chore(release): ${{ steps.resolve.outputs.tag_name }} [skip ci]"
+          git tag "${{ steps.resolve.outputs.tag_name }}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "${{ steps.resolve.outputs.tag_name }}"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  release_build:
+    name: Build Windows Release
+    if: github.event_name == 'workflow_dispatch'
+    needs: prepare_release
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout tagged release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare_release.outputs.commit_sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src-tauri -> src-tauri/target
+
+      - name: Install JS dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build frontend
+        run: yarn build
+
+      - name: Run core Rust tests
+        run: cargo test --manifest-path Cargo.toml
+
+      - name: Build Windows app (MSI)
+        run: yarn tauri build --bundles msi
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: monarch-windows-build-${{ needs.prepare_release.outputs.version }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/monarch*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.zip
+
+  publish_release:
+    name: Publish GitHub Release
+    if: github.event_name == 'workflow_dispatch'
+    needs:
+      - prepare_release
+      - release_build
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download build artifact
+      - name: Download release artifact
         uses: actions/download-artifact@v4
         with:
-          name: monarch-windows-build
+          name: monarch-windows-build-${{ needs.prepare_release.outputs.version }}
           path: dist
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare_release.outputs.tag_name }}
+          name: Monarch ${{ needs.prepare_release.outputs.tag_name }}
+          target_commitish: ${{ needs.prepare_release.outputs.commit_sha }}
           files: |
             dist/**/*.msi
             dist/**/*.zip
             dist/**/*.exe
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ needs.prepare_release.outputs.prerelease == 'true' }}
