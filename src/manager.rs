@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::backend::DisplayBackend;
@@ -234,6 +235,7 @@ where
 
         let mut current_layout = self.backend.get_layout()?;
         normalize_primary(&mut current_layout);
+        target_layout = remap_layout_display_ids(&target_layout, &current_layout);
 
         if current_layout == target_layout {
             return Ok(());
@@ -261,13 +263,16 @@ where
             .or_else(|| self.config.last_known_good_layout.clone())
             .ok_or_else(|| ManagerError::NotFound("last restorable layout".to_string()))?;
 
-        target_layout.ensure_valid()?;
-
         let current_layout = self.backend.get_layout()?;
-        self.backend.apply_layout(target_layout.clone())?;
+        let mut remapped_target_layout = target_layout;
+        remapped_target_layout.ensure_valid()?;
+        normalize_primary(&mut remapped_target_layout);
+        let remapped_target_layout =
+            remap_layout_display_ids(&remapped_target_layout, &current_layout);
+        self.backend.apply_layout(remapped_target_layout.clone())?;
         self.pending_confirmation = None;
         self.config.last_restorable_layout = Some(current_layout);
-        self.config.last_known_good_layout = Some(target_layout);
+        self.config.last_known_good_layout = Some(remapped_target_layout);
         self.persist_config()
     }
 
@@ -347,6 +352,125 @@ fn normalize_primary(layout: &mut Layout) {
     }
 }
 
+fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
+    let current_ids: HashSet<DisplayId> = current
+        .outputs
+        .iter()
+        .map(|output| output.display_id.clone())
+        .collect();
+
+    if desired
+        .outputs
+        .iter()
+        .all(|output| current_ids.contains(&output.display_id))
+    {
+        return desired.clone();
+    }
+
+    let mut remapped = desired.clone();
+    let mut used: HashSet<DisplayId> = HashSet::new();
+    for output in &remapped.outputs {
+        if current_ids.contains(&output.display_id) {
+            used.insert(output.display_id.clone());
+        }
+    }
+
+    let mut current_by_target: HashMap<u32, Vec<&crate::model::OutputConfig>> = HashMap::new();
+    let mut current_by_edid: HashMap<u64, Vec<&crate::model::OutputConfig>> = HashMap::new();
+    for output in &current.outputs {
+        current_by_target
+            .entry(output.display_id.target_id)
+            .or_default()
+            .push(output);
+        if let Some(edid_hash) = output.display_id.edid_hash {
+            current_by_edid.entry(edid_hash).or_default().push(output);
+        }
+    }
+
+    for output in &mut remapped.outputs {
+        if current_ids.contains(&output.display_id) {
+            continue;
+        }
+
+        let mut replacement = None;
+
+        if let Some(edid_hash) = output.display_id.edid_hash {
+            let candidates = unique_unused_candidates(
+                current_by_edid.get(&edid_hash).cloned().unwrap_or_default(),
+                &used,
+            );
+            if candidates.len() == 1 {
+                replacement = Some(candidates[0].display_id.clone());
+            }
+        }
+
+        if replacement.is_none() {
+            let candidates = unique_unused_candidates(
+                current_by_target
+                    .get(&output.display_id.target_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                &used,
+            );
+
+            if candidates.len() == 1 {
+                replacement = Some(candidates[0].display_id.clone());
+            } else if candidates.len() > 1 {
+                replacement =
+                    choose_best_candidate(output, &candidates).map(|c| c.display_id.clone());
+            }
+        }
+
+        if let Some(next_id) = replacement {
+            used.insert(next_id.clone());
+            output.display_id = next_id;
+        }
+    }
+
+    remapped
+}
+
+fn unique_unused_candidates<'a>(
+    candidates: Vec<&'a crate::model::OutputConfig>,
+    used: &HashSet<DisplayId>,
+) -> Vec<&'a crate::model::OutputConfig> {
+    candidates
+        .into_iter()
+        .filter(|candidate| !used.contains(&candidate.display_id))
+        .collect()
+}
+
+fn choose_best_candidate<'a>(
+    desired: &crate::model::OutputConfig,
+    candidates: &[&'a crate::model::OutputConfig],
+) -> Option<&'a crate::model::OutputConfig> {
+    let mut scored: Vec<(i32, &crate::model::OutputConfig)> = candidates
+        .iter()
+        .copied()
+        .map(|candidate| {
+            let mut score = 0i32;
+            if desired.resolution == candidate.resolution {
+                score += 10;
+            }
+            if desired.primary == candidate.primary {
+                score += 5;
+            }
+            if desired.position == candidate.position {
+                score += 3;
+            }
+            (score, candidate)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+
+    match scored.as_slice() {
+        [] => None,
+        [only] => Some(only.1),
+        [best, next, ..] if best.0 > next.0 => Some(best.1),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,18 +480,26 @@ mod tests {
     };
 
     fn sample_display_id(target_id: u32) -> DisplayId {
+        sample_display_id_on_adapter(1, target_id)
+    }
+
+    fn sample_display_id_on_adapter(adapter_luid: u64, target_id: u32) -> DisplayId {
         DisplayId {
-            adapter_luid: 1,
+            adapter_luid,
             target_id,
             edid_hash: Some(target_id as u64),
         }
     }
 
     fn sample_layout() -> Layout {
+        sample_layout_on_adapter(1)
+    }
+
+    fn sample_layout_on_adapter(adapter_luid: u64) -> Layout {
         Layout {
             outputs: vec![
                 OutputConfig {
-                    display_id: sample_display_id(1),
+                    display_id: sample_display_id_on_adapter(adapter_luid, 1),
                     enabled: true,
                     position: Position { x: 0, y: 0 },
                     resolution: Resolution {
@@ -378,7 +510,7 @@ mod tests {
                     primary: true,
                 },
                 OutputConfig {
-                    display_id: sample_display_id(2),
+                    display_id: sample_display_id_on_adapter(adapter_luid, 2),
                     enabled: true,
                     position: Position { x: 1920, y: 0 },
                     resolution: Resolution {
@@ -393,9 +525,13 @@ mod tests {
     }
 
     fn sample_displays() -> Vec<DisplayInfo> {
+        sample_displays_on_adapter(1)
+    }
+
+    fn sample_displays_on_adapter(adapter_luid: u64) -> Vec<DisplayInfo> {
         vec![
             DisplayInfo {
-                id: sample_display_id(1),
+                id: sample_display_id_on_adapter(adapter_luid, 1),
                 friendly_name: "Primary".to_string(),
                 is_active: true,
                 is_primary: true,
@@ -406,7 +542,7 @@ mod tests {
                 refresh_rate_mhz: 60_000,
             },
             DisplayInfo {
-                id: sample_display_id(2),
+                id: sample_display_id_on_adapter(adapter_luid, 2),
                 friendly_name: "Secondary".to_string(),
                 is_active: true,
                 is_primary: false,
@@ -556,6 +692,30 @@ mod tests {
         manager.apply_profile("current").unwrap();
 
         assert_eq!(backend.current_layout().unwrap(), before);
+        assert!(!manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn apply_profile_remaps_display_ids_after_adapter_luid_change() {
+        let backend =
+            MockBackend::new(sample_displays_on_adapter(9), sample_layout_on_adapter(9)).unwrap();
+        let profile_layout = sample_layout_on_adapter(1);
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "dual".to_string(),
+                layout: profile_layout,
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
+
+        manager.apply_profile("dual").unwrap();
+
+        let applied = backend.current_layout().unwrap();
+        assert!(applied
+            .outputs
+            .iter()
+            .all(|output| output.display_id.adapter_luid == 9));
         assert!(!manager.has_pending_confirmation());
     }
 

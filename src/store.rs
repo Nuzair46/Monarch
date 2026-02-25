@@ -25,15 +25,11 @@ impl FileConfigStore {
 
     pub fn default_config_path() -> PathBuf {
         if let Ok(appdata) = std::env::var("APPDATA") {
-            return PathBuf::from(appdata)
-                .join("Monarch")
-                .join("config.json");
+            return PathBuf::from(appdata).join("Monarch").join("config.json");
         }
 
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            return PathBuf::from(xdg)
-                .join("Monarch")
-                .join("config.json");
+            return PathBuf::from(xdg).join("Monarch").join("config.json");
         }
 
         if let Ok(home) = std::env::var("HOME") {
@@ -45,7 +41,6 @@ impl FileConfigStore {
 
         PathBuf::from("config.json")
     }
-
 }
 
 impl Default for FileConfigStore {
