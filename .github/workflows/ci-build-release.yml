@@ -1,12 +1,6 @@
-name: CI Build and Release
+name: Release Build and Publish
 
 on:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       release_version:
@@ -18,59 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build Windows App
-    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]'))
-    runs-on: windows-latest
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: yarn
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            src-tauri -> src-tauri/target
-
-      - name: Install JS dependencies
-        run: yarn install --frozen-lockfile
-
-      - name: Build frontend
-        run: yarn build
-
-      - name: Run core Rust tests
-        run: cargo test --manifest-path Cargo.toml
-
-      - name: Build Windows app (MSI)
-        run: yarn tauri build --bundles msi
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: monarch-windows-build-ci-${{ github.sha }}
-          if-no-files-found: error
-          path: |
-            src-tauri/target/release/monarch*.exe
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/msi/*.zip
-
   prepare_release:
     name: Prepare Release (Bump + Commit + Tag)
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -155,7 +98,6 @@ jobs:
 
   release_build:
     name: Build Windows Release
-    if: github.event_name == 'workflow_dispatch'
     needs: prepare_release
     runs-on: windows-latest
     timeout-minutes: 60
@@ -208,7 +150,6 @@ jobs:
 
   publish_release:
     name: Publish GitHub Release
-    if: github.event_name == 'workflow_dispatch'
     needs:
       - prepare_release
       - release_build

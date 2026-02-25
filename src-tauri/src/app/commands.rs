@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{process::Command, time::Duration};
 
 use monarch::{
     AppSettings, DisplayId, DisplayInfo, Layout, OutputConfig, Position, Profile, Resolution,
@@ -12,8 +12,8 @@ use crate::app::events::{
     emit_confirmation, emit_state_changed, refresh_tray_menu, spawn_confirmation_watchdog,
     spawn_deferred_tray_refresh, ConfirmationEvent, ConfirmationRevertReason,
 };
-use crate::app::{shortcuts, startup};
 use crate::app::state::{format_display_key, MonarchAppState};
+use crate::app::{shortcuts, startup};
 
 type CommandResult<T> = Result<T, String>;
 
@@ -425,6 +425,19 @@ pub async fn update_settings<R: Runtime>(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn open_external_url(url: String) -> CommandResult<()> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("url cannot be empty".to_string());
+    }
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) URLs are supported".to_string());
+    }
+
+    open_external_url_with_system(url)
+}
+
 pub fn snapshot_from_manager<B, S>(
     manager: &monarch::MonarchDisplayManager<B, S>,
 ) -> Result<AppSnapshotDto, monarch::ManagerError>
@@ -532,6 +545,38 @@ fn profile_to_dto(profile: Profile) -> Result<ProfileDto, String> {
         name: profile.name,
         layout: layout_to_dto(&profile.layout)?,
     })
+}
+
+fn open_external_url_with_system(url: &str) -> CommandResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn()
+            .map_err(|err| format!("failed to open URL: {err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|err| format!("failed to open URL: {err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|err| format!("failed to open URL: {err}"))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening external URLs is not supported on this platform".to_string())
 }
 
 fn maybe_move_window_before_detach<R: Runtime>(

@@ -8,6 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { openExternalUrl } from "@/tauri";
 import { REPO_URL, VIEW_OPTIONS } from "@/app/ui";
 
 export function AppHeader() {
@@ -34,21 +35,17 @@ export function AppHeader() {
             ))}
           </TabsList>
           <Button
-            asChild
             type="button"
             variant="ghost"
             size="sm"
             className="justify-start lg:justify-end"
+            aria-label="Open Monarch GitHub repository"
+            onClick={() => {
+              void openExternalUrl(REPO_URL);
+            }}
           >
-            <a
-              href={REPO_URL}
-              target="_blank"
-              rel="noreferrer noopener"
-              aria-label="Open Monarch GitHub repository"
-            >
-              <Github />
-              GitHub
-            </a>
+            <Github />
+            GitHub
           </Button>
         </div>
       </CardHeader>

@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/select";
 import { TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import type { ReleaseUpdateCheckResult } from "@/tauri";
+import { openExternalUrl, type ReleaseUpdateCheckResult } from "@/tauri";
 import type { AppSnapshot } from "@/types";
 
 function shortcutBaseFromKeyEvent(event: KeyboardEvent<HTMLInputElement>): string | null {
@@ -337,10 +337,14 @@ export function SettingsTab({
                 >
                   {checkingUpdates ? "Checking..." : "Check for Updates"}
                 </Button>
-                <Button asChild type="button" variant="ghost">
-                  <a href={releasesUrl} target="_blank" rel="noreferrer noopener">
-                    Open Releases
-                  </a>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    void openExternalUrl(releasesUrl);
+                  }}
+                >
+                  Open Releases
                 </Button>
               </div>
 

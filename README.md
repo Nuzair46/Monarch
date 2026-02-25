@@ -10,7 +10,7 @@
 </center>
 
 <p align="center">
-  <a href="https://github.com/Nuzair46/Monarch/actions/workflows/ci-build-release.yml"><img alt="CI Build and Release" src="https://github.com/Nuzair46/Monarch/actions/workflows/ci-build-release.yml/badge.svg?branch=main" /></a>
+  <a href="https://github.com/Nuzair46/Monarch/actions/workflows/ci-build-release.yml"><img alt="Release Build and Publish" src="https://github.com/Nuzair46/Monarch/actions/workflows/ci-build-release.yml/badge.svg" /></a>
   <img alt="Downloads" src="https://img.shields.io/github/downloads/Nuzair46/Monarch/total.svg" />
   <img alt="Latest Release" src="https://img.shields.io/github/v/release/Nuzair46/Monarch?display_name=tag" />
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white" />
@@ -130,7 +130,7 @@ Not yet. Monarch handles many calibration cases (including common HDR/SDR transi
 - `src/` Rust core library (layouts, profiles, rollback safety, persistence)
 - `src-tauri/` Tauri desktop app + Windows backend
 - `web/` React UI
-- `.github/workflows/` Windows CI + release workflow
+- `.github/workflows/` Windows release workflow
 
 ### Build Locally (Windows)
 
@@ -162,8 +162,7 @@ Output:
 ### CI / Release
 
 - Workflow: `.github/workflows/ci-build-release.yml`
-- CI build runs on PRs to `main` and pushes to `main`
-- Manual release runs via `workflow_dispatch` and takes a version input
+- Manual release workflow runs via `workflow_dispatch` and takes a version input
 - Release pipeline updates these files together before building:
   - `Cargo.toml`
   - `src-tauri/Cargo.toml`
@@ -174,9 +173,9 @@ Output:
 Release process:
 
 1. Make sure your release commit is on `main`.
-2. Open `Actions` -> `CI Build and Release` -> `Run workflow`.
+2. Open `Actions` -> `Release Build and Publish` -> `Run workflow`.
 3. Enter a version (example: `0.2.0`) or bump kind (`patch`, `minor`, `major`).
 4. Run the workflow.
-5. CI will bump all version files, commit the change, create the tag, build Windows artifacts, and publish the GitHub Release.
+5. The workflow will bump all version files, commit the change, create the tag, build Windows artifacts, and publish the GitHub Release.
 
   </details>

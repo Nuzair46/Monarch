@@ -273,6 +273,42 @@ export async function getAppVersion(): Promise<string> {
   }
 }
 
+function normalizeExternalUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) {
+    throw new Error("URL cannot be empty");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("Invalid URL");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Only http(s) URLs are supported");
+  }
+
+  return parsed.toString();
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  const normalizedUrl = normalizeExternalUrl(url);
+
+  if (useWebMock) {
+    if (typeof window !== "undefined") {
+      const opened = window.open(normalizedUrl, "_blank", "noopener,noreferrer");
+      if (!opened) {
+        window.location.assign(normalizedUrl);
+      }
+    }
+    return;
+  }
+
+  await invoke("open_external_url", { url: normalizedUrl });
+}
+
 export async function checkGithubReleaseUpdate(): Promise<ReleaseUpdateCheckResult> {
   const currentVersion = await getAppVersion();
 
