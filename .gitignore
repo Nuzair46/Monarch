@@ -1,0 +1,34 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+.idea/
+.vscode/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Env / local config
+.env
+.env.*
+!.env.example
+
+# Node / Vite
+node_modules
+dist
+.vite
+
+# Rust / Cargo
+target
+src-tauri/target/
+
+# Tauri generated files
+src-tauri/gen/
+
+# Tauri bundle outputs (redundant with target/, kept for clarity)
+src-tauri/bundle/

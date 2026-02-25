@@ -1,0 +1,310 @@
+#![cfg(target_os = "windows")]
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use monarch::{DisplayBackend, DisplayInfo, Layout, ManagerError};
+
+use super::apply::{
+    active_color_state_signature, apply_layout_against_snapshot, capture_sdr_gamma_ramps,
+    gamma_ramp_looks_identity, reapply_color_calibration_for_active_with_cached_sdr,
+    GammaRampKey, GammaRampWords,
+};
+use super::enumerate::query_active_topology;
+use super::win32_types::TopologySnapshot;
+
+#[derive(Default)]
+struct BackendCache {
+    last_snapshot: Option<TopologySnapshot>,
+    last_layout: Option<Layout>,
+    last_displays: Vec<DisplayInfo>,
+    sdr_gamma_cache: HashMap<GammaRampKey, GammaRampWords>,
+}
+
+#[derive(Default)]
+pub struct WindowsDisplayBackend {
+    cache: Mutex<BackendCache>,
+}
+
+impl WindowsDisplayBackend {
+    pub fn new() -> Result<Self, ManagerError> {
+        let backend = Self::default();
+        let snapshot = query_active_topology()?;
+        let initial_sdr_ramps = capture_sdr_gamma_ramps(&snapshot);
+        let mut cache = backend
+            .cache
+            .lock()
+            .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
+        cache.last_layout = Some(snapshot.layout.clone());
+        cache.last_displays = snapshot.displays.clone();
+        cache.last_snapshot = Some(snapshot);
+        merge_sdr_gamma_cache(&mut cache.sdr_gamma_cache, initial_sdr_ramps);
+        drop(cache);
+        Ok(backend)
+    }
+
+    fn refresh_active(&self) -> Result<(), ManagerError> {
+        let snapshot = query_active_topology()?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
+
+        cache.last_snapshot = Some(merge_snapshot_for_cache(
+            cache.last_snapshot.as_ref(),
+            snapshot.clone(),
+        ));
+
+        let mut merged_layout = cache
+            .last_layout
+            .clone()
+            .unwrap_or_else(|| snapshot.layout.clone());
+        for output in &mut merged_layout.outputs {
+            if let Some(active) = snapshot
+                .layout
+                .outputs
+                .iter()
+                .find(|active| active.display_id == output.display_id)
+            {
+                *output = active.clone();
+            } else {
+                output.enabled = false;
+                output.primary = false;
+            }
+        }
+        for active in &snapshot.layout.outputs {
+            if !merged_layout
+                .outputs
+                .iter()
+                .any(|o| o.display_id == active.display_id)
+            {
+                merged_layout.outputs.push(active.clone());
+            }
+        }
+        if !merged_layout.outputs.iter().any(|o| o.enabled && o.primary) {
+            if let Some(first) = merged_layout.outputs.iter_mut().find(|o| o.enabled) {
+                first.primary = true;
+            }
+        }
+        cache.last_layout = Some(merged_layout);
+
+        for display in &mut cache.last_displays {
+            if let Some(active) = snapshot.displays.iter().find(|d| d.id == display.id) {
+                *display = active.clone();
+            } else {
+                display.is_active = false;
+                display.is_primary = false;
+            }
+        }
+        for active in &snapshot.displays {
+            if !cache.last_displays.iter().any(|d| d.id == active.id) {
+                cache.last_displays.push(active.clone());
+            }
+        }
+        cache.last_displays.sort_by(|a, b| {
+            a.friendly_name
+                .cmp(&b.friendly_name)
+                .then(a.id.target_id.cmp(&b.id.target_id))
+        });
+        Ok(())
+    }
+
+    pub fn reapply_color_calibration(&self) -> Result<(), ManagerError> {
+        let cached_sdr = {
+            let cache = self
+                .cache
+                .lock()
+                .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
+            cache.sdr_gamma_cache.clone()
+        };
+
+        reapply_color_calibration_for_active_with_cached_sdr(&cached_sdr)?;
+        let refreshed_snapshot = query_active_topology()?;
+
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
+        merge_sdr_gamma_cache(
+            &mut cache.sdr_gamma_cache,
+            capture_sdr_gamma_ramps(&refreshed_snapshot),
+        );
+        Ok(())
+    }
+
+    pub fn color_state_signature(&self) -> Result<Option<String>, ManagerError> {
+        let snapshot = query_active_topology()?;
+        Ok(Some(active_color_state_signature(&snapshot)))
+    }
+}
+
+fn merge_snapshot_for_cache(
+    previous: Option<&TopologySnapshot>,
+    fresh: TopologySnapshot,
+) -> TopologySnapshot {
+    let Some(previous) = previous else {
+        return fresh;
+    };
+
+    // Preserve an older raw snapshot when it still covers the currently active outputs and
+    // contains more paths. This keeps a recently-detached display path available for re-attach.
+    if previous.raw.paths.len() > fresh.raw.paths.len()
+        && raw_covers_active_outputs(previous, &fresh.layout)
+    {
+        let mut merged = fresh;
+        merged.raw = previous.raw.clone();
+        return merged;
+    }
+
+    fresh
+}
+
+fn raw_covers_active_outputs(snapshot: &TopologySnapshot, layout: &Layout) -> bool {
+    layout
+        .outputs
+        .iter()
+        .filter(|output| output.enabled)
+        .all(|output| {
+            snapshot.raw.paths.iter().any(|path| {
+                let adapter_luid = ((path.targetInfo.adapterId.HighPart as i64 as u64) << 32)
+                    | (path.targetInfo.adapterId.LowPart as u64);
+                adapter_luid == output.display_id.adapter_luid
+                    && path.targetInfo.id == output.display_id.target_id
+            })
+        })
+}
+
+impl DisplayBackend for WindowsDisplayBackend {
+    fn list_displays(&self) -> Result<Vec<DisplayInfo>, ManagerError> {
+        self.refresh_active()?;
+        let cache = self
+            .cache
+            .lock()
+            .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
+        Ok(cache.last_displays.clone())
+    }
+
+    fn get_layout(&self) -> Result<Layout, ManagerError> {
+        self.refresh_active()?;
+        let cache = self
+            .cache
+            .lock()
+            .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
+        cache
+            .last_layout
+            .clone()
+            .ok_or_else(|| ManagerError::Backend("no cached layout available".to_string()))
+    }
+
+    fn apply_layout(&self, layout: Layout) -> Result<(), ManagerError> {
+        layout.ensure_valid()?;
+
+        // Re-query the currently active topology so detach-only operations use a minimal base.
+        // This reduces the chance of Windows re-touching unrelated outputs.
+        let active_snapshot = query_active_topology()?;
+        let needs_attach_paths = desired_enables_inactive_output(&layout, &active_snapshot.layout);
+
+        let base_snapshot = {
+            let cache = self
+                .cache
+                .lock()
+                .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
+
+            if !needs_attach_paths {
+                active_snapshot.clone()
+            } else if let Some(cached) = cache.last_snapshot.clone() {
+                if raw_covers_active_outputs(&cached, &active_snapshot.layout) {
+                    cached
+                } else {
+                    active_snapshot.clone()
+                }
+            } else {
+                active_snapshot.clone()
+            }
+        };
+
+        let next_snapshot = apply_layout_against_snapshot(&layout, &base_snapshot)?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
+        cache.last_snapshot = Some(merge_snapshot_for_cache(
+            Some(&base_snapshot),
+            next_snapshot.clone(),
+        ));
+        merge_sdr_gamma_cache(
+            &mut cache.sdr_gamma_cache,
+            capture_sdr_gamma_ramps(&next_snapshot),
+        );
+
+        let mut merged_layout = layout;
+        for output in &mut merged_layout.outputs {
+            if let Some(active) = next_snapshot
+                .layout
+                .outputs
+                .iter()
+                .find(|active| active.display_id == output.display_id)
+            {
+                output.position = active.position.clone();
+                output.resolution = active.resolution.clone();
+                output.refresh_rate_mhz = active.refresh_rate_mhz;
+                output.enabled = true;
+                output.primary = active.primary;
+            }
+        }
+        cache.last_layout = Some(merged_layout);
+
+        let mut displays = cache.last_displays.clone();
+        for display in &mut displays {
+            if let Some(active) = next_snapshot.displays.iter().find(|d| d.id == display.id) {
+                *display = active.clone();
+            } else {
+                display.is_active = false;
+                display.is_primary = false;
+            }
+        }
+        for active in &next_snapshot.displays {
+            if !displays.iter().any(|d| d.id == active.id) {
+                displays.push(active.clone());
+            }
+        }
+        cache.last_displays = displays;
+
+        Ok(())
+    }
+
+    fn color_state_signature(&self) -> Result<Option<String>, ManagerError> {
+        WindowsDisplayBackend::color_state_signature(self)
+    }
+
+    fn reapply_color_calibration(&self) -> Result<(), ManagerError> {
+        WindowsDisplayBackend::reapply_color_calibration(self)
+    }
+}
+
+fn merge_sdr_gamma_cache(
+    cache: &mut HashMap<GammaRampKey, GammaRampWords>,
+    observed: HashMap<GammaRampKey, GammaRampWords>,
+) {
+    for (key, ramp) in observed {
+        match cache.get(&key) {
+            // Preserve a previous non-identity SDR ramp if the newly observed ramp looks like a
+            // reset/default ramp (common after HDR transitions on some drivers).
+            Some(existing)
+                if !gamma_ramp_looks_identity(existing) && gamma_ramp_looks_identity(&ramp) => {}
+            _ => {
+                cache.insert(key, ramp);
+            }
+        }
+    }
+}
+
+fn desired_enables_inactive_output(desired: &Layout, active_layout: &Layout) -> bool {
+    desired.outputs.iter().any(|output| {
+        output.enabled
+            && !active_layout
+                .outputs
+                .iter()
+                .any(|active| active.enabled && active.display_id == output.display_id)
+    })
+}
