@@ -5,6 +5,8 @@ import type { DisplayInfo } from "@/types";
 
 type MonitorCardProps = {
   display: DisplayInfo;
+  shortcutLabel: string | null;
+  shortcutsEnabled: boolean;
   busy: boolean;
   hasPendingConfirmation: boolean;
   activeDisplayCount: number;
@@ -14,6 +16,8 @@ type MonitorCardProps = {
 
 export function MonitorCard({
   display,
+  shortcutLabel,
+  shortcutsEnabled,
   busy,
   hasPendingConfirmation,
   activeDisplayCount,
@@ -33,6 +37,11 @@ export function MonitorCard({
           <p className="text-sm text-muted-foreground">
             {display.resolution.width} x {display.resolution.height} · {formatHz(display.refresh_rate_mhz)}
           </p>
+          {shortcutLabel ? (
+            <p className="text-xs font-mono text-muted-foreground">
+              {shortcutsEnabled ? "Shortcut" : "Shortcut (disabled)"}: {shortcutLabel}
+            </p>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2">

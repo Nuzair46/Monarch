@@ -9,6 +9,7 @@ import {
 import { TabsContent } from "@/components/ui/tabs";
 import { LayoutPreview } from "@/app/components/layout-preview";
 import { MonitorCard } from "@/app/components/monitor-card";
+import { indexedShortcutLabel } from "@/app/utils";
 import type { AppSnapshot, DisplayInfo } from "@/types";
 
 type MainTabProps = {
@@ -17,6 +18,8 @@ type MainTabProps = {
   activeDisplayCount: number;
   actionBusy: boolean;
   hasPendingConfirmation: boolean;
+  shortcutsEnabled: boolean;
+  displayShortcutBase: string | null;
   onRestoreLastLayout: () => void;
   onMakePrimaryRequest: (display: DisplayInfo) => void;
   onToggleRequest: (display: DisplayInfo) => void;
@@ -28,6 +31,8 @@ export function MainTab({
   activeDisplayCount,
   actionBusy,
   hasPendingConfirmation,
+  shortcutsEnabled,
+  displayShortcutBase,
   onRestoreLastLayout,
   onMakePrimaryRequest,
   onToggleRequest,
@@ -64,10 +69,12 @@ export function MainTab({
                 </Button>
               </CardHeader>
               <CardContent className="grid max-h-[38rem] gap-3 overflow-auto pr-1">
-                {snapshot.displays.map((display) => (
+                {snapshot.displays.map((display, index) => (
                   <MonitorCard
                     key={display.id_key}
                     display={display}
+                    shortcutLabel={indexedShortcutLabel(displayShortcutBase, index)}
+                    shortcutsEnabled={shortcutsEnabled}
                     busy={actionBusy}
                     hasPendingConfirmation={hasPendingConfirmation}
                     activeDisplayCount={activeDisplayCount}

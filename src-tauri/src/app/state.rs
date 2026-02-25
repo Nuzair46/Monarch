@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use monarch::{DisplayId, FileConfigStore, MonarchDisplayManager};
 use tauri::{Manager, WindowEvent};
 
-use crate::app::{commands, events, startup};
+use crate::app::{commands, events, shortcuts, startup};
 use crate::backend::SystemDisplayBackend;
 
 pub type MonarchManager = MonarchDisplayManager<SystemDisplayBackend, FileConfigStore>;
@@ -28,6 +28,7 @@ pub fn run_app() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let backend = SystemDisplayBackend::new().map_err(|err| err.to_string())?;
             let store = FileConfigStore::default();
@@ -59,6 +60,9 @@ pub fn run_app() {
 
             if let Err(err) = startup::sync_start_with_windows(startup_enabled) {
                 eprintln!("Monarch startup task sync failed: {err}");
+            }
+            if let Err(err) = shortcuts::sync_global_shortcuts(&app.handle()) {
+                eprintln!("Monarch global shortcut sync failed: {err}");
             }
 
             events::build_tray(&app.handle()).map_err(|err| err.to_string())?;

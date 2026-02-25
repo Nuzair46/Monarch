@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::backend::DisplayBackend;
-use crate::model::{AppConfig, AppSettings, DisplayId, DisplayInfo, Layout, Profile};
+use crate::model::{
+    AppConfig, AppSettings, DisplayId, DisplayInfo, Layout, Profile,
+    DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE, DEFAULT_PROFILE_SHORTCUT_BASE,
+};
 use crate::store::ConfigStore;
 use crate::ManagerError;
 
@@ -49,6 +52,30 @@ where
 {
     pub fn new(backend: B, store: S) -> Result<Self, ManagerError> {
         let mut config = store.load()?;
+        let mut should_persist = false;
+        if config
+            .settings
+            .profile_shortcut_base
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            config.settings.profile_shortcut_base = Some(DEFAULT_PROFILE_SHORTCUT_BASE.to_string());
+            should_persist = true;
+        }
+        if config
+            .settings
+            .display_toggle_shortcut_base
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            config.settings.display_toggle_shortcut_base =
+                Some(DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE.to_string());
+            should_persist = true;
+        }
         let confirmation_timeout = Duration::from_secs(config.settings.revert_timeout_secs.max(1));
 
         if config.last_known_good_layout.is_none() || config.last_restorable_layout.is_none() {
@@ -59,6 +86,9 @@ where
             if config.last_restorable_layout.is_none() {
                 config.last_restorable_layout = Some(current_layout);
             }
+            should_persist = true;
+        }
+        if should_persist {
             store.save(&config)?;
         }
 
@@ -159,12 +189,16 @@ where
 
     pub fn toggle_display(&mut self, display_id: &DisplayId) -> Result<(), ManagerError> {
         let mut layout = self.backend.get_layout()?;
-        let index = layout.find_output_index(display_id).ok_or_else(|| {
-            ManagerError::NotFound(format!(
-                "display ({}, {})",
-                display_id.adapter_luid, display_id.target_id
-            ))
-        })?;
+        let resolved_display_id = resolve_display_id_for_layout_action(display_id, &layout)
+            .unwrap_or_else(|| display_id.clone());
+        let index = layout
+            .find_output_index(&resolved_display_id)
+            .ok_or_else(|| {
+                ManagerError::NotFound(format!(
+                    "display ({}, {})",
+                    display_id.adapter_luid, display_id.target_id
+                ))
+            })?;
 
         let currently_enabled = layout.outputs[index].enabled;
         if currently_enabled && layout.enabled_output_count() == 1 {
@@ -288,11 +322,59 @@ where
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .map(str::to_string);
+        let profile_shortcut_base = settings
+            .profile_shortcut_base
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| DEFAULT_PROFILE_SHORTCUT_BASE.to_string());
+        let display_toggle_shortcut_base = settings
+            .display_toggle_shortcut_base
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE.to_string());
+        if profile_shortcut_base.eq_ignore_ascii_case(&display_toggle_shortcut_base) {
+            return Err(ManagerError::Validation(
+                "profile and monitor shortcut bases must be different".to_string(),
+            ));
+        }
+        let profile_shortcuts = settings
+            .profile_shortcuts
+            .into_iter()
+            .filter_map(|(name, shortcut)| {
+                let name = name.trim();
+                let shortcut = shortcut.trim();
+                if name.is_empty() || shortcut.is_empty() {
+                    return None;
+                }
+                Some((name.to_string(), shortcut.to_string()))
+            })
+            .collect();
+        let display_toggle_shortcuts = settings
+            .display_toggle_shortcuts
+            .into_iter()
+            .filter_map(|(display_key, shortcut)| {
+                let display_key = display_key.trim();
+                let shortcut = shortcut.trim();
+                if display_key.is_empty() || shortcut.is_empty() {
+                    return None;
+                }
+                Some((display_key.to_string(), shortcut.to_string()))
+            })
+            .collect();
         self.confirmation_timeout = Duration::from_secs(revert_timeout_secs);
         self.config.settings = AppSettings {
             revert_timeout_secs,
             start_with_windows: settings.start_with_windows,
             startup_profile_name,
+            global_shortcuts_enabled: settings.global_shortcuts_enabled,
+            profile_shortcut_base: Some(profile_shortcut_base),
+            display_toggle_shortcut_base: Some(display_toggle_shortcut_base),
+            profile_shortcuts,
+            display_toggle_shortcuts,
         };
         self.persist_config()
     }
@@ -350,6 +432,37 @@ fn normalize_primary(layout: &mut Layout) {
             }
         }
     }
+}
+
+fn resolve_display_id_for_layout_action(
+    requested: &DisplayId,
+    layout: &Layout,
+) -> Option<DisplayId> {
+    if layout.find_output_index(requested).is_some() {
+        return Some(requested.clone());
+    }
+
+    if let Some(edid_hash) = requested.edid_hash {
+        let mut matches = layout
+            .outputs
+            .iter()
+            .filter(|output| output.display_id.edid_hash == Some(edid_hash));
+        let first = matches.next()?;
+        if matches.next().is_none() {
+            return Some(first.display_id.clone());
+        }
+    }
+
+    let mut matches = layout
+        .outputs
+        .iter()
+        .filter(|output| output.display_id.target_id == requested.target_id);
+    let first = matches.next()?;
+    if matches.next().is_none() {
+        return Some(first.display_id.clone());
+    }
+
+    None
 }
 
 fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
@@ -717,6 +830,26 @@ mod tests {
             .iter()
             .all(|output| output.display_id.adapter_luid == 9));
         assert!(!manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn toggle_display_remaps_stale_adapter_luid_by_target_id() {
+        let backend =
+            MockBackend::new(sample_displays_on_adapter(9), sample_layout_on_adapter(9)).unwrap();
+        let store = MemoryConfigStore::default();
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
+
+        manager
+            .toggle_display(&sample_display_id_on_adapter(1, 2))
+            .unwrap();
+
+        let layout = backend.current_layout().unwrap();
+        let output = layout
+            .outputs
+            .iter()
+            .find(|output| output.display_id == sample_display_id_on_adapter(9, 2))
+            .expect("expected remapped target");
+        assert!(!output.enabled);
     }
 
     #[test]

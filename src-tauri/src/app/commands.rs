@@ -12,7 +12,7 @@ use crate::app::events::{
     emit_confirmation, emit_state_changed, refresh_tray_menu, spawn_confirmation_watchdog,
     spawn_deferred_tray_refresh, ConfirmationEvent, ConfirmationRevertReason,
 };
-use crate::app::startup;
+use crate::app::{shortcuts, startup};
 use crate::app::state::{format_display_key, MonarchAppState};
 
 type CommandResult<T> = Result<T, String>;
@@ -159,6 +159,7 @@ pub async fn toggle_display<R: Runtime>(
             .unwrap_or_else(|| Duration::from_secs(10))
     };
 
+    let _ = shortcuts::sync_global_shortcuts(&app);
     refresh_tray_menu(&app);
     emit_state_changed(&app);
     emit_confirmation(
@@ -193,6 +194,7 @@ pub async fn apply_layout<R: Runtime>(
             .unwrap_or_else(|| Duration::from_secs(10))
     };
 
+    let _ = shortcuts::sync_global_shortcuts(&app);
     refresh_tray_menu(&app);
     emit_state_changed(&app);
     emit_confirmation(
@@ -221,6 +223,7 @@ pub async fn save_profile<R: Runtime>(
             .save_profile(name)
             .map_err(|err| err.to_string())?;
     }
+    let _ = shortcuts::sync_global_shortcuts(&app);
     refresh_tray_menu(&app);
     emit_state_changed(&app);
     Ok(())
@@ -243,6 +246,7 @@ pub async fn apply_profile<R: Runtime>(
             .map_err(|err| err.to_string())?;
         guard.manager.pending_confirmation_remaining()
     };
+    let _ = shortcuts::sync_global_shortcuts(&app);
     refresh_tray_menu(&app);
     emit_state_changed(&app);
     if let Some(timeout) = pending_timeout {
@@ -273,6 +277,7 @@ pub async fn delete_profile<R: Runtime>(
             .delete_profile(&name)
             .map_err(|err| err.to_string())?;
     }
+    let _ = shortcuts::sync_global_shortcuts(&app);
     refresh_tray_menu(&app);
     emit_state_changed(&app);
     Ok(())
@@ -293,6 +298,7 @@ pub async fn restore_last_layout<R: Runtime>(
             .restore_last_layout()
             .map_err(|err| err.to_string())?;
     }
+    let _ = shortcuts::sync_global_shortcuts(&app);
     refresh_tray_menu(&app);
     emit_state_changed(&app);
     Ok(())
@@ -380,9 +386,31 @@ pub async fn update_settings<R: Runtime>(
             .and_then(|mut guard| {
                 guard
                     .manager
-                    .update_settings(previous_settings)
+                    .update_settings(previous_settings.clone())
                     .map_err(|inner| inner.to_string())
             });
+
+        if let Err(rollback_err) = rollback_err {
+            return Err(format!(
+                "{err} (and failed to restore previous settings: {rollback_err})"
+            ));
+        }
+
+        return Err(err);
+    }
+    if let Err(err) = shortcuts::sync_global_shortcuts(&app) {
+        let rollback_err = state
+            .0
+            .lock()
+            .map_err(|_| "state mutex poisoned".to_string())
+            .and_then(|mut guard| {
+                guard
+                    .manager
+                    .update_settings(previous_settings.clone())
+                    .map_err(|inner| inner.to_string())
+            });
+        let _ = startup::sync_start_with_windows(previous_settings.start_with_windows);
+        let _ = shortcuts::sync_global_shortcuts(&app);
 
         if let Err(rollback_err) = rollback_err {
             return Err(format!(
