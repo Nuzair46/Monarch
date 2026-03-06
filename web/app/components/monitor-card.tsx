@@ -5,6 +5,7 @@ import type { DisplayInfo } from "@/types";
 
 type MonitorCardProps = {
   display: DisplayInfo;
+  monitorNumber: number;
   shortcutLabel: string | null;
   shortcutsEnabled: boolean;
   busy: boolean;
@@ -16,6 +17,7 @@ type MonitorCardProps = {
 
 export function MonitorCard({
   display,
+  monitorNumber,
   shortcutLabel,
   shortcutsEnabled,
   busy,
@@ -31,6 +33,9 @@ export function MonitorCard({
     <article className="rounded-xl border p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Monitor {monitorNumber}
+          </p>
           <h3 className="truncate text-sm font-semibold leading-none text-foreground">
             {display.friendly_name}
           </h3>

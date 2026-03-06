@@ -3,19 +3,18 @@
 use std::collections::HashMap;
 use std::mem::size_of;
 
-use monarch::{DisplayInfo, Layout, ManagerError, Position, Resolution};
+use monarch::{DisplayInfo, Layout, ManagerError, OutputConfig, Position, Resolution};
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
     DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
     DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+    DISPLAYCONFIG_ROTATION, DISPLAYCONFIG_ROTATION_ROTATE90, DISPLAYCONFIG_ROTATION_ROTATE270,
     QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS,
 };
 use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 
-use super::win32_types::{
-    luid_to_u64, make_display_id, output_from_display, RawTopologySnapshot, TopologySnapshot,
-};
+use super::win32_types::{luid_to_u64, make_display_id, RawTopologySnapshot, TopologySnapshot};
 
 const DISPLAYCONFIG_PATH_ACTIVE_FLAG: u32 = 0x0000_0001;
 // Query only active paths. The backend cache preserves the richer prior snapshot when needed
@@ -61,7 +60,7 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
             DISPLAYCONFIG_MODE_INFO_TYPE_TARGET.0 as u32,
         );
 
-        let (position, resolution) = mode_map
+        let (position, source_resolution) = mode_map
             .get(&source_key)
             .map(source_mode_position_and_resolution)
             .transpose()?
@@ -79,15 +78,25 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
             .transpose()?
             .unwrap_or(60_000);
 
+        let display_resolution =
+            effective_resolution_for_rotation(source_resolution.clone(), path.targetInfo.rotation);
+
         let display = DisplayInfo {
             id: display_id,
             friendly_name,
             is_active: true,
             is_primary: position.x == 0 && position.y == 0,
-            resolution: resolution.clone(),
+            resolution: display_resolution,
             refresh_rate_mhz,
         };
-        outputs.push(output_from_display(&display, position));
+        outputs.push(OutputConfig {
+            display_id: display.id.clone(),
+            enabled: true,
+            position,
+            resolution: source_resolution,
+            refresh_rate_mhz: display.refresh_rate_mhz,
+            primary: display.is_primary,
+        });
         displays.push(display);
     }
 
@@ -105,6 +114,20 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
         layout: Layout { outputs },
         displays,
     })
+}
+
+fn effective_resolution_for_rotation(
+    source_resolution: Resolution,
+    rotation: DISPLAYCONFIG_ROTATION,
+) -> Resolution {
+    if rotation == DISPLAYCONFIG_ROTATION_ROTATE90 || rotation == DISPLAYCONFIG_ROTATION_ROTATE270
+    {
+        return Resolution {
+            width: source_resolution.height,
+            height: source_resolution.width,
+        };
+    }
+    source_resolution
 }
 
 fn query_raw_active(
