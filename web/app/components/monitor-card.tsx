@@ -26,8 +26,12 @@ export function MonitorCard({
   onMakePrimaryRequest,
   onToggleRequest,
 }: MonitorCardProps) {
+  const isActive = display.is_active;
+  const isPrimary = display.is_primary;
   const actionLabel = display.is_active ? "Detach Display" : "Attach Display";
-  const disablingLastActiveDisplay = display.is_active && activeDisplayCount <= 1;
+  const toggleDisabled =
+    busy || hasPendingConfirmation || (isActive && activeDisplayCount <= 1);
+  const resolutionLabel = `${display.resolution.width} x ${display.resolution.height}`;
 
   return (
     <article className="rounded-xl border p-4">
@@ -40,7 +44,7 @@ export function MonitorCard({
             {display.friendly_name}
           </h3>
           <p className="text-sm text-muted-foreground">
-            {display.resolution.width} x {display.resolution.height} · {formatHz(display.refresh_rate_mhz)}
+            {resolutionLabel} · {formatHz(display.refresh_rate_mhz)}
           </p>
           {shortcutLabel ? (
             <p className="text-xs font-mono text-muted-foreground">
@@ -50,17 +54,17 @@ export function MonitorCard({
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <Badge variant={display.is_active ? "default" : "secondary"}>
-            {display.is_active ? "Active" : "Detached"}
+          <Badge variant={isActive ? "default" : "secondary"}>
+            {isActive ? "Active" : "Detached"}
           </Badge>
-          {display.is_primary ? (
+          {isPrimary ? (
             <Badge variant="outline">Primary</Badge>
           ) : null}
         </div>
       </div>
 
       <div className="mt-4 flex flex-wrap items-center justify-end gap-2 border-t pt-3">
-        {display.is_active && !display.is_primary ? (
+        {isActive && !isPrimary ? (
           <Button
             type="button"
             size="sm"
@@ -74,8 +78,8 @@ export function MonitorCard({
         <Button
           type="button"
           size="sm"
-          variant={display.is_active ? "destructive" : "default"}
-          disabled={busy || hasPendingConfirmation || disablingLastActiveDisplay}
+          variant={isActive ? "destructive" : "default"}
+          disabled={toggleDisabled}
           onClick={() => onToggleRequest(display)}
         >
           {actionLabel}

@@ -3,6 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import packageJson from "../package.json";
 
+import {
+  DEFAULT_MONITOR_SHORTCUT_BASE,
+  DEFAULT_PROFILE_SHORTCUT_BASE,
+} from "@/app/ui";
+
 import type {
   AppSettings,
   AppSnapshot,
@@ -95,6 +100,10 @@ function emitMockEvent<E extends keyof EventPayloadMap>(
   }
 }
 
+function emitMockStateChanged(): void {
+  emitMockEvent("monarch://state-changed", undefined);
+}
+
 function syncDisplaysFromLayout(): void {
   const activeOutputs = new Map(
     mockState.layout.outputs.map((output) => [output.display_key, output]),
@@ -145,6 +154,34 @@ function ensureMockLayoutValid(layout: Layout): void {
 
 function findProfile(name: string): Profile | undefined {
   return mockState.profiles.find((profile) => profile.name === name);
+}
+
+function trimmedStringOrNull(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function sanitizeShortcutMap(shortcuts: Record<string, string> | null | undefined): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(shortcuts ?? {}).flatMap(([rawKey, rawShortcut]) => {
+      const key = trimmedStringOrNull(rawKey);
+      const shortcut = trimmedStringOrNull(rawShortcut);
+      return key && shortcut ? [[key, shortcut]] : [];
+    }),
+  );
+}
+
+function replaceMockLayout(nextLayout: Layout): void {
+  const validatedLayout = cloneLayout(nextLayout);
+  ensureMockLayoutValid(validatedLayout);
+  mockRestorableLayout = cloneLayout(mockState.layout);
+  mockState.layout = validatedLayout;
+  syncDisplaysFromLayout();
+  emitMockStateChanged();
 }
 
 function buildMockSnapshot(): AppSnapshot {
@@ -225,8 +262,8 @@ function buildMockSnapshot(): AppSnapshot {
       start_with_windows: false,
       startup_profile_name: null,
       global_shortcuts_enabled: true,
-      profile_shortcut_base: "Ctrl+Shift",
-      display_toggle_shortcut_base: "Ctrl+Alt",
+      profile_shortcut_base: DEFAULT_PROFILE_SHORTCUT_BASE,
+      display_toggle_shortcut_base: DEFAULT_MONITOR_SHORTCUT_BASE,
       profile_shortcuts: {},
       display_toggle_shortcuts: {},
     },
@@ -243,14 +280,13 @@ export async function listenMonarchEvent<E extends keyof EventPayloadMap>(
   }
 
   const listener = handler as unknown as MockListener;
-  let listeners = mockListeners.get(eventName);
-  if (!listeners) {
-    listeners = new Set();
-    mockListeners.set(eventName, listeners);
-  }
+  const listeners = mockListeners.get(eventName) ?? new Set<MockListener>();
+  mockListeners.set(eventName, listeners);
+
   listeners.add(listener);
+
   return () => {
-    listeners?.delete(listener);
+    listeners.delete(listener);
   };
 }
 
@@ -364,27 +400,22 @@ export async function toggleDisplay(displayKey: string): Promise<void> {
     if (!output) {
       throw new Error(`Display not found: ${displayKey}`);
     }
-    mockRestorableLayout = cloneLayout(mockState.layout);
+
     output.enabled = !output.enabled;
-    ensureMockLayoutValid(nextLayout);
-    mockState.layout = nextLayout;
-    syncDisplaysFromLayout();
-    emitMockEvent("monarch://state-changed", undefined);
+    replaceMockLayout(nextLayout);
+
     return;
   }
+
   return invoke("toggle_display", { displayKey });
 }
 
 export async function applyLayout(layout: Layout): Promise<void> {
   if (useWebMock) {
-    const nextLayout = cloneLayout(layout);
-    ensureMockLayoutValid(nextLayout);
-    mockRestorableLayout = cloneLayout(mockState.layout);
-    mockState.layout = nextLayout;
-    syncDisplaysFromLayout();
-    emitMockEvent("monarch://state-changed", undefined);
+    replaceMockLayout(layout);
     return;
   }
+
   return invoke("apply_layout", { layout });
 }
 
@@ -394,23 +425,20 @@ export async function applyProfile(name: string): Promise<void> {
     if (!profile) {
       throw new Error(`Profile not found: ${name}`);
     }
-    mockRestorableLayout = cloneLayout(mockState.layout);
-    const nextLayout = cloneLayout(profile.layout);
-    ensureMockLayoutValid(nextLayout);
-    mockState.layout = nextLayout;
-    syncDisplaysFromLayout();
-    emitMockEvent("monarch://state-changed", undefined);
+    replaceMockLayout(profile.layout);
     return;
   }
+
   return invoke("apply_profile", { name });
 }
 
 export async function deleteProfile(name: string): Promise<void> {
   if (useWebMock) {
     mockState.profiles = mockState.profiles.filter((profile) => profile.name !== name);
-    emitMockEvent("monarch://state-changed", undefined);
+    emitMockStateChanged();
     return;
   }
+
   return invoke("delete_profile", { name });
 }
 
@@ -431,9 +459,10 @@ export async function saveProfile(name: string): Promise<void> {
       mockState.profiles.push(nextProfile);
       mockState.profiles.sort((a, b) => a.name.localeCompare(b.name));
     }
-    emitMockEvent("monarch://state-changed", undefined);
+    emitMockStateChanged();
     return;
   }
+
   return invoke("save_profile", { name });
 }
 
@@ -445,9 +474,10 @@ export async function restoreLastLayout(): Promise<void> {
     mockState.layout = nextLayout;
     mockRestorableLayout = current;
     syncDisplaysFromLayout();
-    emitMockEvent("monarch://state-changed", undefined);
+    emitMockStateChanged();
     return;
   }
+
   return invoke("restore_last_layout");
 }
 
@@ -455,9 +485,10 @@ export async function confirmCurrentLayout(): Promise<void> {
   if (useWebMock) {
     mockState.pending_confirmation = null;
     emitMockEvent("monarch://confirmation", { kind: "confirmed" });
-    emitMockEvent("monarch://state-changed", undefined);
+    emitMockStateChanged();
     return;
   }
+
   return invoke("confirm_current_layout");
 }
 
@@ -465,9 +496,10 @@ export async function rollbackPending(): Promise<void> {
   if (useWebMock) {
     mockState.pending_confirmation = null;
     emitMockEvent("monarch://confirmation", { kind: "reverted", reason: "manual" });
-    emitMockEvent("monarch://state-changed", undefined);
+    emitMockStateChanged();
     return;
   }
+
   return invoke("rollback_pending");
 }
 
@@ -477,39 +509,19 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
       ...settings,
       revert_timeout_secs: Math.max(1, Math.floor(settings.revert_timeout_secs)),
       start_with_windows: Boolean(settings.start_with_windows),
-      startup_profile_name:
-        typeof settings.startup_profile_name === "string" &&
-        settings.startup_profile_name.trim().length > 0
-          ? settings.startup_profile_name.trim()
-          : null,
+      startup_profile_name: trimmedStringOrNull(settings.startup_profile_name),
       global_shortcuts_enabled: settings.global_shortcuts_enabled !== false,
       profile_shortcut_base:
-        typeof settings.profile_shortcut_base === "string" &&
-        settings.profile_shortcut_base.trim().length > 0
-          ? settings.profile_shortcut_base.trim()
-          : "Ctrl+Shift",
+        trimmedStringOrNull(settings.profile_shortcut_base) ?? DEFAULT_PROFILE_SHORTCUT_BASE,
       display_toggle_shortcut_base:
-        typeof settings.display_toggle_shortcut_base === "string" &&
-        settings.display_toggle_shortcut_base.trim().length > 0
-          ? settings.display_toggle_shortcut_base.trim()
-          : "Ctrl+Alt",
-      profile_shortcuts: Object.fromEntries(
-        Object.entries(settings.profile_shortcuts ?? {}).flatMap(([name, shortcut]) => {
-          const nextName = String(name ?? "").trim();
-          const nextShortcut = String(shortcut ?? "").trim();
-          return nextName && nextShortcut ? [[nextName, nextShortcut]] : [];
-        }),
-      ),
-      display_toggle_shortcuts: Object.fromEntries(
-        Object.entries(settings.display_toggle_shortcuts ?? {}).flatMap(([displayKey, shortcut]) => {
-          const nextDisplayKey = String(displayKey ?? "").trim();
-          const nextShortcut = String(shortcut ?? "").trim();
-          return nextDisplayKey && nextShortcut ? [[nextDisplayKey, nextShortcut]] : [];
-        }),
-      ),
+        trimmedStringOrNull(settings.display_toggle_shortcut_base) ??
+        DEFAULT_MONITOR_SHORTCUT_BASE,
+      profile_shortcuts: sanitizeShortcutMap(settings.profile_shortcuts),
+      display_toggle_shortcuts: sanitizeShortcutMap(settings.display_toggle_shortcuts),
     };
-    emitMockEvent("monarch://state-changed", undefined);
+    emitMockStateChanged();
     return;
   }
+
   return invoke("update_settings", { settings });
 }

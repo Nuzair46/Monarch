@@ -12,6 +12,8 @@ import { formatMs } from "@/app/utils";
 import type { PendingDisplayToggle } from "@/app/ui";
 import type { PendingConfirmation } from "@/types";
 
+const noop = () => {};
+
 type PendingConfirmationDialogProps = {
   pendingConfirmation: PendingConfirmation | null;
   busy: boolean;
@@ -26,7 +28,7 @@ export function PendingConfirmationDialog({
   onRevert,
 }: PendingConfirmationDialogProps) {
   return (
-    <AlertDialog open={Boolean(pendingConfirmation)} onOpenChange={() => {}}>
+    <AlertDialog open={Boolean(pendingConfirmation)} onOpenChange={noop}>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Confirm layout change</AlertDialogTitle>
@@ -68,22 +70,25 @@ export function DisplayToggleDialog({
   onOpenChange,
   onConfirm,
 }: DisplayToggleDialogProps) {
+  const isActive = Boolean(pendingDisplayToggle?.currentlyActive);
+  const actionLabel = isActive ? "Detach Display" : "Attach Display";
+  const title = isActive ? "Detach display?" : "Attach display?";
+  const description = isActive
+    ? "will be removed from the active layout."
+    : "will be added back to the active layout.";
+
   return (
     <AlertDialog open={Boolean(pendingDisplayToggle)} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>
-            {pendingDisplayToggle?.currentlyActive ? "Detach display?" : "Attach display?"}
-          </AlertDialogTitle>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>
             {pendingDisplayToggle ? (
               <>
                 <span className="font-medium text-foreground">
                   {pendingDisplayToggle.friendlyName}
                 </span>{" "}
-                {pendingDisplayToggle.currentlyActive
-                  ? "will be removed from the active layout."
-                  : "will be added back to the active layout."}
+                {description}
               </>
             ) : null}
           </AlertDialogDescription>
@@ -91,11 +96,11 @@ export function DisplayToggleDialog({
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
           <AlertDialogAction
-            variant={pendingDisplayToggle?.currentlyActive ? "destructive" : "default"}
+            variant={isActive ? "destructive" : "default"}
             disabled={busy}
             onClick={onConfirm}
           >
-            {pendingDisplayToggle?.currentlyActive ? "Detach Display" : "Attach Display"}
+            {actionLabel}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

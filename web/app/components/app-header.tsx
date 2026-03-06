@@ -15,15 +15,13 @@ export function AppHeader() {
   return (
     <Card className="overflow-hidden">
       <CardHeader className="gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-3">
-          <div className="space-y-2">
-            <CardTitle className="tracking-widest text-primary">
-              MONARCH
-            </CardTitle>
-            <CardDescription className="max-w-3xl text-sm leading-relaxed sm:text-base">
-              Detach, restore, and switch monitor layouts without touching cables.
-            </CardDescription>
-          </div>
+        <div className="space-y-2">
+          <CardTitle className="tracking-widest text-primary">
+            MONARCH
+          </CardTitle>
+          <CardDescription className="max-w-3xl text-sm leading-relaxed sm:text-base">
+            Detach, restore, and switch monitor layouts without touching cables.
+          </CardDescription>
         </div>
 
         <div className="flex w-full flex-col gap-2 lg:w-auto lg:items-end">
