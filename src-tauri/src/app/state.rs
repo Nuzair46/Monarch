@@ -18,7 +18,13 @@ pub fn run_app() {
     let _single_instance_guard = match crate::app::single_instance::try_acquire() {
         Ok(Some(guard)) => guard,
         Ok(None) => {
-            eprintln!("Monarch is already running.");
+            if let Some(profile_name) = startup::requested_profile_name() {
+                if let Err(err) = crate::app::ipc::send_apply_profile_request(&profile_name) {
+                    eprintln!("Monarch is already running and IPC profile apply failed: {err}");
+                }
+            } else {
+                eprintln!("Monarch is already running.");
+            }
             return;
         }
         Err(err) => {
@@ -35,7 +41,9 @@ pub fn run_app() {
             let mut manager =
                 MonarchDisplayManager::new(backend, store).map_err(|err| err.to_string())?;
             let should_start_hidden = startup::should_start_hidden();
-            let startup_profile_name = manager.settings().startup_profile_name.clone();
+            let requested_profile_name = startup::requested_profile_name();
+            let startup_profile_name = requested_profile_name
+                .or_else(|| manager.settings().startup_profile_name.clone());
 
             if let Some(profile_name) = startup_profile_name {
                 match manager.apply_profile(&profile_name) {
@@ -69,6 +77,7 @@ pub fn run_app() {
             events::refresh_tray_menu(&app.handle());
             events::spawn_color_state_watchdog(app.handle().clone());
             events::spawn_topology_state_watchdog(app.handle().clone());
+            crate::app::ipc::spawn_listener(app.handle().clone());
 
             if let Some(window) = app.get_webview_window("main") {
                 if should_start_hidden {
