@@ -73,6 +73,7 @@ export function MainTab({
                   <MonitorCard
                     key={display.id_key}
                     display={display}
+                    monitorNumber={index + 1}
                     shortcutLabel={indexedShortcutLabel(displayShortcutBase, index)}
                     shortcutsEnabled={shortcutsEnabled}
                     busy={actionBusy}
