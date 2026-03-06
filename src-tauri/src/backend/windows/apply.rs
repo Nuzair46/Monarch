@@ -13,16 +13,22 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, SetDisplayConfig,
     DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
-    DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
     SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND,
     SDC_USE_SUPPLIED_DISPLAY_CONFIG,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+    COINIT_APARTMENTTHREADED,
+};
 use windows::Win32::UI::ColorSystem::{
     GetDeviceGammaRamp, SetDeviceGammaRamp, WcsGetCalibrationManagementState,
     WcsSetCalibrationManagementState,
 };
+use windows::Win32::UI::Shell::{DesktopWallpaper, IDesktopWallpaper};
 
 use super::win32_types::{luid_to_u64, TopologySnapshot};
 
@@ -38,6 +44,7 @@ pub fn apply_layout_against_snapshot(
 ) -> Result<TopologySnapshot, ManagerError> {
     desired.ensure_valid()?;
     let saved_gamma_ramps = capture_active_gamma_ramps(snapshot);
+    let saved_wallpapers = capture_active_wallpapers(snapshot);
 
     let desired_outputs = desired_output_index(desired);
     let mut next_paths: Vec<DISPLAYCONFIG_PATH_INFO> = snapshot.raw.paths.clone();
@@ -94,6 +101,7 @@ pub fn apply_layout_against_snapshot(
     let next_snapshot = super::enumerate::query_active_topology()?;
     best_effort_reload_color_calibration();
     best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
+    best_effort_restore_wallpapers(&next_snapshot, &saved_wallpapers);
     Ok(next_snapshot)
 }
 
@@ -285,6 +293,39 @@ fn capture_active_gamma_ramps(snapshot: &TopologySnapshot) -> HashMap<(u64, u32)
     ramps
 }
 
+fn capture_active_wallpapers(snapshot: &TopologySnapshot) -> HashMap<(u64, u32), String> {
+    let Some(session) = create_desktop_wallpaper_session() else {
+        return HashMap::new();
+    };
+    let mut wallpapers = HashMap::new();
+
+    for path in &snapshot.raw.paths {
+        if path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG == 0 {
+            continue;
+        }
+
+        let key = (
+            luid_to_u64(
+                path.targetInfo.adapterId.HighPart,
+                path.targetInfo.adapterId.LowPart,
+            ),
+            path.targetInfo.id,
+        );
+
+        let Some(monitor_device_path) = target_monitor_device_path(path) else {
+            continue;
+        };
+        let Some(wallpaper_path) =
+            get_wallpaper_for_monitor(&session.desktop_wallpaper, &monitor_device_path)
+        else {
+            continue;
+        };
+        wallpapers.insert(key, wallpaper_path);
+    }
+
+    wallpapers
+}
+
 fn best_effort_restore_gamma_ramps(
     snapshot: &TopologySnapshot,
     ramps: &HashMap<(u64, u32), GammaRampWords>,
@@ -309,6 +350,45 @@ fn best_effort_restore_gamma_ramps(
             continue;
         };
         let _ = set_gamma_ramp_for_device(&device_name, ramp);
+    }
+}
+
+fn best_effort_restore_wallpapers(
+    snapshot: &TopologySnapshot,
+    wallpapers: &HashMap<(u64, u32), String>,
+) {
+    if wallpapers.is_empty() {
+        return;
+    }
+
+    let Some(session) = create_desktop_wallpaper_session() else {
+        return;
+    };
+
+    for path in &snapshot.raw.paths {
+        if path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG == 0 {
+            continue;
+        }
+
+        let key = (
+            luid_to_u64(
+                path.targetInfo.adapterId.HighPart,
+                path.targetInfo.adapterId.LowPart,
+            ),
+            path.targetInfo.id,
+        );
+        let Some(wallpaper_path) = wallpapers.get(&key) else {
+            continue;
+        };
+        let Some(monitor_device_path) = target_monitor_device_path(path) else {
+            continue;
+        };
+
+        let _ = set_wallpaper_for_monitor(
+            &session.desktop_wallpaper,
+            &monitor_device_path,
+            wallpaper_path,
+        );
     }
 }
 
@@ -420,6 +500,25 @@ fn source_gdi_device_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     }
 }
 
+fn target_monitor_device_path(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
+    unsafe {
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+        target.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+            size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+            adapterId: path.targetInfo.adapterId,
+            id: path.targetInfo.id,
+        };
+
+        let status = DisplayConfigGetDeviceInfo(&mut target.header);
+        if status != 0 {
+            return None;
+        }
+
+        Some(wide_array_to_string(&target.monitorDevicePath))
+    }
+}
+
 pub(super) fn target_advanced_color_enabled(path: &DISPLAYCONFIG_PATH_INFO) -> Option<bool> {
     unsafe {
         let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default();
@@ -492,4 +591,67 @@ fn to_wide_null(value: &str) -> Vec<u16> {
 fn wide_array_to_string(wide: &[u16]) -> String {
     let len = wide.iter().position(|ch| *ch == 0).unwrap_or(wide.len());
     String::from_utf16_lossy(&wide[..len])
+}
+
+struct DesktopWallpaperSession {
+    desktop_wallpaper: IDesktopWallpaper,
+    should_uninitialize: bool,
+}
+
+impl Drop for DesktopWallpaperSession {
+    fn drop(&mut self) {
+        if self.should_uninitialize {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
+fn create_desktop_wallpaper_session() -> Option<DesktopWallpaperSession> {
+    let mut should_uninitialize = false;
+    unsafe {
+        if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() {
+            should_uninitialize = true;
+        }
+
+        let desktop_wallpaper: IDesktopWallpaper =
+            CoCreateInstance(&DesktopWallpaper, None, CLSCTX_ALL).ok()?;
+        Some(DesktopWallpaperSession {
+            desktop_wallpaper,
+            should_uninitialize,
+        })
+    }
+}
+
+fn get_wallpaper_for_monitor(
+    desktop_wallpaper: &IDesktopWallpaper,
+    monitor_device_path: &str,
+) -> Option<String> {
+    let monitor_wide = to_wide_null(monitor_device_path);
+    let wallpaper = unsafe {
+        desktop_wallpaper
+            .GetWallpaper(PCWSTR(monitor_wide.as_ptr()))
+            .ok()?
+    };
+
+    let wallpaper_path = unsafe { wallpaper.to_string().ok() };
+    unsafe {
+        CoTaskMemFree(Some(wallpaper.0.cast()));
+    }
+    wallpaper_path
+}
+
+fn set_wallpaper_for_monitor(
+    desktop_wallpaper: &IDesktopWallpaper,
+    monitor_device_path: &str,
+    wallpaper_path: &str,
+) -> bool {
+    let monitor_wide = to_wide_null(monitor_device_path);
+    let wallpaper_wide = to_wide_null(wallpaper_path);
+    unsafe {
+        desktop_wallpaper
+            .SetWallpaper(PCWSTR(monitor_wide.as_ptr()), PCWSTR(wallpaper_wide.as_ptr()))
+            .is_ok()
+    }
 }
