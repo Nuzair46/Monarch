@@ -270,7 +270,7 @@ where
         let mut current_layout = self.backend.get_layout()?;
         normalize_primary(&mut current_layout);
         target_layout = remap_layout_display_ids(&target_layout, &current_layout);
-        ensure_all_outputs_resolve(&target_layout, &current_layout)?;
+        ensure_any_enabled_output_resolves(&target_layout, &current_layout)?;
 
         if current_layout == target_layout {
             return Ok(());
@@ -304,7 +304,7 @@ where
         normalize_primary(&mut remapped_target_layout);
         let remapped_target_layout =
             remap_layout_display_ids(&remapped_target_layout, &current_layout);
-        ensure_all_outputs_resolve(&remapped_target_layout, &current_layout)?;
+        ensure_any_enabled_output_resolves(&remapped_target_layout, &current_layout)?;
         self.backend.apply_layout(remapped_target_layout.clone())?;
         self.pending_confirmation = None;
         self.config.last_restorable_layout = Some(current_layout);
@@ -536,27 +536,24 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
     remapped
 }
 
-fn ensure_all_outputs_resolve(desired: &Layout, current: &Layout) -> Result<(), ManagerError> {
+fn ensure_any_enabled_output_resolves(
+    desired: &Layout,
+    current: &Layout,
+) -> Result<(), ManagerError> {
     let current_ids: HashSet<&DisplayId> = current
         .outputs
         .iter()
         .map(|output| &output.display_id)
         .collect();
 
-    let unresolved = desired
+    let any_enabled_resolved = desired
         .outputs
         .iter()
-        .find(|output| !current_ids.contains(&output.display_id));
+        .any(|output| output.enabled && current_ids.contains(&output.display_id));
 
-    if let Some(output) = unresolved {
+    if !any_enabled_resolved {
         return Err(ManagerError::Validation(format!(
-            "profile/layout references an unknown display (target_id={}, edid_hash={}). re-save the profile on this system",
-            output.display_id.target_id,
-            output
-                .display_id
-                .edid_hash
-                .map(|value| format!("{value:016x}"))
-                .unwrap_or_else(|| "none".to_string())
+            "profile/layout does not match any currently-known enabled display on this system"
         )));
     }
 

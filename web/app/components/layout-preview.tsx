@@ -3,12 +3,23 @@ import { useMemo } from "react";
 import { cn } from "@/lib/utils";
 import type { AppSnapshot } from "@/types";
 
+function previewOutputs(snapshot: AppSnapshot | null) {
+  if (!snapshot) {
+    return [];
+  }
+
+  const knownDisplayKeys = new Set(snapshot.displays.map((display) => display.id_key));
+  return snapshot.layout.outputs.filter(
+    (output) => output.enabled || knownDisplayKeys.has(output.display_key),
+  );
+}
+
 function layoutBounds(snapshot: AppSnapshot | null) {
-  if (!snapshot || snapshot.layout.outputs.length === 0) {
+  const outputs = previewOutputs(snapshot);
+  if (!snapshot || outputs.length === 0) {
     return null;
   }
 
-  const outputs = snapshot.layout.outputs;
   const displayByKey = new Map(snapshot.displays.map((display) => [display.id_key, display]));
   const outputWidth = (output: AppSnapshot["layout"]["outputs"][number]) =>
     displayByKey.get(output.display_key)?.is_active
@@ -28,6 +39,7 @@ function layoutBounds(snapshot: AppSnapshot | null) {
 
 export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
   const bounds = useMemo(() => layoutBounds(snapshot), [snapshot]);
+  const outputs = useMemo(() => previewOutputs(snapshot), [snapshot]);
   const monitorNumberByDisplayKey = useMemo(
     () =>
       new Map(
@@ -58,7 +70,7 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
           height: `${Math.max(180, bounds.height * scale + 24)}px`,
         }}
       >
-        {snapshot.layout.outputs.map((output) => {
+        {outputs.map((output) => {
           const display = snapshot.displays.find((d) => d.id_key === output.display_key);
           const monitorNumber = monitorNumberByDisplayKey.get(output.display_key);
           const active = output.enabled;

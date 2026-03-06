@@ -15,7 +15,7 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
     DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-    SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE,
+    SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND,
     SDC_USE_SUPPLIED_DISPLAY_CONFIG,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
@@ -94,6 +94,41 @@ pub fn apply_layout_against_snapshot(
     best_effort_reload_color_calibration();
     best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
     Ok(next_snapshot)
+}
+
+pub(super) fn force_topology_extend() -> Result<(), ManagerError> {
+    let set_display_status = unsafe {
+        SetDisplayConfig(
+            None,
+            None,
+            SDC_APPLY | SDC_TOPOLOGY_EXTEND | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE,
+        )
+    };
+    if set_display_status == 0 {
+        return Ok(());
+    }
+
+    // Some driver stacks reject direct topology-extend through SetDisplayConfig during
+    // early-login / post-reboot states. Win+P still succeeds there, so fall back to the same
+    // shell path via DisplaySwitch.
+    let display_switch_status = Command::new("DisplaySwitch.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .arg("/extend")
+        .status()
+        .map_err(|err| {
+            ManagerError::Backend(format!(
+                "SetDisplayConfig (topology extend) failed: {set_display_status}; DisplaySwitch /extend launch failed: {err}"
+            ))
+        })?;
+
+    if !display_switch_status.success() {
+        return Err(ManagerError::Backend(format!(
+            "SetDisplayConfig (topology extend) failed: {set_display_status}; DisplaySwitch /extend failed with exit code {:?}",
+            display_switch_status.code()
+        )));
+    }
+
+    Ok(())
 }
 
 pub(super) fn reapply_color_calibration_for_active_with_cached_sdr(
