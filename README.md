@@ -52,6 +52,27 @@ It uses Windows display topology APIs (`DisplayConfig`) to change which outputs 
 4. Click `Attach` later to bring the display back
 5. Use `Save Current Layout` in `Profiles` to store common setups
 
+## Command-Line Profile Switch (Automation)
+
+You can launch Monarch and ask it to apply a specific profile immediately:
+
+```powershell
+monarch-desktop.exe -profile "ProfileName"
+```
+
+Also supported:
+
+```powershell
+monarch-desktop.exe --profile "ProfileName"
+monarch-desktop.exe --profile="ProfileName"
+```
+
+Notes:
+
+- Useful for tools like Playnite scripts (before/after game launch)
+- If Monarch is already running, the new command forwards the profile request to the running instance
+- CLI profile argument takes precedence over the configured launch profile in Settings
+
 ## Safety Features
 
 - Confirmation timer after layout changes

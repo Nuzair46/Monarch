@@ -13,6 +13,14 @@ mod imp {
         std::env::args_os().any(|arg| arg == START_HIDDEN_ARG)
     }
 
+    pub fn requested_profile_name() -> Option<String> {
+        super::parse_profile_name_from_args(
+            std::env::args_os()
+                .skip(1)
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        )
+    }
+
     pub fn sync_start_with_windows(enabled: bool) -> Result<(), String> {
         if enabled {
             create_run_key_entry()
@@ -110,9 +118,88 @@ mod imp {
         false
     }
 
+    pub fn requested_profile_name() -> Option<String> {
+        super::parse_profile_name_from_args(std::env::args().skip(1))
+    }
+
     pub fn sync_start_with_windows(_enabled: bool) -> Result<(), String> {
         Ok(())
     }
 }
 
-pub use imp::{should_start_hidden, sync_start_with_windows};
+pub use imp::{requested_profile_name, should_start_hidden, sync_start_with_windows};
+
+fn parse_profile_name_from_args<I>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let trimmed = arg.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if is_profile_flag(trimmed) {
+            let next = args.next()?;
+            let profile_name = next.trim();
+            if profile_name.is_empty() {
+                return None;
+            }
+            return Some(profile_name.to_string());
+        }
+
+        if let Some(profile_name) = parse_profile_equals_flag(trimmed) {
+            return Some(profile_name);
+        }
+    }
+
+    None
+}
+
+fn is_profile_flag(value: &str) -> bool {
+    value.eq_ignore_ascii_case("-profile")
+        || value.eq_ignore_ascii_case("--profile")
+        || value.eq_ignore_ascii_case("/profile")
+}
+
+fn parse_profile_equals_flag(value: &str) -> Option<String> {
+    if !value.to_ascii_lowercase().starts_with("--profile=")
+        && !value.to_ascii_lowercase().starts_with("-profile=")
+        && !value.to_ascii_lowercase().starts_with("/profile=")
+    {
+        return None;
+    }
+    let (_, profile_name) = value.split_once('=')?;
+    let profile_name = profile_name.trim();
+    if profile_name.is_empty() {
+        return None;
+    }
+    Some(profile_name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_profile_name_from_args;
+
+    #[test]
+    fn parses_profile_from_short_flag() {
+        let args = vec!["-profile".to_string(), "Game Mode".to_string()];
+        assert_eq!(
+            parse_profile_name_from_args(args),
+            Some("Game Mode".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_profile_from_long_equals_flag() {
+        let args = vec!["--profile=Work".to_string()];
+        assert_eq!(parse_profile_name_from_args(args), Some("Work".to_string()));
+    }
+
+    #[test]
+    fn returns_none_when_profile_flag_missing_value() {
+        let args = vec!["-profile".to_string()];
+        assert_eq!(parse_profile_name_from_args(args), None);
+    }
+}

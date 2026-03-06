@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod events;
+pub mod ipc;
 pub mod shortcuts;
 pub mod single_instance;
 pub mod state;

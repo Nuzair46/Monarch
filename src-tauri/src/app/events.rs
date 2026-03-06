@@ -292,30 +292,41 @@ pub fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-pub fn handle_profile_apply_external_action<R: Runtime>(app: &AppHandle<R>, name: &str) {
+pub fn apply_profile_external_action_result<R: Runtime>(
+    app: &AppHandle<R>,
+    name: &str,
+) -> Result<(), String> {
     let state = app.state::<MonarchAppState>();
-    let lock = state.0.lock();
-    if let Ok(mut guard) = lock {
-        if guard.manager.apply_profile(name).is_ok() {
-            let pending_timeout = guard.manager.pending_confirmation_remaining();
-            let auto_confirmed =
-                pending_timeout.is_some() && guard.manager.confirm_current_layout().is_ok();
-            drop(guard);
-            let _ = shortcuts::sync_global_shortcuts(app);
-            refresh_tray_menu(app);
-            emit_state_changed(app);
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "state mutex poisoned".to_string())?;
+    guard
+        .manager
+        .apply_profile(name)
+        .map_err(|err| err.to_string())?;
+    let pending_timeout = guard.manager.pending_confirmation_remaining();
+    let auto_confirmed = pending_timeout.is_some() && guard.manager.confirm_current_layout().is_ok();
+    drop(guard);
 
-            if let Some(timeout) = pending_timeout.filter(|_| !auto_confirmed) {
-                emit_confirmation(
-                    app,
-                    ConfirmationEvent::Applied {
-                        timeout_ms: timeout.as_millis() as u64,
-                    },
-                );
-                spawn_confirmation_watchdog(app.clone(), timeout);
-            }
-        }
+    let _ = shortcuts::sync_global_shortcuts(app);
+    refresh_tray_menu(app);
+    emit_state_changed(app);
+
+    if let Some(timeout) = pending_timeout.filter(|_| !auto_confirmed) {
+        emit_confirmation(
+            app,
+            ConfirmationEvent::Applied {
+                timeout_ms: timeout.as_millis() as u64,
+            },
+        );
+        spawn_confirmation_watchdog(app.clone(), timeout);
     }
+    Ok(())
+}
+
+pub fn handle_profile_apply_external_action<R: Runtime>(app: &AppHandle<R>, name: &str) {
+    let _ = apply_profile_external_action_result(app, name);
 }
 
 pub fn handle_toggle_display_external_action<R: Runtime>(app: &AppHandle<R>, display_key: &str) {
