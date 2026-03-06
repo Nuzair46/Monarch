@@ -1,12 +1,14 @@
 import { Toaster as Sonner, type ToasterProps } from "sonner";
 
-const Toaster = ({ ...props }: ToasterProps) => (
+const toasterClassNames: NonNullable<ToasterProps["toastOptions"]>["classNames"] = {
+  toast: "bg-background text-foreground border-border",
+};
+
+const Toaster = (props: ToasterProps) => (
   <Sonner
     theme="dark"
     toastOptions={{
-      classNames: {
-        toast: "bg-background text-foreground border-border",
-      },
+      classNames: toasterClassNames,
     }}
     {...props}
   />

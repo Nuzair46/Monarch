@@ -75,48 +75,51 @@ export function ProfilesTab({
                   No profiles saved yet.
                 </div>
               ) : (
-                snapshot.profiles.map((profile, index) => (
-                  <div
-                    key={profile.name}
-                    className="grid gap-3 rounded-xl border p-4 sm:grid-cols-[1fr_auto] sm:items-center"
-                  >
-                    <div className="space-y-1">
-                      <h3 className="text-sm font-semibold leading-none text-foreground">
-                        {profile.name}
-                      </h3>
-                      <p className="text-sm text-muted-foreground">
-                        {profile.layout.outputs.filter((output) => output.enabled).length}{" "}
-                        active outputs
-                      </p>
-                      {indexedShortcutLabel(profileShortcutBase, index) ? (
-                        <p className="text-xs font-mono text-muted-foreground">
-                          {shortcutsEnabled ? "Shortcut" : "Shortcut (disabled)"}:{" "}
-                          {indexedShortcutLabel(profileShortcutBase, index)}
-                        </p>
-                      ) : null}
-                    </div>
+                snapshot.profiles.map((profile, index) => {
+                  const shortcutLabel = indexedShortcutLabel(profileShortcutBase, index);
 
-                    <div className="flex flex-wrap gap-2 sm:justify-end">
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={actionBusy || hasPendingConfirmation}
-                        onClick={() => onApplyProfile(profile.name)}
-                      >
-                        Apply
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="destructive"
-                        disabled={actionBusy || hasPendingConfirmation}
-                        onClick={() => onDeleteProfileRequest(profile.name)}
-                      >
-                        Delete
-                      </Button>
+                  return (
+                    <div
+                      key={profile.name}
+                      className="grid gap-3 rounded-xl border p-4 sm:grid-cols-[1fr_auto] sm:items-center"
+                    >
+                      <div className="space-y-1">
+                        <h3 className="text-sm font-semibold leading-none text-foreground">
+                          {profile.name}
+                        </h3>
+                        <p className="text-sm text-muted-foreground">
+                          {profile.layout.outputs.filter((output) => output.enabled).length}{" "}
+                          active outputs
+                        </p>
+                        {shortcutLabel ? (
+                          <p className="text-xs font-mono text-muted-foreground">
+                            {shortcutsEnabled ? "Shortcut" : "Shortcut (disabled)"}: {shortcutLabel}
+                          </p>
+                        ) : null}
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 sm:justify-end">
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={actionBusy || hasPendingConfirmation}
+                          onClick={() => onApplyProfile(profile.name)}
+                        >
+                          Apply
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="destructive"
+                          disabled={actionBusy || hasPendingConfirmation}
+                          onClick={() => onDeleteProfileRequest(profile.name)}
+                        >
+                          Delete
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </CardContent>
           </Card>

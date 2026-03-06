@@ -1,17 +1,27 @@
+export type Resolution = {
+  width: number;
+  height: number;
+};
+
+export type Position = {
+  x: number;
+  y: number;
+};
+
 export type DisplayInfo = {
   id_key: string;
   friendly_name: string;
   is_active: boolean;
   is_primary: boolean;
-  resolution: { width: number; height: number };
+  resolution: Resolution;
   refresh_rate_mhz: number;
 };
 
 export type OutputConfig = {
   display_key: string;
   enabled: boolean;
-  position: { x: number; y: number };
-  resolution: { width: number; height: number };
+  position: Position;
+  resolution: Resolution;
   refresh_rate_mhz: number;
   primary: boolean;
 };

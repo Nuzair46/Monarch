@@ -1,3 +1,5 @@
+const MAX_DIGIT_SHORTCUTS = 10;
+
 export function formatHz(mhz: number): string {
   return `${(mhz / 1000).toFixed(0)} Hz`;
 }
@@ -16,10 +18,10 @@ export function capitalizeToastError(message: string): string {
 }
 
 export function shortcutSlotKey(index: number): string | null {
-  if (index >= 0 && index <= 8) {
+  if (index >= 0 && index < MAX_DIGIT_SHORTCUTS - 1) {
     return String(index + 1);
   }
-  if (index === 9) {
+  if (index === MAX_DIGIT_SHORTCUTS - 1) {
     return "0";
   }
   return null;
@@ -33,9 +35,11 @@ export function indexedShortcutLabel(
   if (!trimmedBase) {
     return null;
   }
+
   const slot = shortcutSlotKey(index);
   if (!slot) {
     return null;
   }
+
   return `${trimmedBase}+${slot}`;
 }

@@ -27,6 +27,8 @@ import { cn } from "@/lib/utils";
 import { openExternalUrl, type ReleaseUpdateCheckResult } from "@/tauri";
 import type { AppSnapshot } from "@/types";
 
+const NO_STARTUP_PROFILE_VALUE = "__none__";
+
 function shortcutBaseFromKeyEvent(event: KeyboardEvent<HTMLInputElement>): string | null {
   const parts: string[] = [];
   if (event.ctrlKey) {
@@ -149,8 +151,8 @@ export function SettingsTab({
   onCheckForUpdates,
   releasesUrl,
 }: SettingsTabProps) {
-  const startupProfileSelectValue = startupProfileName ?? "__none__";
-  const hasSelectedProfileInList =
+  const startupProfileSelectValue = startupProfileName ?? NO_STARTUP_PROFILE_VALUE;
+  const selectedProfileExists =
     startupProfileName == null ||
     snapshot?.profiles.some((profile) => profile.name === startupProfileName);
 
@@ -214,15 +216,15 @@ export function SettingsTab({
                   <Select
                     value={startupProfileSelectValue}
                     onValueChange={(value) =>
-                      onStartupProfileNameChange(value === "__none__" ? null : value)
+                      onStartupProfileNameChange(value === NO_STARTUP_PROFILE_VALUE ? null : value)
                     }
                   >
                     <SelectTrigger className="w-full sm:w-80">
                       <SelectValue placeholder="Do not apply a profile" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__none__">Do not apply a profile</SelectItem>
-                      {!hasSelectedProfileInList && startupProfileName ? (
+                      <SelectItem value={NO_STARTUP_PROFILE_VALUE}>Do not apply a profile</SelectItem>
+                      {!selectedProfileExists && startupProfileName ? (
                         <SelectItem value={startupProfileName}>
                           {startupProfileName} (missing)
                         </SelectItem>

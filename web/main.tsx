@@ -1,15 +1,21 @@
-import React from "react";
+import { StrictMode } from "react";
 import ReactDOM from "react-dom/client";
 import { Toaster } from "@/components/ui/sonner";
 import App from "./App";
 import "./styles.css";
 
-document.documentElement.classList.add("dark");
-document.documentElement.style.colorScheme = "dark";
+const rootElement = document.getElementById("root");
+if (!rootElement) {
+  throw new Error("Root element not found");
+}
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
+const htmlElement = document.documentElement;
+htmlElement.classList.add("dark");
+htmlElement.style.colorScheme = "dark";
+
+ReactDOM.createRoot(rootElement).render(
+  <StrictMode>
     <App />
     <Toaster position="bottom-right" />
-  </React.StrictMode>,
+  </StrictMode>,
 );

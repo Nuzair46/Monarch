@@ -21,7 +21,7 @@ import {
   type PendingDisplayToggle,
   type View,
 } from "@/app/ui";
-import { capitalizeToastError, formatMs } from "@/app/utils";
+import { capitalizeToastError, formatMs, shortcutSlotKey } from "@/app/utils";
 
 import {
   applyLayout,
@@ -43,16 +43,6 @@ import type {
   AppSnapshot,
   DisplayInfo,
 } from "./types";
-
-function shortcutSlotKey(index: number): string | null {
-  if (index >= 0 && index <= 8) {
-    return String(index + 1);
-  }
-  if (index === 9) {
-    return "0";
-  }
-  return null;
-}
 
 function buildShortcutFromBase(base: string | null, slotIndex: number): string | null {
   const trimmedBase = (base ?? "").trim();
@@ -179,12 +169,11 @@ function App() {
     successNotice?: string,
     refresh = true,
   ): Promise<boolean> {
-    let succeeded = false;
     setBusy(true);
     setError(null);
+
     try {
       await action();
-      succeeded = true;
       if (successNotice) {
         toast.success(successNotice);
       }
@@ -193,16 +182,15 @@ function App() {
       setError(message);
       toast.error(capitalizeToastError(message));
       return false;
-    }
-    finally {
+    } finally {
       setBusy(false);
     }
 
-    if (succeeded && refresh) {
+    if (refresh) {
       void refreshState();
     }
 
-    return succeeded;
+    return true;
   }
 
   function runPendingLayoutDecision(
@@ -218,7 +206,7 @@ function App() {
       current ? { ...current, pending_confirmation: null } : current,
     );
 
-    void (async () => {
+    const run = async () => {
       try {
         await action();
       } catch (err) {
@@ -229,7 +217,9 @@ function App() {
         setPendingLayoutDecisionBusy(false);
         void refreshState();
       }
-    })();
+    };
+
+    void run();
   }
 
   useEffect(() => {
@@ -493,39 +483,38 @@ function App() {
     );
   }
 
-  function handleRevertTimeoutInputChange(value: string) {
+  function markSettingsDirty() {
     setError(null);
     settingsDirtyRef.current = true;
+  }
+
+  function handleRevertTimeoutInputChange(value: string) {
+    markSettingsDirty();
     setRevertTimeoutInput(value);
   }
 
   function handleStartWithWindowsChange(checked: boolean) {
-    setError(null);
-    settingsDirtyRef.current = true;
+    markSettingsDirty();
     setStartWithWindowsEnabled(checked);
   }
 
   function handleStartupProfileNameChange(value: string | null) {
-    setError(null);
-    settingsDirtyRef.current = true;
+    markSettingsDirty();
     setStartupProfileName(value);
   }
 
   function handleGlobalShortcutsEnabledChange(checked: boolean) {
-    setError(null);
-    settingsDirtyRef.current = true;
+    markSettingsDirty();
     setGlobalShortcutsEnabled(checked);
   }
 
   function handleProfileShortcutBaseChange(value: string) {
-    setError(null);
-    settingsDirtyRef.current = true;
+    markSettingsDirty();
     setProfileShortcutBaseInput(value);
   }
 
   function handleDisplayShortcutBaseChange(value: string) {
-    setError(null);
-    settingsDirtyRef.current = true;
+    markSettingsDirty();
     setDisplayShortcutBaseInput(value);
   }
 
