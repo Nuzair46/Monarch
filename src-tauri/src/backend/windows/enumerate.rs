@@ -1,6 +1,7 @@
 #![cfg(target_os = "windows")]
 
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::mem::size_of;
 
 use monarch::{DisplayInfo, Layout, ManagerError, OutputConfig, Position, Resolution};
@@ -43,9 +44,14 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
             path.targetInfo.adapterId.HighPart,
             path.targetInfo.adapterId.LowPart,
         );
-        let display_id = make_display_id(adapter_luid, path.targetInfo.id);
-        let friendly_name = target_name(path)
-            .unwrap_or_else(|_| format!("Display {}:{}", adapter_luid, path.targetInfo.id));
+        let (friendly_name, stable_edid_hash) = target_name_and_stable_hash(path)
+            .unwrap_or_else(|_| {
+                (
+                    format!("Display {}:{}", adapter_luid, path.targetInfo.id),
+                    None,
+                )
+            });
+        let display_id = make_display_id(adapter_luid, path.targetInfo.id, stable_edid_hash);
 
         let source_key = (
             path.sourceInfo.adapterId.HighPart,
@@ -186,7 +192,9 @@ fn query_raw_active(
     }
 }
 
-fn target_name(path: &DISPLAYCONFIG_PATH_INFO) -> Result<String, ManagerError> {
+fn target_name_and_stable_hash(
+    path: &DISPLAYCONFIG_PATH_INFO,
+) -> Result<(String, Option<u64>), ManagerError> {
     unsafe {
         let mut name = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
         name.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
@@ -204,8 +212,60 @@ fn target_name(path: &DISPLAYCONFIG_PATH_INFO) -> Result<String, ManagerError> {
             )));
         }
 
-        let wide = &name.monitorFriendlyDeviceName;
-        Ok(wide_array_to_string(wide))
+        let friendly_name = wide_array_to_string(&name.monitorFriendlyDeviceName);
+        let device_path = wide_array_to_string(&name.monitorDevicePath);
+        let stable_hash = stable_display_hash(
+            name.edidManufactureId,
+            name.edidProductCodeId,
+            name.connectorInstance,
+            &device_path,
+        );
+        Ok((friendly_name, Some(stable_hash)))
+    }
+}
+
+fn stable_display_hash(
+    edid_manufacture_id: u16,
+    edid_product_code_id: u16,
+    connector_instance: u32,
+    monitor_device_path: &str,
+) -> u64 {
+    let mut hasher = Fnv1a64::new();
+    hasher.update(&edid_manufacture_id.to_le_bytes());
+    hasher.update(&edid_product_code_id.to_le_bytes());
+    hasher.update(&connector_instance.to_le_bytes());
+
+    // Normalize for case-insensitive path handling in Windows identifiers.
+    let normalized_path = monitor_device_path.to_ascii_uppercase();
+    hasher.update(normalized_path.as_bytes());
+    hasher.finish()
+}
+
+struct Fnv1a64(u64);
+
+impl Fnv1a64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x0000_0100_0000_01B3;
+
+    fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= *byte as u64;
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+}
+
+impl Hasher for Fnv1a64 {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.update(bytes);
     }
 }
 

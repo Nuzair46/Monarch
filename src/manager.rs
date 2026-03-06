@@ -270,6 +270,7 @@ where
         let mut current_layout = self.backend.get_layout()?;
         normalize_primary(&mut current_layout);
         target_layout = remap_layout_display_ids(&target_layout, &current_layout);
+        ensure_all_outputs_resolve(&target_layout, &current_layout)?;
 
         if current_layout == target_layout {
             return Ok(());
@@ -303,6 +304,7 @@ where
         normalize_primary(&mut remapped_target_layout);
         let remapped_target_layout =
             remap_layout_display_ids(&remapped_target_layout, &current_layout);
+        ensure_all_outputs_resolve(&remapped_target_layout, &current_layout)?;
         self.backend.apply_layout(remapped_target_layout.clone())?;
         self.pending_confirmation = None;
         self.config.last_restorable_layout = Some(current_layout);
@@ -488,13 +490,8 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
         }
     }
 
-    let mut current_by_target: HashMap<u32, Vec<&crate::model::OutputConfig>> = HashMap::new();
     let mut current_by_edid: HashMap<u64, Vec<&crate::model::OutputConfig>> = HashMap::new();
     for output in &current.outputs {
-        current_by_target
-            .entry(output.display_id.target_id)
-            .or_default()
-            .push(output);
         if let Some(edid_hash) = output.display_id.edid_hash {
             current_by_edid.entry(edid_hash).or_default().push(output);
         }
@@ -518,19 +515,15 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
         }
 
         if replacement.is_none() {
-            let candidates = unique_unused_candidates(
-                current_by_target
-                    .get(&output.display_id.target_id)
-                    .cloned()
-                    .unwrap_or_default(),
+            // Deterministic fallback for legacy profiles created before EDID hashes were
+            // persisted: only remap by target id when there is exactly one unused candidate.
+            let candidates = unique_unused_candidates_by_target_id(
+                output.display_id.target_id,
+                &current.outputs,
                 &used,
             );
-
             if candidates.len() == 1 {
                 replacement = Some(candidates[0].display_id.clone());
-            } else if candidates.len() > 1 {
-                replacement =
-                    choose_best_candidate(output, &candidates).map(|c| c.display_id.clone());
             }
         }
 
@@ -543,6 +536,33 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
     remapped
 }
 
+fn ensure_all_outputs_resolve(desired: &Layout, current: &Layout) -> Result<(), ManagerError> {
+    let current_ids: HashSet<&DisplayId> = current
+        .outputs
+        .iter()
+        .map(|output| &output.display_id)
+        .collect();
+
+    let unresolved = desired
+        .outputs
+        .iter()
+        .find(|output| !current_ids.contains(&output.display_id));
+
+    if let Some(output) = unresolved {
+        return Err(ManagerError::Validation(format!(
+            "profile/layout references an unknown display (target_id={}, edid_hash={}). re-save the profile on this system",
+            output.display_id.target_id,
+            output
+                .display_id
+                .edid_hash
+                .map(|value| format!("{value:016x}"))
+                .unwrap_or_else(|| "none".to_string())
+        )));
+    }
+
+    Ok(())
+}
+
 fn unique_unused_candidates<'a>(
     candidates: Vec<&'a crate::model::OutputConfig>,
     used: &HashSet<DisplayId>,
@@ -553,35 +573,16 @@ fn unique_unused_candidates<'a>(
         .collect()
 }
 
-fn choose_best_candidate<'a>(
-    desired: &crate::model::OutputConfig,
-    candidates: &[&'a crate::model::OutputConfig],
-) -> Option<&'a crate::model::OutputConfig> {
-    let mut scored: Vec<(i32, &crate::model::OutputConfig)> = candidates
+fn unique_unused_candidates_by_target_id<'a>(
+    target_id: u32,
+    current_outputs: &'a [crate::model::OutputConfig],
+    used: &HashSet<DisplayId>,
+) -> Vec<&'a crate::model::OutputConfig> {
+    current_outputs
         .iter()
-        .copied()
-        .map(|candidate| {
-            let mut score = 0i32;
-            if desired.resolution == candidate.resolution {
-                score += 10;
-            }
-            if desired.primary == candidate.primary {
-                score += 5;
-            }
-            if desired.position == candidate.position {
-                score += 3;
-            }
-            (score, candidate)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
-
-    match scored.as_slice() {
-        [] => None,
-        [only] => Some(only.1),
-        [best, next, ..] if best.0 > next.0 => Some(best.1),
-        _ => None,
-    }
+        .filter(|candidate| candidate.display_id.target_id == target_id)
+        .filter(|candidate| !used.contains(&candidate.display_id))
+        .collect()
 }
 
 #[cfg(test)]

@@ -20,10 +20,10 @@ pub fn luid_to_u64(high_part: i32, low_part: u32) -> u64 {
     ((high_part as i64 as u64) << 32) | (low_part as u64)
 }
 
-pub fn make_display_id(adapter_luid: u64, target_id: u32) -> DisplayId {
+pub fn make_display_id(adapter_luid: u64, target_id: u32, edid_hash: Option<u64>) -> DisplayId {
     DisplayId {
         adapter_luid,
         target_id,
-        edid_hash: None,
+        edid_hash,
     }
 }
