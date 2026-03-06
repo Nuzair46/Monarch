@@ -1,6 +1,6 @@
 #![cfg(target_os = "windows")]
 
-use monarch::{DisplayId, DisplayInfo, Layout, OutputConfig, Position, Resolution};
+use monarch::{DisplayId, DisplayInfo, Layout};
 use windows::Win32::Devices::Display::{DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO};
 
 #[derive(Clone)]
@@ -25,19 +25,5 @@ pub fn make_display_id(adapter_luid: u64, target_id: u32) -> DisplayId {
         adapter_luid,
         target_id,
         edid_hash: None,
-    }
-}
-
-pub fn output_from_display(display: &DisplayInfo, position: Position) -> OutputConfig {
-    OutputConfig {
-        display_id: display.id.clone(),
-        enabled: display.is_active,
-        position,
-        resolution: Resolution {
-            width: display.resolution.width,
-            height: display.resolution.height,
-        },
-        refresh_rate_mhz: display.refresh_rate_mhz,
-        primary: display.is_primary,
     }
 }

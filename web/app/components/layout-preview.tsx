@@ -9,10 +9,19 @@ function layoutBounds(snapshot: AppSnapshot | null) {
   }
 
   const outputs = snapshot.layout.outputs;
+  const displayByKey = new Map(snapshot.displays.map((display) => [display.id_key, display]));
+  const outputWidth = (output: AppSnapshot["layout"]["outputs"][number]) =>
+    displayByKey.get(output.display_key)?.is_active
+      ? (displayByKey.get(output.display_key)?.resolution.width ?? output.resolution.width)
+      : output.resolution.width;
+  const outputHeight = (output: AppSnapshot["layout"]["outputs"][number]) =>
+    displayByKey.get(output.display_key)?.is_active
+      ? (displayByKey.get(output.display_key)?.resolution.height ?? output.resolution.height)
+      : output.resolution.height;
   const left = Math.min(...outputs.map((o) => o.position.x));
   const top = Math.min(...outputs.map((o) => o.position.y));
-  const right = Math.max(...outputs.map((o) => o.position.x + o.resolution.width));
-  const bottom = Math.max(...outputs.map((o) => o.position.y + o.resolution.height));
+  const right = Math.max(...outputs.map((o) => o.position.x + outputWidth(o)));
+  const bottom = Math.max(...outputs.map((o) => o.position.y + outputHeight(o)));
 
   return { left, top, right, bottom, width: right - left, height: bottom - top };
 }
@@ -53,6 +62,8 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
           const display = snapshot.displays.find((d) => d.id_key === output.display_key);
           const monitorNumber = monitorNumberByDisplayKey.get(output.display_key);
           const active = output.enabled;
+          const previewResolution =
+            display?.is_active && active ? display.resolution : output.resolution;
 
           return (
             <div
@@ -66,8 +77,8 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
               style={{
                 left: `${(output.position.x - bounds.left) * scale + 12}px`,
                 top: `${(output.position.y - bounds.top) * scale + 12}px`,
-                width: `${Math.max(42, output.resolution.width * scale)}px`,
-                height: `${Math.max(28, output.resolution.height * scale)}px`,
+                width: `${Math.max(42, previewResolution.width * scale)}px`,
+                height: `${Math.max(28, previewResolution.height * scale)}px`,
               }}
               title={
                 monitorNumber

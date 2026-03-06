@@ -1776,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "monarch"
-version = "1.0.0"
+version = "1.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "monarch-desktop"
-version = "1.0.0"
+version = "1.1.1"
 dependencies = [
  "monarch",
  "serde",
