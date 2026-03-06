@@ -55,6 +55,7 @@ pub fn apply_layout_against_snapshot(
 
         if enabled {
             apply_desired_source_mode(path, &mut next_modes, desired_output);
+            apply_desired_target_refresh(path, desired_output);
         }
     }
     reorder_paths_for_desired_priority(&mut next_paths, &desired_outputs);
@@ -358,6 +359,18 @@ fn apply_desired_source_mode(
         source.width = output.resolution.width;
         source.height = output.resolution.height;
     }
+}
+
+fn apply_desired_target_refresh(
+    path: &mut DISPLAYCONFIG_PATH_INFO,
+    desired_output: Option<&&monarch::OutputConfig>,
+) {
+    let Some(output) = desired_output.copied() else {
+        return;
+    };
+    let desired_refresh_mhz = output.refresh_rate_mhz.max(1);
+    path.targetInfo.refreshRate.Numerator = desired_refresh_mhz;
+    path.targetInfo.refreshRate.Denominator = 1000;
 }
 
 fn reorder_paths_for_desired_priority(
