@@ -28,7 +28,9 @@ use windows::Win32::UI::ColorSystem::{
     GetDeviceGammaRamp, SetDeviceGammaRamp, WcsGetCalibrationManagementState,
     WcsSetCalibrationManagementState,
 };
-use windows::Win32::UI::Shell::{DesktopWallpaper, IDesktopWallpaper};
+use windows::Win32::UI::Shell::{
+    DesktopWallpaper, IDesktopWallpaper, DESKTOP_WALLPAPER_POSITION,
+};
 
 use super::win32_types::{luid_to_u64, TopologySnapshot};
 
@@ -45,6 +47,7 @@ pub fn apply_layout_against_snapshot(
     desired.ensure_valid()?;
     let saved_gamma_ramps = capture_active_gamma_ramps(snapshot);
     let saved_wallpapers = capture_active_wallpapers(snapshot);
+    let saved_wallpaper_position = capture_wallpaper_position();
 
     let desired_outputs = desired_output_index(desired);
     let mut next_paths: Vec<DISPLAYCONFIG_PATH_INFO> = snapshot.raw.paths.clone();
@@ -102,6 +105,7 @@ pub fn apply_layout_against_snapshot(
     best_effort_reload_color_calibration();
     best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
     best_effort_restore_wallpapers(&next_snapshot, &saved_wallpapers);
+    best_effort_restore_wallpaper_position(saved_wallpaper_position);
     Ok(next_snapshot)
 }
 
@@ -390,6 +394,21 @@ fn best_effort_restore_wallpapers(
             wallpaper_path,
         );
     }
+}
+
+fn capture_wallpaper_position() -> Option<DESKTOP_WALLPAPER_POSITION> {
+    let session = create_desktop_wallpaper_session()?;
+    unsafe { session.desktop_wallpaper.GetPosition().ok() }
+}
+
+fn best_effort_restore_wallpaper_position(position: Option<DESKTOP_WALLPAPER_POSITION>) {
+    let Some(position) = position else {
+        return;
+    };
+    let Some(session) = create_desktop_wallpaper_session() else {
+        return;
+    };
+    let _ = unsafe { session.desktop_wallpaper.SetPosition(position) };
 }
 
 fn desired_output_index(desired: &Layout) -> HashMap<(u64, u32), &monarch::OutputConfig> {
