@@ -9,10 +9,10 @@ use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
     DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
-    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    DISPLAYCONFIG_ROTATION, DISPLAYCONFIG_ROTATION_ROTATE90, DISPLAYCONFIG_ROTATION_ROTATE270,
-    DISPLAYCONFIG_TOPOLOGY_ID, QDC_DATABASE_CURRENT, QDC_ONLY_ACTIVE_PATHS,
-    QUERY_DISPLAY_CONFIG_FLAGS,
+    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_ROTATION,
+    DISPLAYCONFIG_ROTATION_ROTATE270, DISPLAYCONFIG_ROTATION_ROTATE90,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, DISPLAYCONFIG_TOPOLOGY_ID, QDC_DATABASE_CURRENT,
+    QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS,
 };
 use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 
@@ -46,7 +46,10 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
         );
         let (friendly_name, stable_edid_hash) = match target_name_and_stable_hash(path) {
             Ok(value) => value,
-            Err(_) if is_active => (format!("Display {}:{}", adapter_luid, path.targetInfo.id), None),
+            Err(_) if is_active => (
+                format!("Display {}:{}", adapter_luid, path.targetInfo.id),
+                None,
+            ),
             Err(_) => continue,
         };
         let display_id = make_display_id(adapter_luid, path.targetInfo.id, stable_edid_hash);
@@ -253,8 +256,7 @@ fn effective_resolution_for_rotation(
     source_resolution: Resolution,
     rotation: DISPLAYCONFIG_ROTATION,
 ) -> Resolution {
-    if rotation == DISPLAYCONFIG_ROTATION_ROTATE90 || rotation == DISPLAYCONFIG_ROTATION_ROTATE270
-    {
+    if rotation == DISPLAYCONFIG_ROTATION_ROTATE90 || rotation == DISPLAYCONFIG_ROTATION_ROTATE270 {
         return Resolution {
             width: source_resolution.height,
             height: source_resolution.width,
@@ -263,7 +265,8 @@ fn effective_resolution_for_rotation(
     source_resolution
 }
 
-fn query_raw_active() -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), ManagerError> {
+fn query_raw_active(
+) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), ManagerError> {
     query_raw_with_flags(QDC_ONLY_ACTIVE_PATHS, false)
 }
 
@@ -280,8 +283,7 @@ fn query_raw_with_flags(
         let mut path_count = 0u32;
         let mut mode_count = 0u32;
 
-        let mut status =
-            GetDisplayConfigBufferSizes(query_flags, &mut path_count, &mut mode_count);
+        let mut status = GetDisplayConfigBufferSizes(query_flags, &mut path_count, &mut mode_count);
         if status.0 != 0 {
             return Err(ManagerError::Backend(format!(
                 "GetDisplayConfigBufferSizes failed: {}",

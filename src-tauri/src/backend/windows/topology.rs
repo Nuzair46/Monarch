@@ -6,15 +6,14 @@ use std::mem::{size_of, MaybeUninit};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::diagnostics;
 use monarch::{DisplayBackend, DisplayId, DisplayInfo, Layout, ManagerError};
 use serde::{Deserialize, Serialize};
-use crate::diagnostics;
 
 use super::apply::{
     active_color_state_signature, apply_layout_against_snapshot, capture_sdr_gamma_ramps,
     force_topology_extend, gamma_ramp_looks_identity,
-    reapply_color_calibration_for_active_with_cached_sdr,
-    GammaRampKey, GammaRampWords,
+    reapply_color_calibration_for_active_with_cached_sdr, GammaRampKey, GammaRampWords,
 };
 use super::enumerate::query_active_topology;
 use super::win32_types::{RawTopologySnapshot, TopologySnapshot};
@@ -278,9 +277,12 @@ impl DisplayBackend for WindowsDisplayBackend {
                     force_topology_extend()?;
                     std::thread::sleep(std::time::Duration::from_millis(700));
                     let recovered_snapshot = query_active_topology()?;
-                    let retry_layout =
-                        remap_layout_display_ids_for_snapshot(&working_layout, &recovered_snapshot.layout);
-                    let snapshot = apply_layout_against_snapshot(&retry_layout, &recovered_snapshot)?;
+                    let retry_layout = remap_layout_display_ids_for_snapshot(
+                        &working_layout,
+                        &recovered_snapshot.layout,
+                    );
+                    let snapshot =
+                        apply_layout_against_snapshot(&retry_layout, &recovered_snapshot)?;
                     (snapshot, retry_layout)
                 }
                 Err(error) => {
@@ -292,10 +294,7 @@ impl DisplayBackend for WindowsDisplayBackend {
             .cache
             .lock()
             .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
-        let merged_snapshot = merge_snapshot_for_cache(
-            Some(&base_snapshot),
-            next_snapshot.clone(),
-        );
+        let merged_snapshot = merge_snapshot_for_cache(Some(&base_snapshot), next_snapshot.clone());
         let raw_to_persist = merged_snapshot.raw.clone();
         cache.last_snapshot = Some(merged_snapshot);
         merge_sdr_gamma_cache(
@@ -416,16 +415,21 @@ fn remap_layout_display_ids_for_snapshot(desired: &Layout, current: &Layout) -> 
         let mut replacement = None;
 
         if let Some(edid_hash) = output.display_id.edid_hash {
-            let candidates =
-                unique_unused_candidates(current_by_edid.get(&edid_hash).cloned().unwrap_or_default(), &used);
+            let candidates = unique_unused_candidates(
+                current_by_edid.get(&edid_hash).cloned().unwrap_or_default(),
+                &used,
+            );
             if candidates.len() == 1 {
                 replacement = Some(candidates[0].display_id.clone());
             }
         }
 
         if replacement.is_none() {
-            let candidates =
-                unique_unused_candidates_by_target_id(output.display_id.target_id, &current.outputs, &used);
+            let candidates = unique_unused_candidates_by_target_id(
+                output.display_id.target_id,
+                &current.outputs,
+                &used,
+            );
             if candidates.len() == 1 {
                 replacement = Some(candidates[0].display_id.clone());
             }
@@ -487,7 +491,9 @@ fn persist_raw_snapshot(raw: &RawTopologySnapshot) -> Result<(), ManagerError> {
     let path = persisted_raw_snapshot_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
-            ManagerError::Backend(format!("failed to create persisted snapshot directory: {err}"))
+            ManagerError::Backend(format!(
+                "failed to create persisted snapshot directory: {err}"
+            ))
         })?;
     }
 
@@ -515,16 +521,16 @@ fn load_persisted_raw_snapshot() -> Option<RawTopologySnapshot> {
 
     let mut paths = Vec::with_capacity(payload.paths.len());
     for bytes in payload.paths {
-        paths.push(struct_from_bytes::<windows::Win32::Devices::Display::DISPLAYCONFIG_PATH_INFO>(
-            &bytes,
-        )?);
+        paths.push(struct_from_bytes::<
+            windows::Win32::Devices::Display::DISPLAYCONFIG_PATH_INFO,
+        >(&bytes)?);
     }
 
     let mut modes = Vec::with_capacity(payload.modes.len());
     for bytes in payload.modes {
-        modes.push(struct_from_bytes::<windows::Win32::Devices::Display::DISPLAYCONFIG_MODE_INFO>(
-            &bytes,
-        )?);
+        modes.push(struct_from_bytes::<
+            windows::Win32::Devices::Display::DISPLAYCONFIG_MODE_INFO,
+        >(&bytes)?);
     }
 
     Some(RawTopologySnapshot { paths, modes })
@@ -549,11 +555,7 @@ fn struct_from_bytes<T>(bytes: &[u8]) -> Option<T> {
 
     let mut value = MaybeUninit::<T>::uninit();
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            value.as_mut_ptr().cast::<u8>(),
-            bytes.len(),
-        );
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), value.as_mut_ptr().cast::<u8>(), bytes.len());
         Some(value.assume_init())
     }
 }

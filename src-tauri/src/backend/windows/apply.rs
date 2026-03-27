@@ -14,10 +14,10 @@ use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, SetDisplayConfig,
     DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
-    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
-    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND,
-    SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
+    DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION,
+    SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
 use windows::Win32::System::Com::{
@@ -28,9 +28,7 @@ use windows::Win32::UI::ColorSystem::{
     GetDeviceGammaRamp, SetDeviceGammaRamp, WcsGetCalibrationManagementState,
     WcsSetCalibrationManagementState,
 };
-use windows::Win32::UI::Shell::{
-    DesktopWallpaper, IDesktopWallpaper, DESKTOP_WALLPAPER_POSITION,
-};
+use windows::Win32::UI::Shell::{DesktopWallpaper, IDesktopWallpaper, DESKTOP_WALLPAPER_POSITION};
 
 use super::win32_types::{luid_to_u64, TopologySnapshot};
 
@@ -670,7 +668,10 @@ fn set_wallpaper_for_monitor(
     let wallpaper_wide = to_wide_null(wallpaper_path);
     unsafe {
         desktop_wallpaper
-            .SetWallpaper(PCWSTR(monitor_wide.as_ptr()), PCWSTR(wallpaper_wide.as_ptr()))
+            .SetWallpaper(
+                PCWSTR(monitor_wide.as_ptr()),
+                PCWSTR(wallpaper_wide.as_ptr()),
+            )
             .is_ok()
     }
 }

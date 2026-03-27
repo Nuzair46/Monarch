@@ -7,7 +7,6 @@ use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::app::commands::{snapshot_from_manager, AppSnapshotDto};
 use crate::app::shortcuts;
 use crate::app::state::MonarchAppState;
 use crate::diagnostics;
@@ -141,11 +140,10 @@ pub fn spawn_topology_state_watchdog<R: Runtime>(app: AppHandle<R>) {
         loop {
             std::thread::sleep(Duration::from_millis(1800));
 
-            let snapshot = match state_snapshot(&app) {
-                Ok(snapshot) => snapshot,
+            let signature = match topology_watch_signature(&app) {
+                Ok(signature) => signature,
                 Err(_) => continue,
             };
-            let signature = topology_signature(&snapshot);
 
             match &last_signature {
                 None => {
@@ -227,32 +225,43 @@ fn parse_color_state_signature(signature: &str) -> Option<HashMap<String, char>>
     Some(map)
 }
 
-fn topology_signature(snapshot: &AppSnapshotDto) -> String {
-    let mut displays = snapshot
-        .displays
+fn topology_watch_signature<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
+    let state = app.state::<MonarchAppState>();
+    let guard = state
+        .0
+        .lock()
+        .map_err(|_| "state mutex poisoned".to_string())?;
+    let displays = guard
+        .manager
+        .list_displays()
+        .map_err(|err| err.to_string())?;
+
+    let mut entries = displays
         .iter()
         .map(|display| {
             (
-                display.id_key.as_str(),
+                display.id.adapter_luid,
+                display.id.target_id,
+                display.id.edid_hash,
                 display.is_active,
                 display.is_primary,
-                display.resolution.width,
-                display.resolution.height,
-                display.refresh_rate_mhz,
             )
         })
         .collect::<Vec<_>>();
-    displays.sort_by(|a, b| a.0.cmp(b.0));
+    entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
     let mut parts = Vec::with_capacity(displays.len());
-    for (id_key, is_active, is_primary, width, height, refresh_rate_mhz) in displays {
+    for (adapter_luid, target_id, edid_hash, is_active, is_primary) in entries {
         parts.push(format!(
-            "{id_key}:{}:{}:{width}x{height}:{refresh_rate_mhz}",
+            "{adapter_luid:016x}:{target_id}:{}:{}:{}",
+            edid_hash
+                .map(|value| format!("{value:016x}"))
+                .unwrap_or_else(|| "-".to_string()),
             if is_active { 1 } else { 0 },
             if is_primary { 1 } else { 0 }
         ));
     }
-    parts.join("|")
+    Ok(parts.join("|"))
 }
 
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -270,14 +279,10 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             let app = app.clone();
             move |_tray, event| {
                 if let TrayIconEvent::DoubleClick { .. } = event {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(&app);
                 }
             }
-        })
-        ;
+        });
     if let Some(icon) = app.default_window_icon().cloned() {
         tray_builder = tray_builder.icon(icon);
     }
@@ -286,6 +291,13 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 }
 
 pub fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
+    let _refresh_guard = match tray_menu_refresh_lock().try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            diagnostics::log("tray_refresh:skip_busy");
+            return;
+        }
+    };
     let Some(tray) = app.tray_by_id("monarch-tray") else {
         return;
     };
@@ -295,6 +307,11 @@ pub fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn tray_action_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn tray_menu_refresh_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -335,7 +352,8 @@ pub fn apply_profile_external_action_result<R: Runtime>(
         .apply_profile(name)
         .map_err(|err| err.to_string())?;
     let pending_timeout = guard.manager.pending_confirmation_remaining();
-    let auto_confirmed = pending_timeout.is_some() && guard.manager.confirm_current_layout().is_ok();
+    let auto_confirmed =
+        pending_timeout.is_some() && guard.manager.confirm_current_layout().is_ok();
     drop(guard);
 
     let _ = shortcuts::sync_global_shortcuts(app);
@@ -351,7 +369,9 @@ pub fn apply_profile_external_action_result<R: Runtime>(
         );
         spawn_confirmation_watchdog(app.clone(), timeout);
     }
-    diagnostics::log(format!("apply_profile:done:{name}:auto_confirm={auto_confirmed}"));
+    diagnostics::log(format!(
+        "apply_profile:done:{name}:auto_confirm={auto_confirmed}"
+    ));
     Ok(())
 }
 
@@ -418,8 +438,49 @@ pub fn spawn_deferred_tray_refresh<R: Runtime>(app: AppHandle<R>, delay: Duratio
     });
 }
 
+#[derive(Clone)]
+struct TrayMenuDisplay {
+    id_key: String,
+    friendly_name: String,
+    is_active: bool,
+}
+
+#[derive(Clone)]
+struct TrayMenuSnapshot {
+    profiles: Vec<String>,
+    displays: Vec<TrayMenuDisplay>,
+}
+
+fn tray_menu_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<TrayMenuSnapshot, String> {
+    let state = app.state::<MonarchAppState>();
+    let guard = state
+        .0
+        .lock()
+        .map_err(|_| "state mutex poisoned".to_string())?;
+
+    let profiles = guard
+        .manager
+        .list_profiles()
+        .into_iter()
+        .map(|profile| profile.name)
+        .collect::<Vec<_>>();
+    let displays = guard
+        .manager
+        .list_displays()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|display| TrayMenuDisplay {
+            id_key: crate::app::state::format_display_key(&display.id),
+            friendly_name: display.friendly_name,
+            is_active: display.is_active,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(TrayMenuSnapshot { profiles, displays })
+}
+
 fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
-    let snapshot = state_snapshot(app).ok();
+    let snapshot = tray_menu_snapshot(app).ok();
 
     let mut profiles_menu = SubmenuBuilder::new(app, "Profiles");
     if let Some(snapshot) = &snapshot {
@@ -427,8 +488,7 @@ fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu:
             profiles_menu = profiles_menu.text("profiles.none", "(No Profiles)");
         } else {
             for profile in &snapshot.profiles {
-                profiles_menu =
-                    profiles_menu.text(format!("profile::{}", profile.name), profile.name.clone());
+                profiles_menu = profiles_menu.text(format!("profile::{profile}"), profile.clone());
             }
         }
     }
@@ -458,22 +518,18 @@ fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu:
     Ok(menu)
 }
 
-fn state_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<AppSnapshotDto, String> {
-    let state = app.state::<MonarchAppState>();
-    let guard = state
-        .0
-        .lock()
-        .map_err(|_| "state mutex poisoned".to_string())?;
-    snapshot_from_manager(&guard.manager).map_err(|err| err.to_string())
+pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
         "open_main" => {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }
         "quit_app" => {
             app.exit(0);
