@@ -11,20 +11,22 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
     DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_TARGET_DEVICE_NAME,
     DISPLAYCONFIG_ROTATION, DISPLAYCONFIG_ROTATION_ROTATE90, DISPLAYCONFIG_ROTATION_ROTATE270,
-    QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS,
+    DISPLAYCONFIG_TOPOLOGY_ID, QDC_DATABASE_CURRENT, QDC_ONLY_ACTIVE_PATHS,
+    QUERY_DISPLAY_CONFIG_FLAGS,
 };
 use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 
 use super::win32_types::{luid_to_u64, make_display_id, RawTopologySnapshot, TopologySnapshot};
 
 const DISPLAYCONFIG_PATH_ACTIVE_FLAG: u32 = 0x0000_0001;
-// Query only active paths. The backend cache preserves the richer prior snapshot when needed
-// so we can still re-attach a recently detached display without feeding QDC_ALL_PATHS output
-// directly into SetDisplayConfig (which can produce invalid path sets for our simple toggler).
-const QUERY_FLAGS: QUERY_DISPLAY_CONFIG_FLAGS = QDC_ONLY_ACTIVE_PATHS;
 
 pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
-    let (paths, modes) = query_raw_active()?;
+    let (active_paths, active_modes) = query_raw_active()?;
+    let (paths, modes) = enrich_with_missing_target_paths(
+        active_paths,
+        active_modes,
+        query_raw_database_current().ok(),
+    );
     let raw = RawTopologySnapshot {
         paths: paths.clone(),
         modes: modes.clone(),
@@ -36,21 +38,17 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
     let mode_map = modes_by_key(&modes);
 
     for path in &paths {
-        if path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG == 0 {
-            continue;
-        }
+        let is_active = path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG != 0;
 
         let adapter_luid = luid_to_u64(
             path.targetInfo.adapterId.HighPart,
             path.targetInfo.adapterId.LowPart,
         );
-        let (friendly_name, stable_edid_hash) = target_name_and_stable_hash(path)
-            .unwrap_or_else(|_| {
-                (
-                    format!("Display {}:{}", adapter_luid, path.targetInfo.id),
-                    None,
-                )
-            });
+        let (friendly_name, stable_edid_hash) = match target_name_and_stable_hash(path) {
+            Ok(value) => value,
+            Err(_) if is_active => (format!("Display {}:{}", adapter_luid, path.targetInfo.id), None),
+            Err(_) => continue,
+        };
         let display_id = make_display_id(adapter_luid, path.targetInfo.id, stable_edid_hash);
 
         let source_key = (
@@ -90,14 +88,14 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
         let display = DisplayInfo {
             id: display_id,
             friendly_name,
-            is_active: true,
-            is_primary: position.x == 0 && position.y == 0,
+            is_active,
+            is_primary: is_active && position.x == 0 && position.y == 0,
             resolution: display_resolution,
             refresh_rate_mhz,
         };
         outputs.push(OutputConfig {
             display_id: display.id.clone(),
-            enabled: true,
+            enabled: is_active,
             position,
             resolution: source_resolution,
             refresh_rate_mhz: display.refresh_rate_mhz,
@@ -122,6 +120,135 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
     })
 }
 
+fn enrich_with_missing_target_paths(
+    mut base_paths: Vec<DISPLAYCONFIG_PATH_INFO>,
+    mut base_modes: Vec<DISPLAYCONFIG_MODE_INFO>,
+    candidate_raw: Option<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>)>,
+) -> (Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>) {
+    let Some((candidate_paths, candidate_modes)) = candidate_raw else {
+        return (base_paths, base_modes);
+    };
+
+    let mut known_targets = base_paths
+        .iter()
+        .map(path_target_identity)
+        .collect::<std::collections::HashSet<_>>();
+    let mut mode_index = base_modes
+        .iter()
+        .enumerate()
+        .map(|(idx, mode)| (mode_identity(mode), idx as u32))
+        .collect::<HashMap<_, _>>();
+
+    for candidate in candidate_paths {
+        let target_identity = path_target_identity(&candidate);
+        if known_targets.contains(&target_identity) {
+            continue;
+        }
+        if target_name_and_stable_hash(&candidate).is_err() {
+            continue;
+        }
+        if !candidate_path_is_attachable(&candidate, &candidate_modes) {
+            continue;
+        }
+
+        let mut next_path = candidate;
+        unsafe {
+            let source_idx = next_path.sourceInfo.Anonymous.modeInfoIdx;
+            let remapped_source_idx = remap_mode_index(
+                source_idx,
+                &candidate_modes,
+                &mut base_modes,
+                &mut mode_index,
+            );
+            next_path.sourceInfo.Anonymous.modeInfoIdx = remapped_source_idx;
+        }
+        unsafe {
+            let target_idx = next_path.targetInfo.Anonymous.modeInfoIdx;
+            let remapped_target_idx = remap_mode_index(
+                target_idx,
+                &candidate_modes,
+                &mut base_modes,
+                &mut mode_index,
+            );
+            next_path.targetInfo.Anonymous.modeInfoIdx = remapped_target_idx;
+        }
+
+        base_paths.push(next_path);
+        known_targets.insert(target_identity);
+    }
+
+    (base_paths, base_modes)
+}
+
+fn candidate_path_is_attachable(
+    candidate: &DISPLAYCONFIG_PATH_INFO,
+    candidate_modes: &[DISPLAYCONFIG_MODE_INFO],
+) -> bool {
+    let source_idx = unsafe { candidate.sourceInfo.Anonymous.modeInfoIdx };
+    let Some(source_mode) = candidate_modes.get(source_idx as usize) else {
+        return false;
+    };
+    if source_mode.infoType.0 != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE.0 {
+        return false;
+    }
+    let Ok((_, resolution)) = source_mode_position_and_resolution(source_mode) else {
+        return false;
+    };
+    if resolution.width == 0 || resolution.height == 0 {
+        return false;
+    }
+
+    let target_idx = unsafe { candidate.targetInfo.Anonymous.modeInfoIdx };
+    if target_idx == u32::MAX {
+        return true;
+    }
+    let Some(target_mode) = candidate_modes.get(target_idx as usize) else {
+        return false;
+    };
+    target_mode.infoType.0 == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET.0
+}
+
+fn remap_mode_index(
+    original_idx: u32,
+    source_modes: &[DISPLAYCONFIG_MODE_INFO],
+    base_modes: &mut Vec<DISPLAYCONFIG_MODE_INFO>,
+    mode_index: &mut HashMap<(i32, u32, u32, u32), u32>,
+) -> u32 {
+    if original_idx == u32::MAX {
+        return u32::MAX;
+    }
+    let Some(mode) = source_modes.get(original_idx as usize) else {
+        return u32::MAX;
+    };
+
+    let identity = mode_identity(mode);
+    if let Some(existing) = mode_index.get(&identity) {
+        return *existing;
+    }
+
+    let next_idx = base_modes.len() as u32;
+    base_modes.push(mode.clone());
+    mode_index.insert(identity, next_idx);
+    next_idx
+}
+
+fn mode_identity(mode: &DISPLAYCONFIG_MODE_INFO) -> (i32, u32, u32, u32) {
+    (
+        mode.adapterId.HighPart,
+        mode.adapterId.LowPart,
+        mode.id,
+        mode.infoType.0 as u32,
+    )
+}
+
+fn path_target_identity(path: &DISPLAYCONFIG_PATH_INFO) -> (i32, u32, u32) {
+    (
+        path.targetInfo.adapterId.HighPart,
+        path.targetInfo.adapterId.LowPart,
+        path.targetInfo.id,
+    )
+}
+
 fn effective_resolution_for_rotation(
     source_resolution: Resolution,
     rotation: DISPLAYCONFIG_ROTATION,
@@ -136,13 +263,25 @@ fn effective_resolution_for_rotation(
     source_resolution
 }
 
-fn query_raw_active(
+fn query_raw_active() -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), ManagerError> {
+    query_raw_with_flags(QDC_ONLY_ACTIVE_PATHS, false)
+}
+
+fn query_raw_database_current(
+) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), ManagerError> {
+    query_raw_with_flags(QDC_DATABASE_CURRENT, true)
+}
+
+fn query_raw_with_flags(
+    query_flags: QUERY_DISPLAY_CONFIG_FLAGS,
+    needs_topology_id: bool,
 ) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), ManagerError> {
     unsafe {
         let mut path_count = 0u32;
         let mut mode_count = 0u32;
 
-        let mut status = GetDisplayConfigBufferSizes(QUERY_FLAGS, &mut path_count, &mut mode_count);
+        let mut status =
+            GetDisplayConfigBufferSizes(query_flags, &mut path_count, &mut mode_count);
         if status.0 != 0 {
             return Err(ManagerError::Backend(format!(
                 "GetDisplayConfigBufferSizes failed: {}",
@@ -156,19 +295,24 @@ fn query_raw_active(
 
             let mut out_paths = path_count;
             let mut out_modes = mode_count;
+            let mut topology_id = DISPLAYCONFIG_TOPOLOGY_ID(0);
 
             status = QueryDisplayConfig(
-                QUERY_FLAGS,
+                query_flags,
                 &mut out_paths,
                 paths.as_mut_ptr(),
                 &mut out_modes,
                 modes.as_mut_ptr(),
-                None,
+                if needs_topology_id {
+                    Some(&mut topology_id)
+                } else {
+                    None
+                },
             );
 
             if status == ERROR_INSUFFICIENT_BUFFER {
                 let retry =
-                    GetDisplayConfigBufferSizes(QUERY_FLAGS, &mut path_count, &mut mode_count);
+                    GetDisplayConfigBufferSizes(query_flags, &mut path_count, &mut mode_count);
                 if retry.0 != 0 {
                     return Err(ManagerError::Backend(format!(
                         "GetDisplayConfigBufferSizes retry failed: {}",

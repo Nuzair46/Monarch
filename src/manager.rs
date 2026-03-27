@@ -52,6 +52,8 @@ where
 {
     pub fn new(backend: B, store: S) -> Result<Self, ManagerError> {
         let mut config = store.load()?;
+        let current_layout = backend.get_layout()?;
+        let current_displays = backend.list_displays().unwrap_or_default();
         let mut should_persist = false;
         if config
             .settings
@@ -79,13 +81,22 @@ where
         let confirmation_timeout = Duration::from_secs(config.settings.revert_timeout_secs.max(1));
 
         if config.last_known_good_layout.is_none() || config.last_restorable_layout.is_none() {
-            let current_layout = backend.get_layout()?;
             if config.last_known_good_layout.is_none() {
                 config.last_known_good_layout = Some(current_layout.clone());
             }
             if config.last_restorable_layout.is_none() {
-                config.last_restorable_layout = Some(current_layout);
+                config.last_restorable_layout = Some(current_layout.clone());
             }
+            should_persist = true;
+        }
+        if sync_display_fingerprints(&mut config, &current_displays) {
+            should_persist = true;
+        }
+        if migrate_saved_layout_ids_with_fingerprints(
+            &mut config,
+            &current_layout,
+            &current_displays,
+        ) {
             should_persist = true;
         }
         if should_persist {
@@ -465,6 +476,165 @@ fn resolve_display_id_for_layout_action(
     }
 
     None
+}
+
+fn fingerprint_for_display(display_id: &DisplayId, friendly_name: Option<&str>) -> Option<String> {
+    let edid_hash = display_id.edid_hash?;
+    let normalized_name = friendly_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    Some(format!("{edid_hash:016x}:{normalized_name}"))
+}
+
+fn sync_display_fingerprints(config: &mut AppConfig, displays: &[DisplayInfo]) -> bool {
+    let mut changed = false;
+    for display in displays {
+        let fingerprint = fingerprint_for_display(&display.id, Some(&display.friendly_name));
+        let next = crate::model::DisplayFingerprint {
+            display_id: display.id.clone(),
+            friendly_name: display.friendly_name.clone(),
+            edid_fingerprint: fingerprint,
+        };
+
+        if let Some(existing) = config
+            .display_fingerprints
+            .iter_mut()
+            .find(|candidate| candidate.display_id == next.display_id)
+        {
+            if existing != &next {
+                *existing = next;
+                changed = true;
+            }
+        } else {
+            config.display_fingerprints.push(next);
+            changed = true;
+        }
+    }
+
+    if changed {
+        config
+            .display_fingerprints
+            .sort_by(|left, right| left.display_id.cmp(&right.display_id));
+    }
+    changed
+}
+
+fn migrate_saved_layout_ids_with_fingerprints(
+    config: &mut AppConfig,
+    current_layout: &Layout,
+    current_displays: &[DisplayInfo],
+) -> bool {
+    let mut changed = false;
+    let mut remap_profile_layout = |layout: &mut Layout| {
+        let remapped = remap_layout_display_ids_with_fingerprints(
+            layout,
+            current_layout,
+            current_displays,
+            &config.display_fingerprints,
+        );
+        if &remapped != layout {
+            *layout = remapped;
+            changed = true;
+        }
+    };
+
+    for profile in &mut config.profiles {
+        remap_profile_layout(&mut profile.layout);
+    }
+
+    if let Some(layout) = &mut config.last_known_good_layout {
+        remap_profile_layout(layout);
+    }
+    if let Some(layout) = &mut config.last_restorable_layout {
+        remap_profile_layout(layout);
+    }
+
+    changed
+}
+
+fn remap_layout_display_ids_with_fingerprints(
+    desired: &Layout,
+    current: &Layout,
+    current_displays: &[DisplayInfo],
+    fingerprints: &[crate::model::DisplayFingerprint],
+) -> Layout {
+    let mut remapped = remap_layout_display_ids(desired, current);
+    let current_ids: HashSet<DisplayId> = current
+        .outputs
+        .iter()
+        .map(|output| output.display_id.clone())
+        .collect();
+    let mut used: HashSet<DisplayId> = remapped
+        .outputs
+        .iter()
+        .filter(|output| current_ids.contains(&output.display_id))
+        .map(|output| output.display_id.clone())
+        .collect();
+
+    let friendly_by_id: HashMap<DisplayId, String> = current_displays
+        .iter()
+        .map(|display| (display.id.clone(), display.friendly_name.clone()))
+        .collect();
+    let fingerprint_by_id: HashMap<DisplayId, String> = fingerprints
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .edid_fingerprint
+                .as_ref()
+                .map(|fingerprint| (entry.display_id.clone(), fingerprint.clone()))
+        })
+        .collect();
+
+    let mut current_by_fingerprint: HashMap<String, Vec<DisplayId>> = HashMap::new();
+    for output in &current.outputs {
+        let fingerprint = fingerprint_by_id
+            .get(&output.display_id)
+            .cloned()
+            .or_else(|| {
+                let friendly = friendly_by_id.get(&output.display_id).map(String::as_str);
+                fingerprint_for_display(&output.display_id, friendly)
+            });
+        if let Some(fingerprint) = fingerprint {
+            current_by_fingerprint
+                .entry(fingerprint)
+                .or_default()
+                .push(output.display_id.clone());
+        }
+    }
+
+    for output in &mut remapped.outputs {
+        if current_ids.contains(&output.display_id) {
+            continue;
+        }
+
+        let fingerprint = fingerprint_by_id
+            .get(&output.display_id)
+            .cloned()
+            .or_else(|| fingerprint_for_display(&output.display_id, None));
+        let Some(fingerprint) = fingerprint else {
+            continue;
+        };
+        let Some(candidates) = current_by_fingerprint.get(&fingerprint) else {
+            continue;
+        };
+
+        let available: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| !used.contains(*candidate))
+            .cloned()
+            .collect();
+        if available.len() != 1 {
+            continue;
+        }
+
+        let replacement = available[0].clone();
+        used.insert(replacement.clone());
+        output.display_id = replacement;
+    }
+
+    remapped
 }
 
 fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {

@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 use monarch::{DisplayBackend, DisplayId, DisplayInfo, Layout, ManagerError};
 use serde::{Deserialize, Serialize};
+use crate::diagnostics;
 
 use super::apply::{
     active_color_state_signature, apply_layout_against_snapshot, capture_sdr_gamma_ramps,
@@ -239,6 +240,10 @@ impl DisplayBackend for WindowsDisplayBackend {
 
     fn apply_layout(&self, layout: Layout) -> Result<(), ManagerError> {
         layout.ensure_valid()?;
+        diagnostics::log(format!(
+            "topology_apply:start:outputs={}",
+            layout.outputs.len()
+        ));
 
         // Re-query the currently active topology so detach-only operations use a minimal base.
         // This reduces the chance of Windows re-touching unrelated outputs.
@@ -269,6 +274,7 @@ impl DisplayBackend for WindowsDisplayBackend {
             match apply_layout_against_snapshot(&working_layout, &base_snapshot) {
                 Ok(snapshot) => (snapshot, working_layout),
                 Err(error) if is_set_display_invalid_parameter(&error) => {
+                    diagnostics::log("topology_apply:retry:reason=setdisplayconfig_87");
                     force_topology_extend()?;
                     std::thread::sleep(std::time::Duration::from_millis(700));
                     let recovered_snapshot = query_active_topology()?;
@@ -277,7 +283,10 @@ impl DisplayBackend for WindowsDisplayBackend {
                     let snapshot = apply_layout_against_snapshot(&retry_layout, &recovered_snapshot)?;
                     (snapshot, retry_layout)
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    diagnostics::log(format!("topology_apply:error:{error}"));
+                    return Err(error);
+                }
             };
         let mut cache = self
             .cache
@@ -328,6 +337,7 @@ impl DisplayBackend for WindowsDisplayBackend {
         cache.last_displays = displays;
         drop(cache);
         best_effort_persist_raw_snapshot(&raw_to_persist);
+        diagnostics::log("topology_apply:done");
 
         Ok(())
     }
