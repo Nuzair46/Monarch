@@ -23,7 +23,9 @@ pub fn run_app() {
                     eprintln!("Monarch is already running and IPC profile apply failed: {err}");
                 }
             } else {
-                eprintln!("Monarch is already running.");
+                if let Err(err) = crate::app::ipc::send_show_main_window_request() {
+                    eprintln!("Monarch is already running and IPC show-main failed: {err}");
+                }
             }
             return;
         }
