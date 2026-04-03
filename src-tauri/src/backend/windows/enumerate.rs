@@ -27,17 +27,17 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
         active_modes,
         query_raw_database_current().ok(),
     );
-    let raw = RawTopologySnapshot {
-        paths: paths.clone(),
-        modes: modes.clone(),
-    };
+    snapshot_from_raw(RawTopologySnapshot { paths, modes })
+}
 
+pub(super) fn snapshot_from_raw(
+    raw: RawTopologySnapshot,
+) -> Result<TopologySnapshot, ManagerError> {
     let mut displays = Vec::<DisplayInfo>::new();
     let mut outputs = Vec::new();
+    let mode_map = modes_by_key(&raw.modes);
 
-    let mode_map = modes_by_key(&modes);
-
-    for path in &paths {
+    for path in &raw.paths {
         let is_active = path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG != 0;
 
         let adapter_luid = luid_to_u64(
@@ -107,11 +107,14 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
         displays.push(display);
     }
 
-    if !outputs.iter().any(|o| o.primary && o.enabled) {
-        if let Some(first) = outputs.iter_mut().find(|o| o.enabled) {
+    if !outputs
+        .iter()
+        .any(|output| output.primary && output.enabled)
+    {
+        if let Some(first) = outputs.iter_mut().find(|output| output.enabled) {
             first.primary = true;
         }
-        if let Some(first_display) = displays.iter_mut().find(|d| d.is_active) {
+        if let Some(first_display) = displays.iter_mut().find(|display| display.is_active) {
             first_display.is_primary = true;
         }
     }

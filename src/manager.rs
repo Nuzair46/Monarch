@@ -281,7 +281,7 @@ where
         let mut current_layout = self.backend.get_layout()?;
         normalize_primary(&mut current_layout);
         target_layout = remap_layout_display_ids(&target_layout, &current_layout);
-        ensure_any_enabled_output_resolves(&target_layout, &current_layout)?;
+        ensure_all_enabled_outputs_resolve(&target_layout, &current_layout)?;
 
         if current_layout == target_layout {
             return Ok(());
@@ -315,7 +315,7 @@ where
         normalize_primary(&mut remapped_target_layout);
         let remapped_target_layout =
             remap_layout_display_ids(&remapped_target_layout, &current_layout);
-        ensure_any_enabled_output_resolves(&remapped_target_layout, &current_layout)?;
+        ensure_all_enabled_outputs_resolve(&remapped_target_layout, &current_layout)?;
         self.backend.apply_layout(remapped_target_layout.clone())?;
         self.pending_confirmation = None;
         self.config.last_restorable_layout = Some(current_layout);
@@ -466,13 +466,15 @@ fn resolve_display_id_for_layout_action(
         }
     }
 
-    let mut matches = layout
-        .outputs
-        .iter()
-        .filter(|output| output.display_id.target_id == requested.target_id);
-    let first = matches.next()?;
-    if matches.next().is_none() {
-        return Some(first.display_id.clone());
+    if requested.edid_hash.is_none() {
+        let mut matches = layout
+            .outputs
+            .iter()
+            .filter(|output| output.display_id.target_id == requested.target_id);
+        let first = matches.next()?;
+        if matches.next().is_none() {
+            return Some(first.display_id.clone());
+        }
     }
 
     None
@@ -684,7 +686,7 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
             }
         }
 
-        if replacement.is_none() {
+        if replacement.is_none() && output.display_id.edid_hash.is_none() {
             // Deterministic fallback for legacy profiles created before EDID hashes were
             // persisted: only remap by target id when there is exactly one unused candidate.
             let candidates = unique_unused_candidates_by_target_id(
@@ -706,7 +708,7 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
     remapped
 }
 
-fn ensure_any_enabled_output_resolves(
+fn ensure_all_enabled_outputs_resolve(
     desired: &Layout,
     current: &Layout,
 ) -> Result<(), ManagerError> {
@@ -716,14 +718,19 @@ fn ensure_any_enabled_output_resolves(
         .map(|output| &output.display_id)
         .collect();
 
-    let any_enabled_resolved = desired
+    if let Some(unresolved) = desired
         .outputs
         .iter()
-        .any(|output| output.enabled && current_ids.contains(&output.display_id));
-
-    if !any_enabled_resolved {
+        .find(|output| output.enabled && !current_ids.contains(&output.display_id))
+    {
+        let edid_hash = unresolved
+            .display_id
+            .edid_hash
+            .map(|value| format!("{value:016x}"))
+            .unwrap_or_else(|| "-".to_string());
         return Err(ManagerError::Validation(format!(
-            "profile/layout does not match any currently-known enabled display on this system"
+            "profile/layout references an unknown display (target_id={}, edid_hash={edid_hash}). re-save the profile on this system",
+            unresolved.display_id.target_id
         )));
     }
 
@@ -998,6 +1005,110 @@ mod tests {
             .iter()
             .all(|output| output.display_id.adapter_luid == 9));
         assert!(!manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn apply_profile_does_not_fallback_to_wrong_target_when_edid_is_known() {
+        let display_one = DisplayInfo {
+            id: DisplayId {
+                adapter_luid: 9,
+                target_id: 1,
+                edid_hash: Some(1),
+            },
+            friendly_name: "Left".to_string(),
+            is_active: true,
+            is_primary: true,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            refresh_rate_mhz: 60_000,
+        };
+        let display_three_reusing_target = DisplayInfo {
+            id: DisplayId {
+                adapter_luid: 9,
+                target_id: 2,
+                edid_hash: Some(3),
+            },
+            friendly_name: "Ultrawide".to_string(),
+            is_active: false,
+            is_primary: false,
+            resolution: Resolution {
+                width: 3440,
+                height: 1440,
+            },
+            refresh_rate_mhz: 144_000,
+        };
+        let backend = MockBackend::new(
+            vec![display_one.clone(), display_three_reusing_target.clone()],
+            Layout {
+                outputs: vec![
+                    OutputConfig {
+                        display_id: display_one.id.clone(),
+                        enabled: true,
+                        position: Position { x: 0, y: 0 },
+                        resolution: display_one.resolution.clone(),
+                        refresh_rate_mhz: display_one.refresh_rate_mhz,
+                        primary: true,
+                    },
+                    OutputConfig {
+                        display_id: display_three_reusing_target.id.clone(),
+                        enabled: false,
+                        position: Position { x: 1920, y: 0 },
+                        resolution: display_three_reusing_target.resolution.clone(),
+                        refresh_rate_mhz: display_three_reusing_target.refresh_rate_mhz,
+                        primary: false,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "work".to_string(),
+                layout: Layout {
+                    outputs: vec![
+                        OutputConfig {
+                            display_id: DisplayId {
+                                adapter_luid: 1,
+                                target_id: 1,
+                                edid_hash: Some(1),
+                            },
+                            enabled: true,
+                            position: Position { x: 0, y: 0 },
+                            resolution: Resolution {
+                                width: 1920,
+                                height: 1080,
+                            },
+                            refresh_rate_mhz: 60_000,
+                            primary: true,
+                        },
+                        OutputConfig {
+                            display_id: DisplayId {
+                                adapter_luid: 1,
+                                target_id: 2,
+                                edid_hash: Some(2),
+                            },
+                            enabled: true,
+                            position: Position { x: 1920, y: 0 },
+                            resolution: Resolution {
+                                width: 1920,
+                                height: 1080,
+                            },
+                            refresh_rate_mhz: 60_000,
+                            primary: false,
+                        },
+                    ],
+                },
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
+
+        let err = manager.apply_profile("work").unwrap_err();
+        assert!(
+            matches!(err, ManagerError::Validation(message) if message.contains("unknown display"))
+        );
     }
 
     #[test]
