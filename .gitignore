@@ -24,6 +24,8 @@ dist
 .vite
 
 # Rust / Cargo
+.build-tools/
+.local-app/
 target
 src-tauri/target/
 

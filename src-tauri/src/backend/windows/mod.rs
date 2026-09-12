@@ -3,6 +3,8 @@ mod apply;
 #[cfg(target_os = "windows")]
 mod enumerate;
 #[cfg(target_os = "windows")]
+mod recovery;
+#[cfg(target_os = "windows")]
 mod topology;
 #[cfg(target_os = "windows")]
 mod win32_types;

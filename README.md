@@ -24,6 +24,31 @@
   <a href="#if-something-goes-wrong"><strong>Recovery</strong></a>
 </p>
 
+## Monitor restore fix in this fork
+
+Version `1.5.2-restore.1` fixes detached monitors being omitted from a restore:
+
+- Discover connected, disabled monitors at startup, even when the saved connection cache is incomplete.
+- Keep all saved connection paths through consecutive detach operations.
+- Reconnect the exact requested monitor set using fresh Windows path data when cached paths fail.
+- Verify the actual active monitor set before reporting success; restore the previous desktop on failure.
+- Retain pending rollback information if recovery or saving configuration fails.
+- Reopen the running app when its taskbar shortcut is launched after closing to the tray.
+
+Existing profile files remain compatible. The local built application is placed at
+`.local-app/Monarch.exe`; the original executable in Downloads is not replaced.
+
+Run automated checks with `cargo test` and `cargo test --manifest-path src-tauri/Cargo.toml --lib`.
+The desktop suite includes an ignored hardware test that temporarily disables two secondary
+monitors, simulates an incomplete cache after restart, and restores the original desktop:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib restores_two_detached_monitors_after_cold_start_with_incomplete_cache -- --ignored --nocapture --test-threads=1
+```
+
+Run that test explicitly on a local Windows desktop with at least three active monitors.
+It attempts to restore the original layout even if an assertion fails.
+
 ## What Is Monarch?
 
 Monarch lets you:

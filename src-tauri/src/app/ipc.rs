@@ -3,7 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::app::events;
 
@@ -14,6 +14,7 @@ const IPC_IO_TIMEOUT: Duration = Duration::from_secs(3);
 #[serde(tag = "type", rename_all = "snake_case")]
 enum IpcRequest {
     ApplyProfile { name: String },
+    ShowWindow,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -23,6 +24,16 @@ struct IpcResponse {
 }
 
 pub fn send_apply_profile_request(profile_name: &str) -> Result<(), String> {
+    send_request(IpcRequest::ApplyProfile {
+        name: profile_name.to_string(),
+    })
+}
+
+pub fn send_show_window_request() -> Result<(), String> {
+    send_request(IpcRequest::ShowWindow)
+}
+
+fn send_request(request: IpcRequest) -> Result<(), String> {
     let mut stream = TcpStream::connect(IPC_BIND_ADDR)
         .map_err(|err| format!("failed to connect to running Monarch instance: {err}"))?;
     stream
@@ -32,11 +43,8 @@ pub fn send_apply_profile_request(profile_name: &str) -> Result<(), String> {
         .set_write_timeout(Some(IPC_IO_TIMEOUT))
         .map_err(|err| format!("failed to set IPC write timeout: {err}"))?;
 
-    let request = IpcRequest::ApplyProfile {
-        name: profile_name.to_string(),
-    };
-    let mut request_bytes =
-        serde_json::to_vec(&request).map_err(|err| format!("failed to encode IPC request: {err}"))?;
+    let mut request_bytes = serde_json::to_vec(&request)
+        .map_err(|err| format!("failed to encode IPC request: {err}"))?;
     request_bytes.push(b'\n');
     stream
         .write_all(&request_bytes)
@@ -89,7 +97,10 @@ pub fn spawn_listener<R: Runtime>(app: AppHandle<R>) {
     });
 }
 
-fn handle_client_stream<R: Runtime>(app: &AppHandle<R>, mut stream: TcpStream) -> Result<(), String> {
+fn handle_client_stream<R: Runtime>(
+    app: &AppHandle<R>,
+    mut stream: TcpStream,
+) -> Result<(), String> {
     stream
         .set_read_timeout(Some(IPC_IO_TIMEOUT))
         .map_err(|err| format!("failed to set client read timeout: {err}"))?;
@@ -111,7 +122,10 @@ fn handle_client_stream<R: Runtime>(app: &AppHandle<R>, mut stream: TcpStream) -
         .map_err(|err| format!("invalid IPC request payload: {err}"))?;
 
     let result = match request {
-        IpcRequest::ApplyProfile { name } => events::apply_profile_external_action_result(app, &name),
+        IpcRequest::ApplyProfile { name } => {
+            events::apply_profile_external_action_result(app, &name)
+        }
+        IpcRequest::ShowWindow => show_main_window(app),
     };
 
     let response = match result {
@@ -132,4 +146,15 @@ fn handle_client_stream<R: Runtime>(app: &AppHandle<R>, mut stream: TcpStream) -
         .write_all(&response_bytes)
         .map_err(|err| format!("failed to send IPC response: {err}"))?;
     Ok(())
+}
+
+fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Monarch main window is not available".to_string())?;
+    window
+        .show()
+        .and_then(|_| window.unminimize())
+        .and_then(|_| window.set_focus())
+        .map_err(|err| format!("failed to show Monarch window: {err}"))
 }

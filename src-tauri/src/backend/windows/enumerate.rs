@@ -1,16 +1,17 @@
 #![cfg(target_os = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::mem::size_of;
 
 use monarch::{DisplayInfo, Layout, ManagerError, OutputConfig, Position, Resolution};
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
-    DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
-    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
-    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    DISPLAYCONFIG_ROTATION, DISPLAYCONFIG_ROTATION_ROTATE90, DISPLAYCONFIG_ROTATION_ROTATE270,
+    DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE,
+    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
+    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_ROTATION,
+    DISPLAYCONFIG_ROTATION_ROTATE270, DISPLAYCONFIG_ROTATION_ROTATE90,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, DISPLAYCONFIG_TARGET_PREFERRED_MODE, QDC_ALL_PATHS,
     QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS,
 };
 use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
@@ -18,13 +19,21 @@ use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use super::win32_types::{luid_to_u64, make_display_id, RawTopologySnapshot, TopologySnapshot};
 
 const DISPLAYCONFIG_PATH_ACTIVE_FLAG: u32 = 0x0000_0001;
-// Query only active paths. The backend cache preserves the richer prior snapshot when needed
-// so we can still re-attach a recently detached display without feeding QDC_ALL_PATHS output
-// directly into SetDisplayConfig (which can produce invalid path sets for our simple toggler).
-const QUERY_FLAGS: QUERY_DISPLAY_CONFIG_FLAGS = QDC_ONLY_ACTIVE_PATHS;
-
 pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
-    let (paths, modes) = query_raw_active()?;
+    query_topology(QDC_ONLY_ACTIVE_PATHS, false)
+}
+
+/// Includes connected but disabled targets, even after restarting with no cached topology.
+/// The raw paths contain alternative routes; recovery must select a valid subset before applying.
+pub fn query_connected_topology() -> Result<TopologySnapshot, ManagerError> {
+    query_topology(QDC_ALL_PATHS, true)
+}
+
+fn query_topology(
+    flags: QUERY_DISPLAY_CONFIG_FLAGS,
+    include_inactive: bool,
+) -> Result<TopologySnapshot, ManagerError> {
+    let (paths, modes) = query_raw(flags)?;
     let raw = RawTopologySnapshot {
         paths: paths.clone(),
         modes: modes.clone(),
@@ -34,9 +43,11 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
     let mut outputs = Vec::new();
 
     let mode_map = modes_by_key(&modes);
+    let mut seen = HashSet::new();
 
     for path in &paths {
-        if path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG == 0 {
+        let active = path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG != 0;
+        if !active && (!include_inactive || !path.targetInfo.targetAvailable.as_bool()) {
             continue;
         }
 
@@ -44,8 +55,12 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
             path.targetInfo.adapterId.HighPart,
             path.targetInfo.adapterId.LowPart,
         );
-        let (friendly_name, stable_edid_hash) = target_name_and_stable_hash(path)
-            .unwrap_or_else(|_| {
+        // QueryDisplayConfig lists active routes first, then alternative source/target pairs.
+        if !seen.insert((adapter_luid, path.targetInfo.id)) {
+            continue;
+        }
+        let (friendly_name, stable_edid_hash) =
+            target_name_and_stable_hash(path).unwrap_or_else(|_| {
                 (
                     format!("Display {}:{}", adapter_luid, path.targetInfo.id),
                     None,
@@ -68,6 +83,7 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
 
         let (position, source_resolution) = mode_map
             .get(&source_key)
+            .filter(|_| active)
             .map(source_mode_position_and_resolution)
             .transpose()?
             .unwrap_or((
@@ -84,26 +100,47 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
             .transpose()?
             .unwrap_or(60_000);
 
+        let source_resolution = if !active {
+            preferred_resolution(path).unwrap_or(Resolution {
+                width: 1920,
+                height: 1080,
+            })
+        } else {
+            source_resolution
+        };
         let display_resolution =
             effective_resolution_for_rotation(source_resolution.clone(), path.targetInfo.rotation);
 
         let display = DisplayInfo {
             id: display_id,
             friendly_name,
-            is_active: true,
-            is_primary: position.x == 0 && position.y == 0,
+            is_active: active,
+            is_primary: active && position.x == 0 && position.y == 0,
             resolution: display_resolution,
             refresh_rate_mhz,
         };
         outputs.push(OutputConfig {
             display_id: display.id.clone(),
-            enabled: true,
+            enabled: active,
             position,
             resolution: source_resolution,
             refresh_rate_mhz: display.refresh_rate_mhz,
             primary: display.is_primary,
         });
         displays.push(display);
+    }
+
+    // A newly discovered inactive target has no source mode. Give Attach a usable,
+    // non-overlapping default; a saved profile can still supply its original placement.
+    let mut next_x = outputs
+        .iter()
+        .filter(|o| o.enabled)
+        .map(|o| o.position.x + o.resolution.width as i32)
+        .max()
+        .unwrap_or(0);
+    for output in outputs.iter_mut().filter(|o| !o.enabled) {
+        output.position = Position { x: next_x, y: 0 };
+        next_x += output.resolution.width as i32;
     }
 
     if !outputs.iter().any(|o| o.primary && o.enabled) {
@@ -126,8 +163,7 @@ fn effective_resolution_for_rotation(
     source_resolution: Resolution,
     rotation: DISPLAYCONFIG_ROTATION,
 ) -> Resolution {
-    if rotation == DISPLAYCONFIG_ROTATION_ROTATE90 || rotation == DISPLAYCONFIG_ROTATION_ROTATE270
-    {
+    if rotation == DISPLAYCONFIG_ROTATION_ROTATE90 || rotation == DISPLAYCONFIG_ROTATION_ROTATE270 {
         return Resolution {
             width: source_resolution.height,
             height: source_resolution.width,
@@ -136,13 +172,14 @@ fn effective_resolution_for_rotation(
     source_resolution
 }
 
-fn query_raw_active(
+fn query_raw(
+    flags: QUERY_DISPLAY_CONFIG_FLAGS,
 ) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), ManagerError> {
     unsafe {
         let mut path_count = 0u32;
         let mut mode_count = 0u32;
 
-        let mut status = GetDisplayConfigBufferSizes(QUERY_FLAGS, &mut path_count, &mut mode_count);
+        let mut status = GetDisplayConfigBufferSizes(flags, &mut path_count, &mut mode_count);
         if status.0 != 0 {
             return Err(ManagerError::Backend(format!(
                 "GetDisplayConfigBufferSizes failed: {}",
@@ -158,7 +195,7 @@ fn query_raw_active(
             let mut out_modes = mode_count;
 
             status = QueryDisplayConfig(
-                QUERY_FLAGS,
+                flags,
                 &mut out_paths,
                 paths.as_mut_ptr(),
                 &mut out_modes,
@@ -167,8 +204,7 @@ fn query_raw_active(
             );
 
             if status == ERROR_INSUFFICIENT_BUFFER {
-                let retry =
-                    GetDisplayConfigBufferSizes(QUERY_FLAGS, &mut path_count, &mut mode_count);
+                let retry = GetDisplayConfigBufferSizes(flags, &mut path_count, &mut mode_count);
                 if retry.0 != 0 {
                     return Err(ManagerError::Backend(format!(
                         "GetDisplayConfigBufferSizes retry failed: {}",
@@ -190,6 +226,23 @@ fn query_raw_active(
             return Ok((paths, modes));
         }
     }
+}
+
+fn preferred_resolution(path: &DISPLAYCONFIG_PATH_INFO) -> Option<Resolution> {
+    let mut preferred = DISPLAYCONFIG_TARGET_PREFERRED_MODE::default();
+    preferred.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+        r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE,
+        size: size_of::<DISPLAYCONFIG_TARGET_PREFERRED_MODE>() as u32,
+        adapterId: path.targetInfo.adapterId,
+        id: path.targetInfo.id,
+    };
+    if unsafe { DisplayConfigGetDeviceInfo(&mut preferred.header) } != 0 {
+        return None;
+    }
+    Some(Resolution {
+        width: preferred.width,
+        height: preferred.height,
+    })
 }
 
 fn target_name_and_stable_hash(
