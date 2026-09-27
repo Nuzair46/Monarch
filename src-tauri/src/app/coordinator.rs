@@ -25,6 +25,7 @@ pub enum Operation {
     Confirm,
     Rollback,
     Settings(AppSettings),
+    ToggleCursor,
 }
 
 struct Request {
@@ -83,6 +84,7 @@ impl Controller {
 
     pub fn refresh(&self, invalidate: bool) {
         if invalidate {
+            super::cursor::suspend();
             self.invalidate.store(true, Ordering::Release);
         }
         self.refresh.store(true, Ordering::Release);
@@ -152,6 +154,12 @@ impl Controller {
             }
             // Recovery gets the worker before any ordinary queued operation.
             if let Some(token) = pending {
+                if manager
+                    .pending_confirmation_remaining()
+                    .is_some_and(|t| t.is_zero())
+                {
+                    super::cursor::suspend();
+                }
                 let result =
                     watchdog.poll(Instant::now(), || poll_confirmation(&mut manager, token));
                 let event = match result {
@@ -217,6 +225,16 @@ impl Controller {
         manager: &mut MonarchManager,
         operation: Operation,
     ) -> Result<(), String> {
+        if matches!(
+            &operation,
+            Operation::Toggle(..)
+                | Operation::ApplyLayout(..)
+                | Operation::ApplyProfile(..)
+                | Operation::Restore
+                | Operation::Rollback
+        ) {
+            super::cursor::suspend();
+        }
         let mut auto_confirm = false;
         let before = manager.pending_confirmation_started_at();
         let result = match operation {
@@ -261,6 +279,11 @@ impl Controller {
                 result
             }
             Operation::Settings(settings) => return self.settings(app, manager, settings),
+            Operation::ToggleCursor => {
+                let mut settings = manager.settings().clone();
+                settings.cursor_correction_enabled = !settings.cursor_correction_enabled;
+                return self.settings(app, manager, settings);
+            }
         }
         .map_err(|e| e.to_string());
         if result.is_ok() && auto_confirm && manager.has_pending_confirmation() {

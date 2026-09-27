@@ -25,11 +25,14 @@ import {
 import { TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { openExternalUrl, type ReleaseUpdateCheckResult } from "@/tauri";
-import type { AppSnapshot } from "@/types";
+import { CursorSetup } from "./cursor-setup";
+import type { AppSettings, AppSnapshot } from "@/types";
 
 const NO_STARTUP_PROFILE_VALUE = "__none__";
 
-function shortcutBaseFromKeyEvent(event: KeyboardEvent<HTMLInputElement>): string | null {
+function shortcutBaseFromKeyEvent(
+  event: KeyboardEvent<HTMLInputElement>,
+): string | null {
   const parts: string[] = [];
   if (event.ctrlKey) {
     parts.push("Ctrl");
@@ -71,7 +74,11 @@ function ShortcutBaseField({
     }
     event.preventDefault();
 
-    if (event.key === "Escape" || event.key === "Backspace" || event.key === "Delete") {
+    if (
+      event.key === "Escape" ||
+      event.key === "Backspace" ||
+      event.key === "Delete"
+    ) {
       onChange(defaultValue);
       return;
     }
@@ -101,6 +108,8 @@ function ShortcutBaseField({
 }
 
 type SettingsTabProps = {
+  busy: boolean;
+  onCursorSettingsSave: (settings: AppSettings) => Promise<boolean>;
   loading: boolean;
   snapshot: AppSnapshot | null;
   settingsDirty: boolean;
@@ -127,6 +136,8 @@ type SettingsTabProps = {
 };
 
 export function SettingsTab({
+  busy,
+  onCursorSettingsSave,
   loading,
   snapshot,
   settingsDirty,
@@ -151,7 +162,8 @@ export function SettingsTab({
   onCheckForUpdates,
   releasesUrl,
 }: SettingsTabProps) {
-  const startupProfileSelectValue = startupProfileName ?? NO_STARTUP_PROFILE_VALUE;
+  const startupProfileSelectValue =
+    startupProfileName ?? NO_STARTUP_PROFILE_VALUE;
   const selectedProfileExists =
     startupProfileName == null ||
     snapshot?.profiles.some((profile) => profile.name === startupProfileName);
@@ -160,6 +172,11 @@ export function SettingsTab({
     <TabsContent value="settings" className="mt-0">
       {!loading && snapshot ? (
         <main className="grid gap-4">
+          <CursorSetup
+            snapshot={snapshot}
+            busy={busy}
+            onSave={onCursorSettingsSave}
+          />
           <Card>
             <CardHeader className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
@@ -168,9 +185,7 @@ export function SettingsTab({
                   <Badge variant="outline">Unsaved changes</Badge>
                 ) : null}
               </div>
-              <CardDescription>
-                Configure Monarch.
-              </CardDescription>
+              <CardDescription>Configure Monarch.</CardDescription>
             </CardHeader>
             <CardContent>
               <form className="grid max-w-xl gap-4" onSubmit={onSettingsSubmit}>
@@ -184,7 +199,9 @@ export function SettingsTab({
                     pattern="[0-9]*"
                     autoComplete="off"
                     value={revertTimeoutInput}
-                    onChange={(event) => onRevertTimeoutInputChange(event.target.value)}
+                    onChange={(event) =>
+                      onRevertTimeoutInputChange(event.target.value)
+                    }
                     className="w-32"
                   />
                 </label>
@@ -193,7 +210,9 @@ export function SettingsTab({
                   <Checkbox
                     id="start-with-windows"
                     checked={startWithWindows}
-                    onCheckedChange={(checked) => onStartWithWindowsChange(checked === true)}
+                    onCheckedChange={(checked) =>
+                      onStartWithWindowsChange(checked === true)
+                    }
                     className="mt-0.5"
                   />
                   <label
@@ -204,7 +223,8 @@ export function SettingsTab({
                       Start with Windows (delayed and minimized)
                     </span>
                     <span className="text-muted-foreground">
-                      Launch Monarch about 10 seconds after sign-in, hidden to the tray.
+                      Launch Monarch about 10 seconds after sign-in, hidden to
+                      the tray.
                     </span>
                   </label>
                 </div>
@@ -216,14 +236,18 @@ export function SettingsTab({
                   <Select
                     value={startupProfileSelectValue}
                     onValueChange={(value) =>
-                      onStartupProfileNameChange(value === NO_STARTUP_PROFILE_VALUE ? null : value)
+                      onStartupProfileNameChange(
+                        value === NO_STARTUP_PROFILE_VALUE ? null : value,
+                      )
                     }
                   >
                     <SelectTrigger className="w-full sm:w-80">
                       <SelectValue placeholder="Do not apply a profile" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={NO_STARTUP_PROFILE_VALUE}>Do not apply a profile</SelectItem>
+                      <SelectItem value={NO_STARTUP_PROFILE_VALUE}>
+                        Do not apply a profile
+                      </SelectItem>
                       {!selectedProfileExists && startupProfileName ? (
                         <SelectItem value={startupProfileName}>
                           {startupProfileName} (missing)
@@ -247,15 +271,24 @@ export function SettingsTab({
                       Global Shortcuts
                     </span>
                     <p className="text-xs text-muted-foreground">
-                      Works even when Monarch is not focused. Set a modifier base (for example{" "}
-                      <span className="font-medium text-foreground">Ctrl+Alt</span>) and Monarch
-                      will append each item&apos;s shortcut ID (
-                      <span className="font-medium text-foreground">1-9</span>, then{" "}
-                      <span className="font-medium text-foreground">0</span> for the 10th item).
-                      Use modifier-style bases only (for example{" "}
-                      <span className="font-medium text-foreground">Ctrl+Alt</span>), not
-                      multi-key chords like{" "}
-                      <span className="font-medium text-foreground">Ctrl+M</span>.
+                      Works even when Monarch is not focused. Set a modifier
+                      base (for example{" "}
+                      <span className="font-medium text-foreground">
+                        Ctrl+Alt
+                      </span>
+                      ) and Monarch will append each item&apos;s shortcut ID (
+                      <span className="font-medium text-foreground">1-9</span>,
+                      then{" "}
+                      <span className="font-medium text-foreground">0</span> for
+                      the 10th item). Use modifier-style bases only (for example{" "}
+                      <span className="font-medium text-foreground">
+                        Ctrl+Alt
+                      </span>
+                      ), not multi-key chords like{" "}
+                      <span className="font-medium text-foreground">
+                        Ctrl+M
+                      </span>
+                      .
                     </p>
                   </div>
 
@@ -276,7 +309,8 @@ export function SettingsTab({
                         Enable global shortcuts
                       </span>
                       <span className="text-muted-foreground">
-                        When disabled, Monarch will not register any global hotkeys.
+                        When disabled, Monarch will not register any global
+                        hotkeys.
                       </span>
                     </label>
                   </div>
@@ -307,7 +341,9 @@ export function SettingsTab({
                 <p
                   className={cn(
                     "text-xs",
-                    settingsValidationMessage ? "text-destructive" : "text-muted-foreground",
+                    settingsValidationMessage
+                      ? "text-destructive"
+                      : "text-muted-foreground",
                   )}
                 >
                   {settingsValidationMessage ??
@@ -362,7 +398,11 @@ export function SettingsTab({
                       {updateCheckResult.latestTag}
                     </span>
                     <Badge
-                      variant={updateCheckResult.updateAvailable ? "default" : "secondary"}
+                      variant={
+                        updateCheckResult.updateAvailable
+                          ? "default"
+                          : "secondary"
+                      }
                     >
                       {updateCheckResult.updateAvailable
                         ? "Update available"

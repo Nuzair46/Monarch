@@ -10,11 +10,19 @@ function previewOutputs(snapshot: AppSnapshot | null) {
     return [];
   }
 
-  const knownDisplayKeys = new Set(snapshot.displays.map((display) => display.id_key));
+  const knownDisplayKeys = new Set(
+    snapshot.displays.map((display) => display.id_key),
+  );
   const outputs = snapshot.layout.outputs.filter(
     (output) => output.enabled || knownDisplayKeys.has(output.display_key),
   );
-  return outputs.filter((o,i)=>!o.enabled || !o.clone_group || outputs.findIndex((a)=>a.enabled && a.clone_group === o.clone_group)===i);
+  return outputs.filter(
+    (o, i) =>
+      !o.enabled ||
+      !o.clone_group ||
+      outputs.findIndex((a) => a.enabled && a.clone_group === o.clone_group) ===
+        i,
+  );
 }
 
 function getOutputResolution(
@@ -30,31 +38,55 @@ function layoutBounds(snapshot: AppSnapshot | null, outputs: LayoutOutput[]) {
     return null;
   }
 
-  const displayByKey = new Map(snapshot.displays.map((display) => [display.id_key, display]));
+  const displayByKey = new Map(
+    snapshot.displays.map((display) => [display.id_key, display]),
+  );
 
   const left = Math.min(...outputs.map((o) => o.position.x));
   const top = Math.min(...outputs.map((o) => o.position.y));
   const right = Math.max(
-    ...outputs.map((output) => output.position.x + getOutputResolution(output, displayByKey).width),
+    ...outputs.map(
+      (output) =>
+        output.position.x + getOutputResolution(output, displayByKey).width,
+    ),
   );
   const bottom = Math.max(
-    ...outputs.map((output) => output.position.y + getOutputResolution(output, displayByKey).height),
+    ...outputs.map(
+      (output) =>
+        output.position.y + getOutputResolution(output, displayByKey).height,
+    ),
   );
 
-  return { left, top, right, bottom, width: right - left, height: bottom - top };
+  return {
+    left,
+    top,
+    right,
+    bottom,
+    width: right - left,
+    height: bottom - top,
+  };
 }
 
 export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
   const outputs = useMemo(() => previewOutputs(snapshot), [snapshot]);
-  const bounds = useMemo(() => layoutBounds(snapshot, outputs), [snapshot, outputs]);
+  const bounds = useMemo(
+    () => layoutBounds(snapshot, outputs),
+    [snapshot, outputs],
+  );
   const displayByKey = useMemo(
-    () => new Map((snapshot?.displays ?? []).map((display) => [display.id_key, display])),
+    () =>
+      new Map(
+        (snapshot?.displays ?? []).map((display) => [display.id_key, display]),
+      ),
     [snapshot],
   );
   const monitorNumberByDisplayKey = useMemo(
     () =>
       new Map(
-        (snapshot?.displays ?? []).map((display, index) => [display.id_key, index + 1]),
+        (snapshot?.displays ?? []).map((display, index) => [
+          display.id_key,
+          index + 1,
+        ]),
       ),
     [snapshot],
   );
@@ -67,7 +99,10 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
     );
   }
 
-  const scale = Math.min(720 / Math.max(1,bounds.width), 300 / Math.max(1,bounds.height));
+  const scale = Math.min(
+    720 / Math.max(1, bounds.width),
+    300 / Math.max(1, bounds.height),
+  );
 
   return (
     <div
@@ -83,11 +118,26 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
       >
         {outputs.map((output) => {
           const display = displayByKey.get(output.display_key);
-          const monitorNumber = monitorNumberByDisplayKey.get(output.display_key);
+          const monitorNumber = monitorNumberByDisplayKey.get(
+            output.display_key,
+          );
           const active = output.enabled;
           const previewResolution = output.resolution;
-          const members = snapshot.layout.outputs.filter((o)=>o.enabled && output.enabled && output.clone_group && o.clone_group===output.clone_group);
-          const numbers = members.length > 1 ? members.map((o)=>monitorNumberByDisplayKey.get(o.display_key) ?? "?").join(" + ") : monitorNumber;
+          const members = snapshot.layout.outputs.filter(
+            (o) =>
+              o.enabled &&
+              output.enabled &&
+              output.clone_group &&
+              o.clone_group === output.clone_group,
+          );
+          const numbers =
+            members.length > 1
+              ? members
+                  .map(
+                    (o) => monitorNumberByDisplayKey.get(o.display_key) ?? "?",
+                  )
+                  .join(" + ")
+              : monitorNumber;
 
           return (
             <div
@@ -128,7 +178,11 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
                 ) : null}
               </div>
               <span className="text-[9px] leading-none text-muted-foreground">
-                {members.length > 1 ? "Duplicated" : active ? "Active" : "Detached"}
+                {members.length > 1
+                  ? "Duplicated"
+                  : active
+                    ? "Active"
+                    : "Detached"}
               </span>
             </div>
           );

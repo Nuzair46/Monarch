@@ -44,17 +44,17 @@ Raw `DISPLAYCONFIG_PATH_INFO` and `DISPLAYCONFIG_MODE_INFO` arrays exist only du
 
 1. Resolve and validate the requested layout and capture the current layout.
 2. Atomically persist `pending_recovery` and the previous layout before the first mutation.
-3. Apply and verify the observed active set, placement, primary, rotation, resolution and refresh rate.
+3. Apply and verify the observed active set, placement, logical-source primary status, rotation, resolution, fractional refresh, HDR, scaling and clone membership.
 4. Start the confirmation interval only after apply succeeds. Unresolved failures remain pending with an immediate recovery deadline.
 5. On confirmation, persist the new last-good layout and remove the journal. On rollback, verify restoration and persist it before removing the journal.
 
 Startup reconstructs an unfinished journal as an immediately expired transaction. The worker attempts recovery before ordinary queued actions. Automation from profiles, hotkeys and the tray can auto-confirm only a successful operation. A persistence failure keeps recovery available.
 
-Only complete, valid configuration in the current schema (2) is supported. Missing or unknown fields, older or newer schema versions, and unsupported saved layouts trigger a reset. Monarch deletes `config.json` and `config.json.bak` and continues startup with default settings and no saved profiles; it never migrates old profiles or restores the backup automatically. A missing primary file also discards an orphaned backup. Filesystem access failures remain errors. Disconnected monitors do not invalidate an otherwise supported profile or recovery journal. An unsupported live desktop can still be displayed in the app, but does not seed saved recovery layouts.
+Schema 3 accepts optional HDR/scaling preferences and explicit clone groups. A complete, valid version-2 configuration migrates atomically with compatible defaults and cursor correction off. Original bytes remain in `config.json.v2.bak`; profiles, shortcuts, settings, geometry and pending recovery are retained. Malformed data, unknown fields and other unsupported schema versions keep the existing reset behavior. Filesystem failures remain errors. A missing primary configuration never resurrects a backup. Disconnected monitors do not invalidate saved profiles or recovery journals.
 
 Mutators clone state, save, then commit it in memory. File writes flush a unique temporary file before atomic replacement; Windows uses `MoveFileExW` with replacement and write-through. A supported previous config is retained as `config.json.bak` for manual recovery.
 
-An output without an observed mode uses `0x0` geometry, which becomes an automatic mode preference at the planning boundary. Recovery obtains real geometry from Windows before verification. Explicit layouts reject duplicate endpoints, multiple enabled primaries and out-of-range values. Source coordinates describe desktop geometry; rotation is stored separately and must be present, with `null` representing an unknown orientation. Cloned/overlapping layouts are rejected before mutation because the assignment solver models extended desktops. See [Microsoft's source-mode coordinate rules](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_source_mode).
+An output without an observed mode uses `0x0` geometry, which becomes an automatic mode preference at the planning boundary. Windows resolves automatic modes; exact preferences must pass preflight and observation. Explicit layouts reject duplicate endpoints, multiple primary sources and out-of-range values. Source coordinates describe desktop geometry; rotation is stored separately and must be present, with `null` representing an unknown orientation. Clone groups share position, source resolution, scaling and primary status; extended surfaces cannot overlap. Cloning is never inferred from rectangles, and saved groups never contain Windows source IDs. See [Microsoft's source-mode coordinate rules](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_source_mode).
 
 ## Windows integration
 
@@ -71,6 +71,8 @@ Instance mutex and pipe names include the user SID and Windows session ID. The n
 `yarn test` exercises asynchronous subscription disposal, the browser confirmation contract and version-bump fixtures, including a locked Cargo check. Both Cargo lockfiles are committed with release version changes. Release builds test core and desktop code using locked dependencies and create the permanent tag only after the Windows build succeeds. Keep Tauri, its runtimes and the CLI compatible when updating the lockfiles.
 
 A Windows target source check on Linux can compile code and tests with `MONARCH_SKIP_TAURI_BUILD=1`; it does not execute Win32 calls or prove the MSI build. Hardware acceptance remains necessary for GPU/driver behavior, slideshow/disabled backgrounds, mixed adapters, dock changes, localized registry handling and multiple login sessions.
+
+## Editable profiles and capabilities
 
 Display profile editing (schema 3): output preferences include optional HDR, standard
 per-source scaling and layout-local clone groups. `save_profile_layout` persists a
@@ -93,3 +95,29 @@ the complete combination again at apply. HDR probes the HDR-specific request bef
 falling back to the older advanced-color request. Scaling is isolated in
 `backend/windows/scaling.rs`: the undocumented -3/-4 device-info requests are used
 only for readable standard ranges, with no custom/global or registry scaling.
+
+
+## Cursor alignment
+
+Cursor calibration lives in global settings against the same serial/path/connection
+identity policy as profiles. EDID dimensions are offered only after checksum/header
+validation; users can measure and enter dimensions and physical X/Y positions.
+Rotations swap panel dimensions. Clones form one cursor surface, with an explicit
+physical representative (or the first member in stable display order).
+
+`src/cursor.rs` builds physical boundary mappings outside input callbacks. It maps
+crossing points into physical millimeters and then the neighbor's pixels, retaining
+remaining native displacement. Interior movement is untouched. Ambiguous, overlapping,
+missing or invalid calibration produces no correction. DPI percentages do not enter
+the mapping because the desktop coordinates are physical pixels.
+
+The Windows low-level hook runs on a dedicated thread with a message loop and a
+per-monitor-aware DPI context. Its callback does no enumeration, persistence, locking
+or allocation. Injected input is ignored, generated movement carries a private tag,
+and Ctrl, cursor confinement or an unavailable input desktop bypass correction.
+Input-desktop availability is refreshed on the hook thread outside its callback.
+Epoch checks suspend stale maps immediately on display changes, hot-plug and resume;
+the display worker publishes replacements after apply/rollback. Disable and exit
+unregister the hook. See Microsoft's [LowLevelMouseProc requirements](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc).
+
+Hardware acceptance for these paths is tracked in [the Windows checklist](windows-hardware-checklist.md).

@@ -1,10 +1,17 @@
-import type { AppSettings, AppSnapshot, Layout, Profile, DisplayCapabilities } from './types';
+import type {
+  AppSettings,
+  AppSnapshot,
+  Layout,
+  Profile,
+  DisplayCapabilities,
+} from "./types";
 import { normalizeGroups } from "@/app/display-editor";
-import type { EventPayloadMap } from './tauri';
-import { DEFAULT_MONITOR_SHORTCUT_BASE, DEFAULT_PROFILE_SHORTCUT_BASE } from '@/app/ui';
-type MockListener = (event: {
-  payload: unknown;
-}) => void;
+import type { EventPayloadMap } from "./tauri";
+import {
+  DEFAULT_MONITOR_SHORTCUT_BASE,
+  DEFAULT_PROFILE_SHORTCUT_BASE,
+} from "@/app/ui";
+type MockListener = (event: { payload: unknown }) => void;
 const mockListeners = new Map<string, Set<MockListener>>();
 let mockState = buildMockSnapshot();
 let mockRestorableLayout = cloneLayout(mockState.layout);
@@ -40,7 +47,10 @@ function cloneLayout(layout: Layout): Layout {
   return deepClone(layout);
 }
 
-function emitMockEvent<E extends keyof EventPayloadMap>(eventName: E, payload: EventPayloadMap[E]): void {
+function emitMockEvent<E extends keyof EventPayloadMap>(
+  eventName: E,
+  payload: EventPayloadMap[E],
+): void {
   const listeners = mockListeners.get(eventName);
   if (!listeners) {
     return;
@@ -56,7 +66,9 @@ function emitMockStateChanged(): void {
 }
 
 function syncDisplaysFromLayout(): void {
-  const activeOutputs = new Map(mockState.layout.outputs.map((output) => [output.display_key, output]));
+  const activeOutputs = new Map(
+    mockState.layout.outputs.map((output) => [output.display_key, output]),
+  );
   for (const display of mockState.displays) {
     const output = activeOutputs.get(display.id_key);
     if (!output) {
@@ -77,7 +89,9 @@ function ensureMockLayoutValid(layout: Layout): void {
     throw new Error("cannot disable the last active display");
   }
   normalizeGroups(layout);
-  const primary = layout.outputs.find((output) => output.enabled && output.primary)!;
+  const primary = layout.outputs.find(
+    (output) => output.enabled && output.primary,
+  )!;
   const offset = { ...primary.position };
   for (const output of layout.outputs) {
     output.position.x -= offset.x;
@@ -97,25 +111,50 @@ function trimmedStringOrNull(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function sanitizeShortcutMap(shortcuts: Record<string, string> | null | undefined): Record<string, string> {
-  return Object.fromEntries(Object.entries(shortcuts ?? {}).flatMap(([rawKey, rawShortcut]) => {
-    const key = trimmedStringOrNull(rawKey);
-    const shortcut = trimmedStringOrNull(rawShortcut);
-    return key && shortcut ? [[key, shortcut]] : [];
-  }));
+function sanitizeShortcutMap(
+  shortcuts: Record<string, string> | null | undefined,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(shortcuts ?? {}).flatMap(([rawKey, rawShortcut]) => {
+      const key = trimmedStringOrNull(rawKey);
+      const shortcut = trimmedStringOrNull(rawShortcut);
+      return key && shortcut ? [[key, shortcut]] : [];
+    }),
+  );
 }
 
 function replaceMockLayout(nextLayout: Layout): void {
   ensureNoPending();
   const validatedLayout = cloneLayout(nextLayout);
   ensureMockLayoutValid(validatedLayout);
-  for (const o of validatedLayout.outputs.filter((o)=>o.enabled)) {
-    const cap = mockState.capabilities.find((c)=>c.display_key===o.display_key);
-    if (!cap) throw new Error("Display unavailable; reconnect it before applying.");
-    const portrait = o.rotation === "portrait" || o.rotation === "portrait_flipped";
-    if (!cap.modes.some((m)=>m.resolution.width === (portrait?o.resolution.height:o.resolution.width) && m.resolution.height === (portrait?o.resolution.width:o.resolution.height) && m.refresh_rate_mhz===o.refresh_rate_mhz)) throw new Error("Unsupported resolution/refresh combination; select a reported mode.");
-    if (o.hdr_enabled != null && !cap.hdr_supported) throw new Error("HDR unavailable; choose Preserve HDR.");
-    if (o.scale_percent != null && !cap.scale_percentages.includes(o.scale_percent)) throw new Error("Unsupported scaling; choose Preserve scaling.");
+  for (const o of validatedLayout.outputs.filter((o) => o.enabled)) {
+    const cap = mockState.capabilities.find(
+      (c) => c.display_key === o.display_key,
+    );
+    if (!cap)
+      throw new Error("Display unavailable; reconnect it before applying.");
+    const portrait =
+      o.rotation === "portrait" || o.rotation === "portrait_flipped";
+    if (
+      !cap.modes.some(
+        (m) =>
+          m.resolution.width ===
+            (portrait ? o.resolution.height : o.resolution.width) &&
+          m.resolution.height ===
+            (portrait ? o.resolution.width : o.resolution.height) &&
+          m.refresh_rate_mhz === o.refresh_rate_mhz,
+      )
+    )
+      throw new Error(
+        "Unsupported resolution/refresh combination; select a reported mode.",
+      );
+    if (o.hdr_enabled != null && !cap.hdr_supported)
+      throw new Error("HDR unavailable; choose Preserve HDR.");
+    if (
+      o.scale_percent != null &&
+      !cap.scale_percentages.includes(o.scale_percent)
+    )
+      throw new Error("Unsupported scaling; choose Preserve scaling.");
   }
   mockRestorableLayout = cloneLayout(mockState.layout);
   mockState.layout = validatedLayout;
@@ -189,20 +228,43 @@ function buildMockSnapshot(): AppSnapshot {
     generation: 0,
     displays,
     layout,
-    capabilities: displays.map((display,index)=>({
-      display_key:display.id_key,
+    capabilities: displays.map((display, index) => ({
+      display_key: display.id_key,
       modes: [
-        {resolution:{width:1920,height:1080},refresh_rate_mhz:60000},
-        {resolution:{width:1920,height:1080},refresh_rate_mhz:59940},
-        ...(index < 2 ? [{resolution:{width:2560,height:1440},refresh_rate_mhz:60000}] : []),
-        ...(index === 0 ? [{resolution:{width:2560,height:1440},refresh_rate_mhz:144000}] : []),
+        { resolution: { width: 1920, height: 1080 }, refresh_rate_mhz: 60000 },
+        { resolution: { width: 1920, height: 1080 }, refresh_rate_mhz: 59940 },
+        ...(index < 2
+          ? [
+              {
+                resolution: { width: 2560, height: 1440 },
+                refresh_rate_mhz: 60000,
+              },
+            ]
+          : []),
+        ...(index === 0
+          ? [
+              {
+                resolution: { width: 2560, height: 1440 },
+                refresh_rate_mhz: 144000,
+              },
+            ]
+          : []),
       ],
-      modes_unavailable_reason:null,
-      hdr_supported:index===0,hdr_enabled:index===0?false:null,
-      hdr_unavailable_reason:index===0?null:"HDR is unsupported on this monitor.",
-      scale_percent:index<2?100:null,scale_percentages:index<2?[100,125,150,175,200]:[],
-      scaling_unavailable_reason:index<2?null:"Scaling is unavailable while this monitor is detached.",
-      physical_size_mm:{width:index===0?600:520,height:index===0?340:290},
+      modes_unavailable_reason: null,
+      hdr_supported: index === 0,
+      hdr_enabled: index === 0 ? false : null,
+      hdr_unavailable_reason:
+        index === 0 ? null : "HDR is unsupported on this monitor.",
+      scale_percent: index < 2 ? 100 : null,
+      scale_percentages: index < 2 ? [100, 125, 150, 175, 200] : [],
+      scaling_unavailable_reason:
+        index < 2
+          ? null
+          : "Scaling is unavailable while this monitor is detached.",
+      physical_size_mm: {
+        width: index === 0 ? 600 : 520,
+        height: index === 0 ? 340 : 290,
+      },
     })),
     profiles: [
       { name: "Desk", layout: cloneLayout(layout) },
@@ -226,14 +288,17 @@ function buildMockSnapshot(): AppSnapshot {
       display_toggle_shortcut_base: DEFAULT_MONITOR_SHORTCUT_BASE,
       profile_shortcuts: {},
       display_toggle_shortcuts: {},
+      cursor_correction_enabled: false,
+      cursor_calibrations: [],
     },
     pending_confirmation: null,
   };
 }
 
-export async function listenMonarchEvent<E extends keyof EventPayloadMap>(eventName: E, handler: (event: {
-  payload: EventPayloadMap[E];
-}) => void): Promise<() => void> {
+export async function listenMonarchEvent<E extends keyof EventPayloadMap>(
+  eventName: E,
+  handler: (event: { payload: EventPayloadMap[E] }) => void,
+): Promise<() => void> {
   const listener = handler as unknown as MockListener;
   const listeners = mockListeners.get(eventName) ?? new Set<MockListener>();
   mockListeners.set(eventName, listeners);
@@ -246,14 +311,19 @@ export async function listenMonarchEvent<E extends keyof EventPayloadMap>(eventN
 export async function getSnapshot(): Promise<AppSnapshot> {
   const snapshot = deepClone(mockState);
   if (snapshot.pending_confirmation && confirmationDeadline !== null) {
-    snapshot.pending_confirmation.remaining_ms = Math.max(0, confirmationDeadline - Date.now());
+    snapshot.pending_confirmation.remaining_ms = Math.max(
+      0,
+      confirmationDeadline - Date.now(),
+    );
   }
   return snapshot;
 }
 
 export async function toggleDisplay(displayKey: string): Promise<void> {
   const nextLayout = cloneLayout(mockState.layout);
-  const output = nextLayout.outputs.find((item) => item.display_key === displayKey);
+  const output = nextLayout.outputs.find(
+    (item) => item.display_key === displayKey,
+  );
   if (!output) {
     throw new Error(`Display not found: ${displayKey}`);
   }
@@ -277,7 +347,9 @@ export async function applyProfile(name: string): Promise<void> {
 }
 
 export async function deleteProfile(name: string): Promise<void> {
-  mockState.profiles = mockState.profiles.filter((profile) => profile.name !== name);
+  mockState.profiles = mockState.profiles.filter(
+    (profile) => profile.name !== name,
+  );
   emitMockStateChanged();
   return;
 }
@@ -292,11 +364,12 @@ export async function saveProfile(name: string): Promise<void> {
     name: trimmed,
     layout: cloneLayout(mockState.layout),
   };
-  const existingIndex = mockState.profiles.findIndex((profile) => profile.name === trimmed);
+  const existingIndex = mockState.profiles.findIndex(
+    (profile) => profile.name === trimmed,
+  );
   if (existingIndex >= 0) {
     mockState.profiles[existingIndex] = nextProfile;
-  }
-  else {
+  } else {
     mockState.profiles.push(nextProfile);
     mockState.profiles.sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -333,7 +406,23 @@ export async function rollbackPending(): Promise<void> {
 }
 
 export async function updateSettings(settings: AppSettings): Promise<void> {
-  if (!Number.isInteger(settings.revert_timeout_secs) || settings.revert_timeout_secs < 1 || settings.revert_timeout_secs > 60) {
+  if (
+    settings.cursor_calibrations.some(
+      (c) =>
+        ![c.width_mm, c.height_mm].every(
+          (n) => Number.isInteger(n) && n >= 10 && n <= 10000,
+        ) ||
+        ![c.position_mm.x, c.position_mm.y].every(
+          (n) => Number.isInteger(n) && Math.abs(n) <= 1000000,
+        ),
+    )
+  )
+    throw new Error("Invalid cursor calibration dimensions or position.");
+  if (
+    !Number.isInteger(settings.revert_timeout_secs) ||
+    settings.revert_timeout_secs < 1 ||
+    settings.revert_timeout_secs > 60
+  ) {
     throw new Error("revert timeout must be between 1 and 60 seconds");
   }
   mockState.settings = {
@@ -342,21 +431,40 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
     start_with_windows: Boolean(settings.start_with_windows),
     startup_profile_name: trimmedStringOrNull(settings.startup_profile_name),
     global_shortcuts_enabled: settings.global_shortcuts_enabled !== false,
-    profile_shortcut_base: trimmedStringOrNull(settings.profile_shortcut_base) ?? (Object.keys(settings.profile_shortcuts).length ? null : DEFAULT_PROFILE_SHORTCUT_BASE),
-    display_toggle_shortcut_base: trimmedStringOrNull(settings.display_toggle_shortcut_base) ?? (Object.keys(settings.display_toggle_shortcuts).length ? null : DEFAULT_MONITOR_SHORTCUT_BASE),
+    profile_shortcut_base:
+      trimmedStringOrNull(settings.profile_shortcut_base) ??
+      (Object.keys(settings.profile_shortcuts).length
+        ? null
+        : DEFAULT_PROFILE_SHORTCUT_BASE),
+    display_toggle_shortcut_base:
+      trimmedStringOrNull(settings.display_toggle_shortcut_base) ??
+      (Object.keys(settings.display_toggle_shortcuts).length
+        ? null
+        : DEFAULT_MONITOR_SHORTCUT_BASE),
     profile_shortcuts: sanitizeShortcutMap(settings.profile_shortcuts),
-    display_toggle_shortcuts: sanitizeShortcutMap(settings.display_toggle_shortcuts),
+    display_toggle_shortcuts: sanitizeShortcutMap(
+      settings.display_toggle_shortcuts,
+    ),
   };
   emitMockStateChanged();
   return;
 }
 
-export async function getDisplayCapabilities(): Promise<DisplayCapabilities[]> { return deepClone(mockState.capabilities); }
-export async function saveProfileLayout(name: string, layout: Layout): Promise<void> {
+export async function getDisplayCapabilities(): Promise<DisplayCapabilities[]> {
+  return deepClone(mockState.capabilities);
+}
+export async function saveProfileLayout(
+  name: string,
+  layout: Layout,
+): Promise<void> {
   ensureNoPending();
   name = name.trim();
   if (!name) throw new Error("Profile name cannot be empty.");
-  const saved = cloneLayout(layout); ensureMockLayoutValid(saved);
-  mockState.profiles = [...mockState.profiles.filter((p)=>p.name!==name), {name,layout:saved}].sort((a,b)=>a.name.localeCompare(b.name));
+  const saved = cloneLayout(layout);
+  ensureMockLayoutValid(saved);
+  mockState.profiles = [
+    ...mockState.profiles.filter((p) => p.name !== name),
+    { name, layout: saved },
+  ].sort((a, b) => a.name.localeCompare(b.name));
   emitMockStateChanged();
 }

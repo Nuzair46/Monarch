@@ -225,6 +225,7 @@ struct TrayMenuDisplay {
 
 #[derive(Clone)]
 struct TrayMenuSnapshot {
+    cursor_enabled: bool,
     profiles: Vec<String>,
     displays: Vec<TrayMenuDisplay>,
 }
@@ -243,7 +244,11 @@ fn tray_menu_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<TrayMenuSnapshot
         })
         .collect();
 
-    Ok(TrayMenuSnapshot { profiles, displays })
+    Ok(TrayMenuSnapshot {
+        profiles,
+        displays,
+        cursor_enabled: snapshot.settings.cursor_correction_enabled,
+    })
 }
 
 fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
@@ -272,10 +277,19 @@ fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu:
         }
     }
 
+    let cursor_toggle = tauri::menu::CheckMenuItem::with_id(
+        app,
+        "cursor_align",
+        "Align cursor across monitors",
+        true,
+        snapshot.as_ref().is_some_and(|s| s.cursor_enabled),
+        None::<&str>,
+    )?;
     let menu = MenuBuilder::new(app)
         .item(&profiles_menu.build()?)
         .item(&toggles_menu.build()?)
         .separator()
+        .item(&cursor_toggle)
         .text("restore_last_layout", "Restore Displays")
         .text("open_main", "Open App")
         .separator()
@@ -295,6 +309,7 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 
 fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
+        "cursor_align" => submit(app, super::coordinator::Operation::ToggleCursor),
         "open_main" => {
             show_main_window(app);
         }

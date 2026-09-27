@@ -1,11 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TabsContent } from "@/components/ui/tabs";
 import { LayoutPreview } from "@/app/components/layout-preview";
 import { MonitorCard } from "@/app/components/monitor-card";
@@ -51,9 +46,18 @@ export function MainTab({
             <CardHeader className="gap-3 md:flex-row md:items-start md:justify-between">
               <CardTitle className="text-base">Layout Preview</CardTitle>
               <div className="flex flex-wrap items-center justify-end gap-2">
-                <Button size="sm" variant="outline" disabled={actionBusy || hasPendingConfirmation} onClick={onEdit}>Edit displays</Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={actionBusy || hasPendingConfirmation}
+                  onClick={onEdit}
+                >
+                  Edit displays
+                </Button>
                 <Badge variant="outline">{activeDisplayCount} active</Badge>
-                <Badge variant="secondary">{snapshot.displays.length} detected</Badge>
+                <Badge variant="secondary">
+                  {snapshot.displays.length} detected
+                </Badge>
               </div>
             </CardHeader>
             <CardContent>
@@ -76,7 +80,11 @@ export function MainTab({
             </CardHeader>
             <CardContent className="grid max-h-[38rem] gap-3 overflow-auto pr-1">
               {snapshot.displays.map((display, index) => {
-                const shortcutLabel = displayShortcutBase ? indexedShortcutLabel(displayShortcutBase, index) : snapshot.settings.display_toggle_shortcuts[display.id_key] ?? null;
+                const shortcutLabel = displayShortcutBase
+                  ? indexedShortcutLabel(displayShortcutBase, index)
+                  : (snapshot.settings.display_toggle_shortcuts[
+                      display.id_key
+                    ] ?? null);
 
                 return (
                   <MonitorCard
@@ -99,13 +107,20 @@ export function MainTab({
 
         <Card className="border-dashed">
           <CardContent className="space-y-2 p-4">
-            <p className="text-sm font-medium text-foreground">Troubleshooting</p>
+            <p className="text-sm font-medium text-foreground">
+              Troubleshooting
+            </p>
             <p className="text-sm text-muted-foreground">
-              If something goes wrong or monitors are missing or not showing up as expected, press{" "}
-              <span className="font-medium text-foreground">Win + P</span> and choose
+              If something goes wrong or monitors are missing or not showing up
+              as expected, press{" "}
+              <span className="font-medium text-foreground">Win + P</span> and
+              choose
               <span className="font-medium text-foreground"> Extend</span> or
-              <span className="font-medium text-foreground"> PC screen only</span> to reset the
-              display mode.
+              <span className="font-medium text-foreground">
+                {" "}
+                PC screen only
+              </span>{" "}
+              to reset the display mode.
             </p>
           </CardContent>
         </Card>

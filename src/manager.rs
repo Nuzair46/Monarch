@@ -154,6 +154,11 @@ where
                 .iter()
                 .find(|o| o.display_id == output.display_id && o.enabled)
             {
+                if (output.hdr_enabled.is_some() && current.hdr_enabled.is_none())
+                    || (output.scale_percent.is_some() && current.scale_percent.is_none())
+                {
+                    return Err(ManagerError::Validation("cannot capture HDR/scaling for recovery; refresh the display or choose Preserve".into()));
+                }
                 output.hdr_enabled = output.hdr_enabled.or(current.hdr_enabled);
                 output.scale_percent = output.scale_percent.or(current.scale_percent);
             }
@@ -339,17 +344,25 @@ where
         }
         let observed = self.backend.snapshot()?;
         for output in &mut layout.outputs {
-            let evidence = observed
-                .layout
-                .outputs
+            if let IdentityResolution::Resolved(mut current) =
+                resolve(&output.display_id, &observed.layout)
+            {
+                crate::identity::preserve_evidence(&output.display_id, &mut current);
+                output.display_id = current;
+            }
+            if let Some(previous) = self
+                .config
+                .profiles
                 .iter()
-                .chain(self.config.profiles.iter().flat_map(|p| &p.layout.outputs))
-                .find(|o| {
-                    o.display_id.endpoint() == output.display_id.endpoint()
-                        && o.display_id.edid_hash == output.display_id.edid_hash
-                });
-            if let Some(evidence) = evidence {
-                crate::identity::preserve_evidence(&evidence.display_id, &mut output.display_id);
+                .find(|p| p.name == name)
+                .and_then(|p| {
+                    p.layout.outputs.iter().find(|o| {
+                        o.display_id.endpoint() == output.display_id.endpoint()
+                            && o.display_id.edid_hash == output.display_id.edid_hash
+                    })
+                })
+            {
+                crate::identity::preserve_evidence(&previous.display_id, &mut output.display_id);
             }
         }
         layout.normalize_clone_groups();
@@ -511,11 +524,23 @@ where
         &self.config.settings
     }
 
-    pub fn update_settings(&mut self, settings: AppSettings) -> Result<(), ManagerError> {
+    pub fn update_settings(&mut self, mut settings: AppSettings) -> Result<(), ManagerError> {
         if !(1..=60).contains(&settings.revert_timeout_secs) {
             return Err(ManagerError::Validation(
                 "revert timeout must be between 1 and 60 seconds".into(),
             ));
+        }
+        let observed = self.backend.get_layout().ok();
+        for calibration in &mut settings.cursor_calibrations {
+            let id = calibration.display_id()?;
+            if let Some(IdentityResolution::Resolved(mut current)) =
+                observed.as_ref().map(|layout| resolve(&id, layout))
+            {
+                crate::identity::preserve_evidence(&id, &mut current);
+                // Frontend keys do not carry EDID serials; enrich from the fresh inventory.
+                calibration.display_key = crate::identity::display_key(&current);
+                calibration.identity = current.identity;
+            }
         }
         let revert_timeout_secs = settings.revert_timeout_secs;
         let startup_profile_name = settings
@@ -591,6 +616,8 @@ where
             display_toggle_shortcut_base,
             profile_shortcuts,
             display_toggle_shortcuts,
+            cursor_correction_enabled: settings.cursor_correction_enabled,
+            cursor_calibrations: settings.cursor_calibrations,
         };
         self.commit_config(next)?;
         self.confirmation_timeout = Duration::from_secs(revert_timeout_secs);

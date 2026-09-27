@@ -97,7 +97,9 @@ pub(super) fn wait_for_requested_outputs(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         let snapshot = super::enumerate::query_active_only_topology()?;
-        match verify_requested_outputs(desired, &snapshot.layout) {
+        let result = monarch::identity::resolve_layout(desired, &snapshot.layout)
+            .and_then(|resolved| verify_requested_outputs(&resolved, &snapshot.layout));
+        match result {
             Ok(()) => return Ok(snapshot),
             Err(error) if std::time::Instant::now() >= deadline => return Err(error),
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
@@ -134,10 +136,18 @@ pub fn apply_layout_against_snapshot(
     let refreshed = wait_for_requested_outputs(desired)?;
     apply_preferences(desired, &refreshed)?;
 
+    let next_snapshot = wait_for_verified_layout(desired)?;
+    best_effort_reload_color_calibration();
+    best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
+    Ok(next_snapshot)
+}
+
+pub(super) fn wait_for_verified_layout(desired: &Layout) -> Result<TopologySnapshot, ManagerError> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let next_snapshot = loop {
         let observed = super::enumerate::query_active_only_topology().and_then(|snapshot| {
-            monarch::verification::verify_applied_layout(desired, &snapshot.layout)?;
+            let resolved = monarch::identity::resolve_layout(desired, &snapshot.layout)?;
+            monarch::verification::verify_applied_layout(&resolved, &snapshot.layout)?;
             Ok(snapshot)
         });
         match observed {
@@ -146,8 +156,6 @@ pub fn apply_layout_against_snapshot(
             Err(_) => std::thread::sleep(Duration::from_millis(100)),
         }
     };
-    best_effort_reload_color_calibration();
-    best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
     Ok(next_snapshot)
 }
 
@@ -449,7 +457,31 @@ pub(super) fn apply_preferences(
     desired: &Layout,
     refreshed: &TopologySnapshot,
 ) -> Result<(), ManagerError> {
+    apply_preferences_inner(desired, refreshed, false)
+}
+pub(super) fn restore_preferences(
+    desired: &Layout,
+    refreshed: &TopologySnapshot,
+) -> Result<(), ManagerError> {
+    apply_preferences_inner(desired, refreshed, true)
+}
+fn apply_preferences_inner(
+    desired: &Layout,
+    refreshed: &TopologySnapshot,
+    restoring: bool,
+) -> Result<(), ManagerError> {
     let resolved = monarch::identity::resolve_layout(desired, &refreshed.layout)?;
+    let mut failures = Vec::new();
+    let mut apply_result = |result: Result<(), ManagerError>| -> Result<(), ManagerError> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if restoring => {
+                failures.push(error.to_string());
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    };
     let mut scaled = HashSet::new();
     for output in resolved.outputs.iter().filter(|o| o.enabled) {
         let path = refreshed
@@ -465,7 +497,7 @@ pub(super) fn apply_preferences(
                 )
             })?;
         if let Some(hdr) = output.hdr_enabled {
-            super::hdr::set(path, hdr)?;
+            apply_result(super::hdr::set(path, hdr))?;
         }
         let source = (
             luid_to_u64(
@@ -476,11 +508,15 @@ pub(super) fn apply_preferences(
         );
         if let Some(scale) = output.scale_percent {
             if scaled.insert(source) {
-                super::scaling::set(path, scale)?;
+                apply_result(super::scaling::set(path, scale))?;
             }
         }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(ManagerError::RecoveryRequired(failures.join("; ")))
+    }
 }
 
 fn reorder_paths_for_desired_priority(

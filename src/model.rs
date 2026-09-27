@@ -287,6 +287,10 @@ pub struct AppSettings {
     pub display_toggle_shortcut_base: Option<String>,
     pub profile_shortcuts: BTreeMap<String, String>,
     pub display_toggle_shortcuts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub cursor_correction_enabled: bool,
+    #[serde(default)]
+    pub cursor_calibrations: Vec<crate::cursor::Calibration>,
 }
 
 impl Default for AppSettings {
@@ -300,6 +304,8 @@ impl Default for AppSettings {
             display_toggle_shortcut_base: Some(DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE.to_string()),
             profile_shortcuts: BTreeMap::new(),
             display_toggle_shortcuts: BTreeMap::new(),
+            cursor_correction_enabled: false,
+            cursor_calibrations: Vec::new(),
         }
     }
 }
@@ -341,6 +347,12 @@ impl AppConfig {
         let mut names = HashSet::new();
         self.schema_version == CONFIG_SCHEMA_VERSION
             && (1..=60).contains(&self.settings.revert_timeout_secs)
+            && self.settings.cursor_calibrations.len() <= 128
+            && self
+                .settings
+                .cursor_calibrations
+                .iter()
+                .all(crate::cursor::Calibration::is_valid)
             && self.profiles.iter().all(|profile| {
                 !profile.name.trim().is_empty()
                     && names.insert(&profile.name)

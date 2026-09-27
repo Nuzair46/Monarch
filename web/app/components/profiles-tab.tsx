@@ -58,12 +58,18 @@ export function ProfilesTab({
                   type="text"
                   placeholder="Profile name"
                   value={newProfileName}
-                  onChange={(event) => onNewProfileNameChange(event.target.value)}
+                  onChange={(event) =>
+                    onNewProfileNameChange(event.target.value)
+                  }
                   className="sm:max-w-sm"
                 />
                 <Button
                   type="button"
-                  disabled={actionBusy || !newProfileName.trim() || hasPendingConfirmation}
+                  disabled={
+                    actionBusy ||
+                    !newProfileName.trim() ||
+                    hasPendingConfirmation
+                  }
                   onClick={onSaveCurrentLayout}
                 >
                   Save Current Layout
@@ -78,7 +84,10 @@ export function ProfilesTab({
                 </div>
               ) : (
                 snapshot.profiles.map((profile, index) => {
-                  const shortcutLabel = profileShortcutBase ? indexedShortcutLabel(profileShortcutBase, index) : snapshot.settings.profile_shortcuts[profile.name] ?? null;
+                  const shortcutLabel = profileShortcutBase
+                    ? indexedShortcutLabel(profileShortcutBase, index)
+                    : (snapshot.settings.profile_shortcuts[profile.name] ??
+                      null);
 
                   return (
                     <div
@@ -90,18 +99,32 @@ export function ProfilesTab({
                           {profile.name}
                         </h3>
                         <p className="text-sm text-muted-foreground">
-                          {profile.layout.outputs.filter((output) => output.enabled).length}{" "}
+                          {
+                            profile.layout.outputs.filter(
+                              (output) => output.enabled,
+                            ).length
+                          }{" "}
                           active outputs
                         </p>
                         {shortcutLabel ? (
                           <p className="text-xs font-mono text-muted-foreground">
-                            {shortcutsEnabled ? "Shortcut" : "Shortcut (disabled)"}: {shortcutLabel}
+                            {shortcutsEnabled
+                              ? "Shortcut"
+                              : "Shortcut (disabled)"}
+                            : {shortcutLabel}
                           </p>
                         ) : null}
                       </div>
 
                       <div className="flex flex-wrap gap-2 sm:justify-end">
-                        <Button size="sm" variant="outline" disabled={actionBusy || hasPendingConfirmation} onClick={()=>onEditProfile(profile.name)}>Edit</Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={actionBusy || hasPendingConfirmation}
+                          onClick={() => onEditProfile(profile.name)}
+                        >
+                          Edit
+                        </Button>
                         <Button
                           type="button"
                           size="sm"

@@ -337,7 +337,33 @@ fn failed_migration_backup_does_not_replace_v2_config() {
     let store = dir.store();
     let mut old = saved_config();
     old.schema_version = 2;
-    let bytes = serde_json::to_vec(&old).unwrap();
+    let mut value = serde_json::to_value(&old).unwrap();
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for key in [
+                    "hdr_enabled",
+                    "scale_percent",
+                    "clone_group",
+                    "cursor_correction_enabled",
+                    "cursor_calibrations",
+                ] {
+                    map.remove(key);
+                }
+                for child in map.values_mut() {
+                    strip(child);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    strip(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    strip(&mut value);
+    let bytes = serde_json::to_vec(&value).unwrap();
     fs::write(store.path(), &bytes).unwrap();
     fs::create_dir(store.path().with_extension("json.v2.bak")).unwrap();
     assert!(store.load().is_err());

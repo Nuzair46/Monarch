@@ -39,6 +39,8 @@ pub struct PositionDto {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OutputConfigDto {
     pub display_key: String,
+    #[serde(default)]
+    pub identity: monarch::MonitorIdentity,
     pub enabled: bool,
     pub position: PositionDto,
     pub resolution: ResolutionDto,
@@ -84,6 +86,7 @@ pub struct AppSnapshotDto {
 #[derive(Clone, Serialize)]
 pub struct DisplayCapabilitiesDto {
     pub display_key: String,
+    pub identity: monarch::MonitorIdentity,
     #[serde(flatten)]
     pub capabilities: monarch::capabilities::DisplayCapabilities,
 }
@@ -194,7 +197,17 @@ where
     B: monarch::DisplayBackend,
     S: monarch::ConfigStore,
 {
+    let cursor_epoch = super::cursor::epoch();
     let observed = manager.snapshot()?;
+    if manager
+        .pending_confirmation_remaining()
+        .is_some_and(|t| t.is_zero())
+    {
+        super::cursor::suspend();
+    } else {
+        super::cursor::sync(manager.settings(), &observed.layout, cursor_epoch)
+            .map_err(monarch::ManagerError::Backend)?;
+    }
     let generation = observed.generation;
     let displays = observed
         .displays
@@ -212,6 +225,7 @@ where
             .into_iter()
             .map(|capabilities| DisplayCapabilitiesDto {
                 display_key: format_display_key(&capabilities.display_id),
+                identity: capabilities.display_id.identity.clone(),
                 capabilities,
             })
             .collect(),
@@ -219,11 +233,24 @@ where
         pending_confirmation: None,
     };
     update_snapshot_metadata(&mut snapshot, manager);
+    for calibration in &mut snapshot.settings.cursor_calibrations {
+        if let Ok(id) = calibration.display_id() {
+            if let monarch::identity::Resolution::Resolved(current) =
+                monarch::identity::resolve(&id, &observed.layout)
+            {
+                calibration.display_key = monarch::identity::display_key(&current);
+            }
+        }
+    }
     snapshot.profiles = manager
         .list_profiles()
         .into_iter()
         .map(|mut p| {
+            let saved = p.layout.clone();
             p.layout = monarch::identity::remap_layout(&p.layout, &observed.layout);
+            for (old, current) in saved.outputs.iter().zip(&mut p.layout.outputs) {
+                monarch::identity::preserve_evidence(&old.display_id, &mut current.display_id);
+            }
             profile_to_dto(p)
         })
         .collect();
@@ -271,6 +298,7 @@ fn layout_to_dto(layout: &Layout) -> LayoutDto {
 fn output_to_dto(output: &OutputConfig) -> OutputConfigDto {
     OutputConfigDto {
         display_key: format_display_key(&output.display_id),
+        identity: output.display_id.identity.clone(),
         enabled: output.enabled,
         position: PositionDto {
             x: output.position.x,
@@ -294,8 +322,9 @@ fn dto_to_layout(dto: LayoutDto) -> CommandResult<Layout> {
         .outputs
         .into_iter()
         .map(|output| {
-            let display_id = crate::app::state::parse_display_key(&output.display_key)
+            let mut display_id = crate::app::state::parse_display_key(&output.display_key)
                 .map_err(|err| err.to_string())?;
+            display_id.identity = output.identity;
             Ok(OutputConfig {
                 display_id,
                 enabled: output.enabled,

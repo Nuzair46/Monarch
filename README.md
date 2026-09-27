@@ -30,7 +30,10 @@ Monarch lets you:
 
 - Detach a monitor in software (no cable unplugging)
 - Reattach it later
+- Edit resolution, fractional refresh, orientation, HDR and supported scaling
+- Extend, duplicate or detach displays, including a duplicated pair beside an extended monitor
 - Save display layouts as profiles
+- Optionally align cursor crossings using physical monitor measurements
 - Restore the previous layout quickly
 - Recover automatically with a confirmation timeout if a layout change goes wrong
 - Easy apply with hotkeys
@@ -51,6 +54,28 @@ It uses Windows display topology APIs (`DisplayConfig`) to change which outputs 
 3. Confirm the layout change (or it auto-rolls back)
 4. Click `Attach` later to bring the display back
 5. Use `Save Current Layout` in `Profiles` to store common setups
+
+## Editing displays and profiles
+
+Choose **Edit displays** on the main tab, or **Edit** beside a saved profile. **Save**
+updates the profile without changing the desktop. **Apply** previews changes through
+the usual confirmation timer and reverts all captured settings on timeout.
+
+Mode lists come from Windows. Unsupported HDR or scaling controls explain why they
+are unavailable. Detached or duplicated monitors may expose only their preferred
+and observed modes; extend the monitor first to enumerate additional modes.
+**Duplicate of…** copies the selected display's source settings. If Windows rejects
+the combination, choose compatible settings explicitly. **Extend** places the member
+beside the remaining desktop. **Detached** keeps the other group members active.
+
+In **Settings → Cursor alignment**, calibrate panel dimensions and physical X/Y
+positions in millimeters, then enable **Align cursor across monitors**. Dimensions
+are prefilled from valid EDID data where available. Put adjoining physical edges at
+the same coordinate. Calibration is global across profiles, and duplicated desktops
+have one selectable physical representative. Hold **Ctrl** to bypass correction.
+The tray also has an alignment toggle. This setting starts off.
+
+Real-device verification scenarios are listed in the [Windows hardware checklist](docs/windows-hardware-checklist.md).
 
 ## Command-Line Profile Switch (Automation)
 

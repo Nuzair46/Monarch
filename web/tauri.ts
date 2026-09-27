@@ -3,7 +3,13 @@ import { getVersion as tauriGetVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import packageJson from "../package.json";
-import type { AppSettings, AppSnapshot, ConfirmationEvent, Layout, DisplayCapabilities, } from "./types";
+import type {
+  AppSettings,
+  AppSnapshot,
+  ConfirmationEvent,
+  Layout,
+  DisplayCapabilities,
+} from "./types";
 export type EventPayloadMap = {
   "monarch://state-changed": void;
   "monarch://confirmation": ConfirmationEvent;
@@ -15,19 +21,27 @@ export type ReleaseUpdateCheckResult = {
   updateAvailable: boolean;
   releaseUrl: string;
 };
-const viteEnv = (import.meta as ImportMeta & {
-  env?: Record<string, string | undefined>;
-}).env;
-const useWebMock = (viteEnv?.VITE_MONARCH_WEB_MOCK ?? "") === "1" || !isTauriRuntime();
-const GITHUB_RELEASES_LATEST_API = "https://api.github.com/repos/Nuzair46/Monarch/releases/latest";
+const viteEnv = (
+  import.meta as ImportMeta & {
+    env?: Record<string, string | undefined>;
+  }
+).env;
+const useWebMock =
+  (viteEnv?.VITE_MONARCH_WEB_MOCK ?? "") === "1" || !isTauriRuntime();
+const GITHUB_RELEASES_LATEST_API =
+  "https://api.github.com/repos/Nuzair46/Monarch/releases/latest";
 const GITHUB_RELEASES_URL = "https://github.com/Nuzair46/Monarch/releases";
 function isTauriRuntime(): boolean {
   if (typeof window === "undefined") {
     return false;
   }
-  return typeof (window as Window & {
-    __TAURI_INTERNALS__?: unknown;
-  }).__TAURI_INTERNALS__ !== "undefined";
+  return (
+    typeof (
+      window as Window & {
+        __TAURI_INTERNALS__?: unknown;
+      }
+    ).__TAURI_INTERNALS__ !== "undefined"
+  );
 }
 
 function normalizeVersion(version: string): string {
@@ -59,9 +73,10 @@ function compareVersionStrings(a: string, b: string): number {
   return aPre.localeCompare(bPre);
 }
 
-export async function listenMonarchEvent<E extends keyof EventPayloadMap>(eventName: E, handler: (event: {
-  payload: EventPayloadMap[E];
-}) => void): Promise<() => void> {
+export async function listenMonarchEvent<E extends keyof EventPayloadMap>(
+  eventName: E,
+  handler: (event: { payload: EventPayloadMap[E] }) => void,
+): Promise<() => void> {
   if (useWebMock) {
     return mock.listenMonarchEvent(eventName, handler);
   }
@@ -107,7 +122,11 @@ export async function openExternalUrl(url: string): Promise<void> {
   const normalizedUrl = normalizeExternalUrl(url);
   if (useWebMock) {
     if (typeof window !== "undefined") {
-      const opened = window.open(normalizedUrl, "_blank", "noopener,noreferrer");
+      const opened = window.open(
+        normalizedUrl,
+        "_blank",
+        "noopener,noreferrer",
+      );
       if (!opened) {
         window.location.assign(normalizedUrl);
       }
@@ -140,14 +159,18 @@ export async function checkGithubReleaseUpdate(): Promise<ReleaseUpdateCheckResu
     tag_name?: unknown;
     html_url?: unknown;
   };
-  if (typeof payload.tag_name !== "string" || payload.tag_name.trim().length === 0) {
+  if (
+    typeof payload.tag_name !== "string" ||
+    payload.tag_name.trim().length === 0
+  ) {
     throw new Error("GitHub releases response missing tag_name");
   }
   const latestTag = payload.tag_name.trim();
   const latestVersion = normalizeVersion(latestTag);
-  const releaseUrl = typeof payload.html_url === "string" && payload.html_url.trim().length > 0
-    ? payload.html_url
-    : GITHUB_RELEASES_URL;
+  const releaseUrl =
+    typeof payload.html_url === "string" && payload.html_url.trim().length > 0
+      ? payload.html_url
+      : GITHUB_RELEASES_URL;
   return {
     currentVersion,
     latestVersion,
@@ -221,8 +244,15 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
 }
 
 export async function getDisplayCapabilities(): Promise<DisplayCapabilities[]> {
-  return useWebMock ? mock.getDisplayCapabilities() : invoke("get_display_capabilities");
+  return useWebMock
+    ? mock.getDisplayCapabilities()
+    : invoke("get_display_capabilities");
 }
-export async function saveProfileLayout(name: string, layout: Layout): Promise<void> {
-  return useWebMock ? mock.saveProfileLayout(name, layout) : invoke("save_profile_layout", {name,layout});
+export async function saveProfileLayout(
+  name: string,
+  layout: Layout,
+): Promise<void> {
+  return useWebMock
+    ? mock.saveProfileLayout(name, layout)
+    : invoke("save_profile_layout", { name, layout });
 }

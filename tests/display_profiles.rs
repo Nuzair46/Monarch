@@ -217,3 +217,31 @@ fn every_failed_stage_restores_all_captured_settings_and_failed_recovery_is_expl
         Err(ManagerError::RecoveryRequired(_))
     ));
 }
+
+#[test]
+fn saved_editor_identity_is_not_replaced_by_a_different_panel_on_the_same_port() {
+    let old = layout();
+    let mut live = old.clone();
+    live.outputs[1].display_id.identity.edid_serial = Some("different-panel".into());
+    let backend = MockBackend::new(vec![], live).unwrap();
+    let mut manager = MonarchDisplayManager::new(backend, MemoryConfigStore::default()).unwrap();
+    manager
+        .save_profile_layout("Disconnected".into(), old.clone())
+        .unwrap();
+    assert_eq!(
+        manager.list_profiles()[0].layout.outputs[1].display_id,
+        old.outputs[1].display_id
+    );
+    assert!(manager.apply_profile("Disconnected").is_err());
+}
+#[test]
+fn an_unobservable_previous_preference_cannot_be_lost_from_the_recovery_journal() {
+    let mut unknown = layout();
+    unknown.outputs[0].hdr_enabled = None;
+    let backend = MockBackend::new(vec![], unknown.clone()).unwrap();
+    let store = MemoryConfigStore::default();
+    let mut manager = MonarchDisplayManager::new(backend.clone(), store.clone()).unwrap();
+    assert!(manager.apply_layout(layout()).is_err());
+    assert_eq!(backend.current_layout().unwrap(), unknown);
+    assert!(store.snapshot().unwrap().pending_recovery.is_none());
+}

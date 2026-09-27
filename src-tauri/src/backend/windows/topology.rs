@@ -179,7 +179,7 @@ impl DisplayBackend for WindowsDisplayBackend {
         let gamma = super::apply::capture_active_gamma_ramps(&previous);
         let result = monarch::transaction::apply_with_recovery(
             || self.apply_layout_inner(layout),
-            || restore_pre_extend_topology(&previous),
+            || restore_captured_state(&previous),
         );
         if let Ok(observed) = query_active_only_topology() {
             super::apply::best_effort_reload_color_calibration();
@@ -218,26 +218,46 @@ fn merge_sdr_gamma_cache(
     }
 }
 
-fn restore_pre_extend_topology(previous: &TopologySnapshot) -> Result<(), ManagerError> {
+fn restore_captured_state(previous: &TopologySnapshot) -> Result<(), ManagerError> {
     use windows::Win32::Devices::Display::*;
-    let status = unsafe {
-        SetDisplayConfig(
-            Some(&previous.raw.paths),
-            Some(&previous.raw.modes),
-            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE,
-        )
+    let connected = query_connected_topology()?;
+    let desired = monarch::identity::resolve_layout(&previous.layout, &connected.layout)?;
+    let same_endpoints = previous
+        .layout
+        .outputs
+        .iter()
+        .zip(&desired.outputs)
+        .all(|(a, b)| !a.enabled || a.display_id.endpoint() == b.display_id.endpoint());
+    let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG;
+    let validation = if same_endpoints {
+        unsafe {
+            SetDisplayConfig(
+                Some(&previous.raw.paths),
+                Some(&previous.raw.modes),
+                SDC_VALIDATE | flags,
+            )
+        }
+    } else {
+        -1
+    };
+    let status = if validation == 0 {
+        unsafe {
+            SetDisplayConfig(
+                Some(&previous.raw.paths),
+                Some(&previous.raw.modes),
+                SDC_APPLY | flags | SDC_SAVE_TO_DATABASE,
+            )
+        }
+    } else {
+        validation
     };
     if status != 0 {
-        let connected = query_connected_topology()?;
-        let desired = monarch::identity::resolve_layout(&previous.layout, &connected.layout)?;
         apply_layout_against_snapshot(&desired, &connected)?;
     } else {
-        let refreshed = query_active_only_topology()?;
-        super::apply::apply_preferences(&previous.layout, &refreshed)?;
+        let refreshed = super::apply::wait_for_requested_outputs(&desired)?;
+        super::apply::restore_preferences(&desired, &refreshed)?;
     }
-    let observed = query_active_only_topology()?;
-    let desired = monarch::identity::resolve_layout(&previous.layout, &observed.layout)?;
-    monarch::verification::verify_applied_layout(&desired, &observed.layout)
+    super::apply::wait_for_verified_layout(&desired).map(|_| ())
 }
 
 /// The pre-recovery topology is the ONLY rollback net on a machine with no internal panel, so it
@@ -265,7 +285,7 @@ mod hardware_tests {
 
     impl Drop for RestoreOnDrop {
         fn drop(&mut self) {
-            if let Err(error) = restore_pre_extend_topology(&self.0) {
+            if let Err(error) = restore_captured_state(&self.0) {
                 eprintln!("Hardware test cleanup failed: {error}");
             }
         }
