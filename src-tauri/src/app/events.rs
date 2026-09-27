@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
@@ -106,7 +104,8 @@ fn parse_color_state_signature(signature: &str) -> Option<HashMap<String, char>>
 }
 
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    let menu = build_tray_menu(app)?;
+    let snapshot = tray_menu_snapshot(app).ok();
+    let menu = build_tray_menu(app, snapshot.as_ref())?;
     let mut tray_builder = TrayIconBuilder::with_id("monarch-tray")
         .tooltip("Monarch")
         .menu(&menu)
@@ -128,65 +127,46 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         tray_builder = tray_builder.icon(icon);
     }
     tray_builder.build(app)?;
+    app.manage(TrayMenuState {
+        installed: Mutex::new(snapshot),
+    });
     Ok(())
 }
 
 pub fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
-    let _refresh_guard = match tray_menu_refresh_lock().try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            // Another refresh is in flight. Don't drop this one silently: schedule a single
-            // deferred retry so the menu still converges on the latest state.
-            diagnostics::log("tray_refresh:skip_busy");
-            schedule_tray_refresh_retry(app);
-            return;
-        }
-    };
-    tray_refresh_retry_delay_ms().store(TRAY_REFRESH_RETRY_BASE_MS, Ordering::SeqCst);
+    // Serialize native menu work on the UI thread. Read the latest snapshot there so
+    // queued refreshes converge without replacing the same menu repeatedly.
+    let handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || refresh_tray_menu_on_main_thread(&handle)) {
+        diagnostics::log(format!("tray_refresh:dispatch_failed:{error}"));
+    }
+}
+
+fn refresh_tray_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
     let Some(tray) = app.tray_by_id("monarch-tray") else {
         return;
     };
-    if let Ok(menu) = build_tray_menu(app) {
-        let _ = tray.set_menu(Some(menu));
-    }
-}
-
-const TRAY_REFRESH_RETRY_BASE_MS: u64 = 300;
-const TRAY_REFRESH_RETRY_MAX_MS: u64 = 5000;
-
-fn tray_refresh_retry_pending() -> &'static AtomicBool {
-    static PENDING: OnceLock<AtomicBool> = OnceLock::new();
-    PENDING.get_or_init(|| AtomicBool::new(false))
-}
-
-fn tray_refresh_retry_delay_ms() -> &'static AtomicU64 {
-    static DELAY: OnceLock<AtomicU64> = OnceLock::new();
-    DELAY.get_or_init(|| AtomicU64::new(TRAY_REFRESH_RETRY_BASE_MS))
-}
-
-fn schedule_tray_refresh_retry<R: Runtime>(app: &AppHandle<R>) {
-    if tray_refresh_retry_pending()
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let Some(state) = app.try_state::<TrayMenuState>() else {
         return;
+    };
+    let snapshot = match tray_menu_snapshot(app) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            diagnostics::log(format!("tray_refresh:snapshot_failed:{error}"));
+            return;
+        }
+    };
+    let Ok(mut installed) = state.installed.lock() else {
+        diagnostics::log("tray_refresh:state_lock_poisoned");
+        return;
+    };
+    if let Err(error) = update_tray_menu(&mut installed, snapshot, |snapshot| {
+        let menu = build_tray_menu(app, Some(snapshot))?;
+        tray.set_menu(Some(menu))
+    }) {
+        // Keep the last successfully installed snapshot so the next poll retries.
+        diagnostics::log(format!("tray_refresh:failed:{error}"));
     }
-    // Exponential backoff (capped) so a long-blocked holder does not produce a thread+log
-    // storm every 300ms; the delay resets once a refresh actually gets through.
-    let delay_ms = tray_refresh_retry_delay_ms().load(Ordering::SeqCst);
-    let next_delay_ms = (delay_ms * 2).min(TRAY_REFRESH_RETRY_MAX_MS);
-    tray_refresh_retry_delay_ms().store(next_delay_ms, Ordering::SeqCst);
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(delay_ms));
-        tray_refresh_retry_pending().store(false, Ordering::SeqCst);
-        refresh_tray_menu(&app);
-    });
-}
-
-fn tray_menu_refresh_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn submit<R: Runtime>(app: &AppHandle<R>, operation: super::coordinator::Operation) {
@@ -216,46 +196,67 @@ pub fn handle_toggle_display_external_action<R: Runtime>(app: &AppHandle<R>, key
     );
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TrayMenuDisplay {
     id_key: String,
     friendly_name: String,
     is_active: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TrayMenuSnapshot {
     cursor_enabled: bool,
     profiles: Vec<String>,
     displays: Vec<TrayMenuDisplay>,
 }
 
-fn tray_menu_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<TrayMenuSnapshot, String> {
-    let state = app.state::<MonarchAppState>();
-    let snapshot = state.controller.snapshot()?;
-    let profiles = snapshot.profiles.into_iter().map(|p| p.name).collect();
-    let displays = snapshot
-        .displays
-        .into_iter()
-        .map(|d| TrayMenuDisplay {
-            id_key: d.id_key,
-            friendly_name: d.friendly_name,
-            is_active: d.is_active,
-        })
-        .collect();
-
-    Ok(TrayMenuSnapshot {
-        profiles,
-        displays,
-        cursor_enabled: snapshot.settings.cursor_correction_enabled,
-    })
+struct TrayMenuState {
+    installed: Mutex<Option<TrayMenuSnapshot>>,
 }
 
-fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
-    let snapshot = tray_menu_snapshot(app).ok();
+impl From<super::commands::AppSnapshotDto> for TrayMenuSnapshot {
+    fn from(snapshot: super::commands::AppSnapshotDto) -> Self {
+        Self {
+            cursor_enabled: snapshot.settings.cursor_correction_enabled,
+            profiles: snapshot.profiles.into_iter().map(|p| p.name).collect(),
+            displays: snapshot
+                .displays
+                .into_iter()
+                .map(|d| TrayMenuDisplay {
+                    id_key: d.id_key,
+                    friendly_name: d.friendly_name,
+                    is_active: d.is_active,
+                })
+                .collect(),
+        }
+    }
+}
 
+fn tray_menu_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<TrayMenuSnapshot, String> {
+    let state = app.state::<MonarchAppState>();
+    state.controller.snapshot().map(TrayMenuSnapshot::from)
+}
+
+fn update_tray_menu(
+    installed: &mut Option<TrayMenuSnapshot>,
+    snapshot: TrayMenuSnapshot,
+    replace: impl FnOnce(&TrayMenuSnapshot) -> tauri::Result<()>,
+) -> tauri::Result<()> {
+    // Replacing the native Windows menu dismisses it if it is open. Background
+    // polling must leave it intact when labels, actions and ordering are unchanged.
+    if installed.as_ref() != Some(&snapshot) {
+        replace(&snapshot)?;
+        *installed = Some(snapshot);
+    }
+    Ok(())
+}
+
+fn build_tray_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    snapshot: Option<&TrayMenuSnapshot>,
+) -> tauri::Result<tauri::menu::Menu<R>> {
     let mut profiles_menu = SubmenuBuilder::new(app, "Profiles");
-    if let Some(snapshot) = &snapshot {
+    if let Some(snapshot) = snapshot {
         if snapshot.profiles.is_empty() {
             profiles_menu = profiles_menu.text("profiles.none", "(No Profiles)");
         } else {
@@ -266,7 +267,7 @@ fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu:
     }
 
     let mut toggles_menu = SubmenuBuilder::new(app, "Toggle Monitor");
-    if let Some(snapshot) = &snapshot {
+    if let Some(snapshot) = snapshot {
         for display in &snapshot.displays {
             let label = if display.is_active {
                 format!("Detach {}", display.friendly_name)
@@ -335,6 +336,141 @@ fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
 
 fn handle_restore_last_layout<R: Runtime>(app: &AppHandle<R>) {
     submit(app, super::coordinator::Operation::Restore);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::commands::{
+        AppSnapshotDto, DisplayInfoDto, LayoutDto, PendingConfirmationDto, ProfileDto,
+        ResolutionDto,
+    };
+
+    fn snapshot() -> AppSnapshotDto {
+        AppSnapshotDto {
+            generation: 1,
+            displays: vec![DisplayInfoDto {
+                id_key: "1:1".into(),
+                friendly_name: "Desk monitor".into(),
+                is_active: true,
+                is_primary: true,
+                resolution: ResolutionDto {
+                    width: 1920,
+                    height: 1080,
+                },
+                refresh_rate_mhz: 60_000,
+            }],
+            layout: LayoutDto { outputs: vec![] },
+            profiles: vec![
+                ProfileDto {
+                    name: "Desk".into(),
+                    layout: LayoutDto { outputs: vec![] },
+                },
+                ProfileDto {
+                    name: "TV".into(),
+                    layout: LayoutDto { outputs: vec![] },
+                },
+            ],
+            settings: monarch::AppSettings::default(),
+            capabilities: vec![],
+            cursor_status: monarch::cursor::CursorStatus::default(),
+            pending_confirmation: Some(PendingConfirmationDto { remaining_ms: 5000 }),
+        }
+    }
+
+    #[test]
+    fn repeated_polls_preserve_the_menu_installed_at_startup() {
+        let snapshot = TrayMenuSnapshot::from(snapshot());
+        let mut installed = Some(snapshot.clone());
+        for _ in 0..5 {
+            update_tray_menu(&mut installed, snapshot.clone(), |_| {
+                panic!("an unchanged poll must not replace the open native menu")
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn non_menu_snapshot_changes_do_not_replace_the_menu() {
+        let original = snapshot();
+        let mut installed = Some(TrayMenuSnapshot::from(original.clone()));
+        let mut next = original;
+        next.generation += 1;
+        next.pending_confirmation.as_mut().unwrap().remaining_ms = 3000;
+        next.settings.start_with_windows = !next.settings.start_with_windows;
+        next.cursor_status.input_events = 300;
+        next.cursor_status.corrected_crossings = 12;
+        next.cursor_status.pause_reason = Some("Ctrl is held".into());
+        next.displays[0].resolution.width = 2560;
+        next.displays[0].refresh_rate_mhz = 144_000;
+        next.displays[0].is_primary = false;
+        update_tray_menu(&mut installed, next.into(), |_| {
+            panic!("metadata and display modes do not change the tray menu")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn changed_labels_actions_and_order_replace_the_menu_once() {
+        let original = TrayMenuSnapshot::from(snapshot());
+        let changes: &[fn(&mut TrayMenuSnapshot)] = &[
+            |s| s.cursor_enabled = !s.cursor_enabled,
+            |s| s.profiles.push("Game".into()),
+            |s| s.profiles.clear(),
+            |s| s.profiles[0] = "Work".into(),
+            |s| s.profiles.swap(0, 1),
+            |s| s.displays[0].is_active = false,
+            |s| s.displays[0].friendly_name = "TV".into(),
+            |s| s.displays[0].id_key = "2:1".into(),
+            |s| s.displays.clear(),
+            |s| {
+                s.displays.push(TrayMenuDisplay {
+                    id_key: "1:2".into(),
+                    friendly_name: "Second monitor".into(),
+                    is_active: false,
+                });
+            },
+        ];
+        for change in changes {
+            let mut installed = Some(original.clone());
+            let mut next = original.clone();
+            change(&mut next);
+            let mut replacements = 0;
+            for _ in 0..2 {
+                update_tray_menu(&mut installed, next.clone(), |requested| {
+                    assert_eq!(requested, &next);
+                    replacements += 1;
+                    Ok(())
+                })
+                .unwrap();
+            }
+            assert_eq!(replacements, 1);
+            assert_eq!(installed.as_ref(), Some(&next));
+        }
+    }
+
+    #[test]
+    fn failed_replacement_preserves_the_installed_state_and_retries() {
+        let original = TrayMenuSnapshot::from(snapshot());
+        let mut next = original.clone();
+        next.displays[0].is_active = false;
+        for previous in [None, Some(original)] {
+            let mut installed = previous.clone();
+            let error = update_tray_menu(&mut installed, next.clone(), |_| {
+                Err(std::io::Error::other("native menu replacement failed").into())
+            });
+            assert!(error.is_err());
+            assert_eq!(installed, previous);
+            let mut retried = false;
+            update_tray_menu(&mut installed, next.clone(), |_| {
+                retried = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(retried);
+            assert_eq!(installed.as_ref(), Some(&next));
+        }
+    }
 }
 
 /// Subscribe to system power-resume and display-change broadcasts so the backend cache is
