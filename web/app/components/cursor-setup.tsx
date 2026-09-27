@@ -8,6 +8,8 @@ import {
   calibrationSurfaces,
   calibrationValid,
   seedCalibration,
+  alignCalibration,
+  type PhysicalAlignment,
   type CalibrationRow,
 } from "@/app/cursor-calibration";
 import type { AppSettings, AppSnapshot } from "@/types";
@@ -26,6 +28,12 @@ export function CursorSetup({
     snapshot.settings.cursor_correction_enabled,
   );
   const [dirty, setDirty] = useState(false);
+  const [alignment, setAlignment] = useState<PhysicalAlignment>("center");
+  const [anchorKey, setAnchorKey] = useState<string | null>(null);
+  const [otherKey, setOtherKey] = useState<string | null>(null);
+  const [sideOverride, setSideOverride] = useState<
+    "left" | "right" | "above" | "below" | null
+  >(null);
   const signature = JSON.stringify([
     snapshot.settings.cursor_correction_enabled,
     snapshot.settings.cursor_calibrations,
@@ -50,6 +58,36 @@ export function CursorSetup({
   const connections = calibrationConnections(surfaces);
   const status = snapshot.cursor_status;
   const canRun = valid && connections.boundaries > 0;
+  const anchor = surfaces.find((s) => s.key === anchorKey) ?? surfaces[0];
+  const other =
+    surfaces.find((s) => s.key === otherKey && s !== anchor) ??
+    surfaces.find((s) => s !== anchor);
+  const anchorOutput = snapshot.layout.outputs.find(
+    (o) => o.display_key === anchor?.key,
+  );
+  const otherOutput = snapshot.layout.outputs.find(
+    (o) => o.display_key === other?.key,
+  );
+  const windowsStacked = Boolean(
+    anchorOutput &&
+    otherOutput &&
+    (otherOutput.position.y >=
+      anchorOutput.position.y + anchorOutput.resolution.height ||
+      anchorOutput.position.y >=
+        otherOutput.position.y + otherOutput.resolution.height),
+  );
+  const side =
+    sideOverride ??
+    (windowsStacked
+      ? otherOutput!.position.y < anchorOutput!.position.y
+        ? "above"
+        : "below"
+      : otherOutput &&
+          anchorOutput &&
+          otherOutput.position.x < anchorOutput.position.x
+        ? "left"
+        : "right");
+  const stacked = side === "above" || side === "below";
   return (
     <Card>
       <CardHeader>
@@ -115,6 +153,107 @@ export function CursorSetup({
             Match Windows arrangement
           </Button>
         </div>
+        {anchor && other && (
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="grid gap-1 text-sm">
+              Move monitor
+              <select
+                className="h-9 rounded-md border bg-background px-2"
+                disabled={busy}
+                value={other.key}
+                aria-label="Move monitor"
+                onChange={(e) => {
+                  setOtherKey(e.target.value);
+                  setSideOverride(null);
+                }}
+              >
+                {surfaces
+                  .filter((s) => s !== anchor)
+                  .map((s) => (
+                    <option key={s.key} value={s.key}>
+                      {s.label}: {s.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label className="grid gap-1 text-sm">
+              Position
+              <select
+                className="h-9 rounded-md border bg-background px-2"
+                disabled={busy}
+                value={side}
+                aria-label="Position"
+                onChange={(e) => setSideOverride(e.target.value as typeof side)}
+              >
+                <option value="above">Above</option>
+                <option value="below">Below</option>
+                <option value="left">Left of</option>
+                <option value="right">Right of</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-sm">
+              Relative to monitor
+              <select
+                className="h-9 rounded-md border bg-background px-2"
+                disabled={busy}
+                value={anchor.key}
+                aria-label="Relative to monitor"
+                onChange={(e) => {
+                  setAnchorKey(e.target.value);
+                  setOtherKey(null);
+                  setSideOverride(null);
+                }}
+              >
+                {surfaces.map((s) => (
+                  <option key={s.key} value={s.key}>
+                    {s.label}: {s.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1 text-sm">
+              {stacked ? "For stacked monitors" : "For side-by-side monitors"}
+              <select
+                className="h-9 rounded-md border bg-background px-2"
+                value={alignment}
+                aria-label={
+                  stacked ? "For stacked monitors" : "For side-by-side monitors"
+                }
+                disabled={busy}
+                onChange={(e) =>
+                  setAlignment(e.target.value as PhysicalAlignment)
+                }
+              >
+                <option value="center">Align centres</option>
+                <option value="start">
+                  {stacked ? "Align left edges" : "Align top edges"}
+                </option>
+                <option value="end">
+                  {stacked ? "Align right edges" : "Align bottom edges"}
+                </option>
+              </select>
+            </label>
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setRows(
+                  alignCalibration(
+                    snapshot,
+                    rows,
+                    anchor.key,
+                    other.key,
+                    side,
+                    alignment,
+                  ),
+                );
+                setDirty(true);
+              }}
+            >
+              Align monitors
+            </Button>
+          </div>
+        )}
         {connections.overlapping.size > 0 && (
           <p role="alert" className="text-sm text-destructive">
             Physical monitors overlap. Drag them apart so their edges meet.
@@ -158,49 +297,59 @@ export function CursorSetup({
                   />
                   Use {display?.friendly_name ?? "disconnected display"}
                 </label>
-                <div className="grid gap-3 sm:grid-cols-4">
-                  {(
-                    [
-                      ["width_mm", "Width (mm)"],
-                      ["height_mm", "Height (mm)"],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <label key={key} className="grid gap-1 text-sm">
-                      {label}
-                      <Input
-                        type="number"
-                        min={10}
-                        max={10000}
-                        value={row[key] || ""}
-                        placeholder="Measure panel"
-                        onChange={(e) =>
-                          edit(row.display_key, {
-                            [key]: Number(e.target.value),
-                          })
-                        }
-                      />
-                    </label>
-                  ))}
-                  {(["x", "y"] as const).map((axis) => (
-                    <label key={axis} className="grid gap-1 text-sm">
-                      {axis.toUpperCase()} (mm)
-                      <Input
-                        type="number"
-                        min={-1000000}
-                        max={1000000}
-                        value={row.position_mm[axis]}
-                        onChange={(e) =>
-                          edit(row.display_key, {
-                            position_mm: {
-                              ...row.position_mm,
-                              [axis]: Number(e.target.value),
-                            },
-                          })
-                        }
-                      />
-                    </label>
-                  ))}
-                </div>
+                <p className="text-sm text-muted-foreground">
+                  {row.width_mm && row.height_mm
+                    ? `${row.width_mm} × ${row.height_mm} mm panel`
+                    : "Panel size could not be detected."}
+                </p>
+                <details open={!calibrationValid(row) || undefined}>
+                  <summary className="cursor-pointer text-sm">
+                    Adjust size and position
+                  </summary>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-4">
+                    {(
+                      [
+                        ["width_mm", "Width (mm)"],
+                        ["height_mm", "Height (mm)"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <label key={key} className="grid gap-1 text-sm">
+                        {label}
+                        <Input
+                          type="number"
+                          min={10}
+                          max={10000}
+                          value={row[key] || ""}
+                          placeholder="Measure panel"
+                          onChange={(e) =>
+                            edit(row.display_key, {
+                              [key]: Number(e.target.value),
+                            })
+                          }
+                        />
+                      </label>
+                    ))}
+                    {(["x", "y"] as const).map((axis) => (
+                      <label key={axis} className="grid gap-1 text-sm">
+                        {axis.toUpperCase()} (mm)
+                        <Input
+                          type="number"
+                          min={-1000000}
+                          max={1000000}
+                          value={row.position_mm[axis]}
+                          onChange={(e) =>
+                            edit(row.display_key, {
+                              position_mm: {
+                                ...row.position_mm,
+                                [axis]: Number(e.target.value),
+                              },
+                            })
+                          }
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </details>
                 {members.length > 1 && (
                   <label className="flex items-center gap-2 text-sm">
                     <input

@@ -157,7 +157,8 @@ impl DisplayBackend for WindowsDisplayBackend {
             )
         };
         if status != 0 {
-            return Err(ManagerError::Validation(format!("Windows rejected the requested display combination ({status}); select compatible resolution/refresh or Extend")));
+            super::apply::log_rejected_plan(status, &paths, &modes);
+            return Err(super::apply::validation_error(status));
         }
         Ok(())
     }

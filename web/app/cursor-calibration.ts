@@ -191,7 +191,9 @@ export function seedCalibration(
             ? 0
             : aStart + aPixels === bStart + bPixels
               ? aMm - bMm
-              : ((bStart - aStart) / aPixels) * aMm;
+              : Math.abs(2 * aStart + aPixels - (2 * bStart + bPixels)) <= 1
+                ? (aMm - bMm) / 2
+                : ((bStart - aStart) / aPixels) * aMm;
         let x: number, y: number;
         const verticalOverlap =
           a.position.y < b.position.y + b.resolution.height &&
@@ -258,4 +260,39 @@ export function seedCalibration(
     ...rows,
     ...saved.filter((r) => !rows.some((d) => d.display_key === r.display_key)),
   ];
+}
+
+export type PhysicalAlignment = "start" | "center" | "end";
+
+// Place the other panel against the selected panel's edge. These are explicit
+// physical choices; pixel offsets cannot tell us whether real centres line up.
+export function alignCalibration(
+  snapshot: AppSnapshot,
+  rows: CalibrationRow[],
+  anchorKey: string,
+  otherKey: string,
+  side: "left" | "right" | "above" | "below",
+  alignment: PhysicalAlignment,
+): CalibrationRow[] {
+  const surfaces = calibrationSurfaces(snapshot, rows);
+  const anchor = surfaces.find((s) => s.key === anchorKey);
+  const other = surfaces.find((s) => s.key === otherKey);
+  if (!anchor || !other) return rows;
+  const fraction = alignment === "center" ? 0.5 : alignment === "end" ? 1 : 0;
+  const position_mm =
+    side === "above" || side === "below"
+      ? {
+          x: Math.round(anchor.x + (anchor.width - other.width) * fraction),
+          y:
+            side === "above"
+              ? anchor.y - other.height
+              : anchor.y + anchor.height,
+        }
+      : {
+          x: side === "left" ? anchor.x - other.width : anchor.x + anchor.width,
+          y: Math.round(anchor.y + (anchor.height - other.height) * fraction),
+        };
+  return rows.map((r) =>
+    r.display_key === otherKey ? { ...r, position_mm } : r,
+  );
 }

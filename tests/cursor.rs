@@ -120,6 +120,71 @@ fn ultrawide_1080p_and_1440p_at_100_percent_align_in_both_directions() {
 }
 
 #[test]
+fn stacked_displays_with_different_sizes_preserve_physical_horizontal_position() {
+    // Pixel centring and physical centring require different offsets.
+    for small_above in [true, false] {
+        let mut large = output(1, 0, 0);
+        large.resolution = Resolution {
+            width: 3440,
+            height: 1440,
+        };
+        let mut small = output(2, 440, if small_above { -1080 } else { 1440 });
+        small.resolution = Resolution {
+            width: 2560,
+            height: 1080,
+        };
+        let layout = Layout {
+            outputs: vec![large.clone(), small.clone()],
+        };
+        let calibrations = vec![
+            calibration(&large, 800, 337, 0, 0),
+            calibration(&small, 674, 284, 63, if small_above { -284 } else { 337 }),
+        ];
+        let mapping = Mapping::build(&layout, &calibrations);
+        assert_eq!(mapping.boundary_count(), 1);
+        for physical_x in (80..730).step_by(25) {
+            let large_x = (f64::from(physical_x) / 800.0 * 3440.0).round() as i32;
+            let (before_y, after_y) = if small_above { (5, -5) } else { (1435, 1445) };
+            let to_small = mapping
+                .map_motion(
+                    Point {
+                        x: large_x,
+                        y: before_y,
+                    },
+                    Point {
+                        x: large_x,
+                        y: after_y,
+                    },
+                    context(),
+                )
+                .unwrap();
+            let expected_small_x = 440.0 + (f64::from(physical_x) - 63.0) / 674.0 * 2560.0;
+            assert!((f64::from(to_small.x) - expected_small_x).abs() <= 1.0);
+            let reverse = mapping
+                .map_motion(
+                    to_small,
+                    Point {
+                        x: to_small.x,
+                        y: before_y,
+                    },
+                    context(),
+                )
+                .unwrap();
+            assert!((reverse.x - large_x).abs() <= 1);
+        }
+        // Both centres stay on x=1720 despite different resolutions and widths.
+        let (a, b) = if small_above { (5, -5) } else { (1435, 1445) };
+        assert_eq!(
+            mapping
+                .map_motion(Point { x: 1720, y: a }, Point { x: 1720, y: b }, context())
+                .unwrap()
+                .x,
+            1720
+        );
+    }
+}
+
+#[test]
 fn ultrawide_dead_end_and_fast_outer_edge_keep_physical_height() {
     let (layout, c) = ultrawide_pair();
     let mapping = Mapping::build(&layout, &c);

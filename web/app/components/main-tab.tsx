@@ -6,9 +6,14 @@ import { TabsContent } from "@/components/ui/tabs";
 import { LayoutPreview } from "@/app/components/layout-preview";
 import { MonitorCard } from "@/app/components/monitor-card";
 import { DisplayProperties } from "./display-properties";
-import { editOutput, layoutError, rebaseLayout } from "@/app/display-editor";
+import {
+  arrangementDraft,
+  sameSource,
+  layoutError,
+  rebaseLayout,
+} from "@/app/display-editor";
 import { indexedShortcutLabel } from "@/app/utils";
-import type { AppSnapshot, DisplayInfo, Layout } from "@/types";
+import type { AppSnapshot, DisplayInfo, Layout, Position } from "@/types";
 
 type MainTabProps = {
   loading: boolean;
@@ -20,7 +25,6 @@ type MainTabProps = {
   displayShortcutBase: string | null;
   onApplyLayout: (layout: Layout) => Promise<boolean>;
   onRestoreLastLayout: () => void;
-  onMakePrimaryRequest: (display: DisplayInfo) => void;
   onToggleRequest: (display: DisplayInfo) => void;
 };
 
@@ -34,34 +38,27 @@ export function MainTab({
   displayShortcutBase,
   onApplyLayout,
   onRestoreLastLayout,
-  onMakePrimaryRequest,
   onToggleRequest,
 }: MainTabProps) {
-  const [draft, setDraft] = useState<Layout | null>(null);
+  const [offsets, setOffsets] = useState<Record<string, Position>>({});
   const [editing, setEditing] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const signature = JSON.stringify(snapshot?.layout);
   useEffect(() => {
-    if (draft) {
-      setDraft(null);
-      if (!actionBusy)
-        setNotice(
-          "The active display layout changed. Review the current arrangement before editing again.",
-        );
-    }
+    if (Object.keys(offsets).length)
+      setNotice(
+        "Display settings changed. Your unsaved position adjustments are still shown in the preview.",
+      );
     setEditing(null);
   }, [signature]);
   if (loading || !snapshot) {
     return <TabsContent value="main" className="mt-0" />;
   }
 
-  const layout = draft ?? snapshot.layout;
-  const error = draft ? layoutError(draft, snapshot.capabilities) : null;
+  const layout = arrangementDraft(snapshot.layout, offsets);
+  const draft = JSON.stringify(layout) !== signature;
+  const error = draft ? layoutError(layout, snapshot.capabilities) : null;
   const locked = actionBusy || hasPendingConfirmation;
-  function change(next: Layout) {
-    setDraft(JSON.stringify(next) === signature ? null : next);
-    setNotice(null);
-  }
 
   return (
     <TabsContent value="main" className="mt-0">
@@ -83,14 +80,32 @@ export function MainTab({
               <LayoutPreview
                 snapshot={{ ...snapshot, layout }}
                 disabled={locked}
-                onMove={(key, position) =>
-                  change(editOutput(layout, key, { position }))
-                }
+                onMove={(key, position) => {
+                  const output = snapshot.layout.outputs.find(
+                    (o) => o.display_key === key,
+                  )!;
+                  const offset = {
+                    x: position.x - output.position.x,
+                    y: position.y - output.position.y,
+                  };
+                  setOffsets((current) => {
+                    const next = { ...current };
+                    for (const member of snapshot.layout.outputs.filter(
+                      (o) => o === output || sameSource(o, output),
+                    )) {
+                      if (offset.x || offset.y)
+                        next[member.display_key] = offset;
+                      else delete next[member.display_key];
+                    }
+                    return next;
+                  });
+                  setNotice(null);
+                }}
               />
               <p className="mt-3 text-sm text-muted-foreground">
                 Drag monitors to match your desk. Use arrow keys for small
-                adjustments. Click a monitor in the list to change its
-                properties.
+                adjustments. Save layout applies positions. Use Settings beside
+                a monitor to change its properties.
               </p>
               {notice && (
                 <p role="status" className="mt-2 text-sm text-muted-foreground">
@@ -107,7 +122,7 @@ export function MainTab({
                   variant="outline"
                   disabled={!draft || locked}
                   onClick={() => {
-                    setDraft(null);
+                    setOffsets({});
                     setNotice(null);
                   }}
                 >
@@ -116,10 +131,10 @@ export function MainTab({
                 <Button
                   disabled={!draft || locked || Boolean(error)}
                   onClick={() => {
-                    setDraft(null);
+                    setOffsets({});
                     setNotice(null);
                     void onApplyLayout(rebaseLayout(layout)).then((ok) => {
-                      if (!ok) setDraft(layout);
+                      if (!ok) setOffsets(offsets);
                     });
                   }}
                 >
@@ -160,7 +175,6 @@ export function MainTab({
                     busy={actionBusy || Boolean(draft)}
                     hasPendingConfirmation={hasPendingConfirmation}
                     activeDisplayCount={activeDisplayCount}
-                    onMakePrimaryRequest={onMakePrimaryRequest}
                     onToggleRequest={onToggleRequest}
                     onEdit={() => setEditing(display.id_key)}
                     editDisabled={locked}
@@ -175,14 +189,11 @@ export function MainTab({
           <DisplayProperties
             key={editing}
             displayKey={editing}
-            initial={layout}
+            initial={snapshot.layout}
             snapshot={snapshot}
             busy={locked}
             onClose={() => setEditing(null)}
-            onSave={(next) => {
-              change(next);
-              setEditing(null);
-            }}
+            onSave={onApplyLayout}
           />
         )}
 

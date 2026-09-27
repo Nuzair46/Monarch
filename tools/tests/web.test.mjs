@@ -5,6 +5,11 @@ import ts from "typescript";
 
 // Exercise the actual standalone TypeScript modules without a browser or new test dependency.
 function compiledModule(file, imports = {}) {
+  if (file === "web/app/display-editor.ts")
+    imports = {
+      "./arrangement": compiledModule("web/app/arrangement.ts"),
+      ...imports,
+    };
   let source = fs.readFileSync(
     new URL(`../../${file}`, import.meta.url),
     "utf8",
@@ -421,4 +426,195 @@ test("cursor calibration represents clone groups once and honors an explicit phy
   surfaces = calibration.calibrationSurfaces(snapshot, rows);
   assert.equal(surfaces.length, 1);
   assert.equal(surfaces[0].key, first.display_key);
+});
+
+test("stacked unequal ultrawides preserve physical centres rather than converting the pixel offset", async () => {
+  for (const smallAbove of [true, false]) {
+    const snapshot = await fixture();
+    snapshot.layout.outputs = snapshot.layout.outputs.slice(0, 2);
+    snapshot.displays = snapshot.displays.slice(0, 2);
+    const [large, small] = snapshot.layout.outputs;
+    large.resolution = { width: 3440, height: 1440 };
+    large.position = { x: 0, y: 0 };
+    small.resolution = { width: 2560, height: 1080 };
+    small.position = { x: 440, y: smallAbove ? -1080 : 1440 };
+    snapshot.capabilities[0].physical_size_mm = { width: 800, height: 337 };
+    snapshot.capabilities[1].physical_size_mm = { width: 674, height: 284 };
+    const rows = calibration.seedCalibration(snapshot);
+    assert.deepEqual(rows[1].position_mm, {
+      x: 63,
+      y: smallAbove ? -284 : 337,
+    });
+    assert.equal(
+      calibration.calibrationConnections(
+        calibration.calibrationSurfaces(snapshot, rows),
+      ).boundaries,
+      1,
+    );
+    // Old saved calibration is preserved until the user explicitly realigns.
+    rows[1].position_mm.x = 102;
+    const repaired = calibration.alignCalibration(
+      snapshot,
+      rows,
+      large.display_key,
+      small.display_key,
+      smallAbove ? "above" : "below",
+      "center",
+    );
+    assert.equal(repaired[1].position_mm.x, 63);
+    assert.equal(rows[1].position_mm.x, 102);
+    assert.equal(
+      calibration.alignCalibration(
+        snapshot,
+        rows,
+        large.display_key,
+        small.display_key,
+        "above",
+        "start",
+      )[1].position_mm.x,
+      0,
+    );
+    assert.equal(
+      calibration.alignCalibration(
+        snapshot,
+        rows,
+        large.display_key,
+        small.display_key,
+        "above",
+        "end",
+      )[1].position_mm.x,
+      126,
+    );
+  }
+});
+
+test("display settings apply independently of position drafts and resizing keeps neighbours joined", async () => {
+  const snapshot = await fixture();
+  const key = snapshot.layout.outputs[1].display_key;
+  const originalY = snapshot.layout.outputs[1].position.y;
+  const offsets = { [key]: { x: 0, y: 120 } };
+  const preview = editor.arrangementDraft(snapshot.layout, offsets);
+  assert.equal(preview.outputs[1].position.y, originalY + 120);
+  const settings = editor.editOutput(
+    snapshot.layout,
+    snapshot.layout.outputs[0].display_key,
+    { hdr_enabled: true },
+  );
+  assert.equal(settings.outputs[1].position.y, originalY);
+  const after = editor.arrangementDraft(settings, offsets);
+  assert.equal(after.outputs[0].hdr_enabled, true);
+  assert.equal(after.outputs[1].position.y, originalY + 120);
+  assert.deepEqual(editor.arrangementDraft(settings, {}), settings);
+  for (const width of [1920, 3440]) {
+    const resized = editor.editOutput(
+      snapshot.layout,
+      snapshot.layout.outputs[0].display_key,
+      { resolution: { width, height: 1440 } },
+    );
+    assert.ok(editor.desktopGeometryError(resized));
+    const fitted = editor.fitDesktop(resized);
+    assert.equal(editor.desktopGeometryError(fitted), null);
+    assert.equal(fitted.outputs[1].position.x, width);
+    assert.equal(
+      fitted.outputs[0].refresh_rate_mhz,
+      snapshot.layout.outputs[0].refresh_rate_mhz,
+    );
+  }
+});
+
+test("dropping a monitor closes gaps and avoids overlap without changing its size", () => {
+  const fixed = { x: 0, y: 0, width: 3440, height: 1440 };
+  const moving = { x: 440, y: -1080, width: 2560, height: 1080 };
+  for (const y of [-1100, -1060]) {
+    const position = arrangement.connectedPosition(moving, [fixed], {
+      x: 440,
+      y,
+    });
+    assert.deepEqual(position, { x: 440, y: -1080 });
+    assert.equal(
+      arrangement.rectanglesOverlap({ ...moving, ...position }, fixed),
+      false,
+    );
+    assert.equal(
+      arrangement.edgesTouch({ ...moving, ...position }, fixed),
+      true,
+    );
+  }
+});
+
+test("physical centring works on every side with mixed sizes, rotations and either primary", async () => {
+  for (const side of ["left", "right", "above", "below"]) {
+    for (const portrait of [false, true]) {
+      for (const primary of [0, 1]) {
+        const snapshot = await fixture();
+        snapshot.layout.outputs = snapshot.layout.outputs.slice(0, 2);
+        snapshot.displays = snapshot.displays.slice(0, 2);
+        const [a, b] = snapshot.layout.outputs;
+        a.primary = primary === 0;
+        b.primary = primary === 1;
+        a.resolution = portrait
+          ? { width: 1080, height: 1920 }
+          : { width: 1920, height: 1080 };
+        b.resolution = { width: 3840, height: 2160 };
+        a.rotation = portrait ? "portrait" : "landscape";
+        a.position = { x: 0, y: 0 };
+        const vertical = side === "above" || side === "below";
+        b.position = vertical
+          ? {
+              x: (a.resolution.width - b.resolution.width) / 2,
+              y: side === "above" ? -b.resolution.height : a.resolution.height,
+            }
+          : {
+              x: side === "left" ? -b.resolution.width : a.resolution.width,
+              y: (a.resolution.height - b.resolution.height) / 2,
+            };
+        snapshot.capabilities[0].physical_size_mm = { width: 600, height: 340 };
+        snapshot.capabilities[1].physical_size_mm = { width: 700, height: 390 };
+        snapshot.layout = editor.rebaseLayout(snapshot.layout);
+        const rows = calibration.seedCalibration(snapshot);
+        const surfaces = calibration.calibrationSurfaces(snapshot, rows);
+        const first = surfaces.find((s) => s.key === a.display_key),
+          second = surfaces.find((s) => s.key === b.display_key);
+        assert.equal(
+          calibration.calibrationConnections(surfaces).boundaries,
+          1,
+        );
+        if (vertical)
+          assert.equal(first.x + first.width / 2, second.x + second.width / 2);
+        else
+          assert.equal(
+            first.y + first.height / 2,
+            second.y + second.height / 2,
+          );
+      }
+    }
+  }
+});
+
+test("relative alignment changes only the selected surface in a multi-monitor arrangement", async () => {
+  const snapshot = await fixture();
+  const third = snapshot.layout.outputs[2];
+  third.enabled = true;
+  third.position = { x: 0, y: 1440 };
+  const rows = calibration.seedCalibration(snapshot);
+  const before = structuredClone(rows);
+  const aligned = calibration.alignCalibration(
+    snapshot,
+    rows,
+    rows[0].display_key,
+    rows[2].display_key,
+    "below",
+    "center",
+  );
+  assert.deepEqual(aligned[0], before[0]);
+  assert.deepEqual(aligned[1], before[1]);
+  assert.equal(
+    aligned[2].position_mm.y,
+    aligned[0].position_mm.y + aligned[0].height_mm,
+  );
+  assert.equal(
+    aligned[2].position_mm.x + aligned[2].height_mm / 2,
+    aligned[0].position_mm.x + aligned[0].width_mm / 2,
+  );
+  assert.deepEqual(rows, before);
 });

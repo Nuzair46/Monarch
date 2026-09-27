@@ -60,12 +60,16 @@ It uses Windows display topology APIs (`DisplayConfig`) to change which outputs 
 Monarch 2.0 starts with a fresh configuration. Settings and profiles from 1.x are
 not supported or migrated; recreate profiles from your current desktop.
 
-Drag monitors in **Layout Preview** to arrange them. Click a monitor in the
-**Monitors** list to open its properties, including separate **Resolution** and
-**Refresh rate** controls. Changes stay in the draft until **Save layout**, which
-uses the confirmation timer and restores captured settings if you revert or time out.
-**Discard changes** restores the preview without changing Windows. Arrow keys move
-a focused monitor; Shift makes larger adjustments.
+Drag monitors in **Layout Preview** to arrange them. Dropped monitors snap to an
+adjoining edge; gaps and overlaps must be resolved before **Save layout**. This
+button applies positions only. **Discard changes** restores the preview without
+changing Windows. Arrow keys move a focused monitor; Shift makes larger adjustments.
+
+Choose **Settings** beside a monitor's Attach/Detach button to change resolution,
+refresh rate, orientation, scaling, HDR, duplication or the primary display.
+**Save settings** applies directly from that dialog; **Cancel** discards its changes.
+It does not apply unsaved positions from the preview. Both save actions use the
+confirmation timer and restore captured settings if you revert or time out.
 
 Mode lists come from Windows. Unsupported HDR or scaling controls explain why they
 are unavailable. Detached or duplicated monitors may expose only their preferred
@@ -78,17 +82,21 @@ no separate editor.
 
 In **Settings → Cursor alignment**, confirm the panel dimensions and drag the
 physical monitors to match your desk. Valid EDID dimensions prefill active monitors;
-unknown dimensions must be measured manually. **Match Windows arrangement** places
-adjoining edges using each panel's physical size. Close any gaps and overlaps, then
+unknown dimensions can be entered under **Adjust size and position**.
+**Match Windows arrangement** places adjoining edges using each panel's physical
+size. To match real placement, choose which monitor to move, its position relative
+to another monitor, and **Align centres** or the appropriate edges, then click
+**Align monitors**. These controls work with horizontal, stacked, rotated and
+multi-monitor setups. Close any gaps and overlaps, then
 enable **Align cursor across monitors** and save. Calibration is global, and cloned
 desktops have one selectable physical representative. Hold **Ctrl** to bypass
 correction. The tray also has an alignment toggle. Alignment starts off.
 
 The status shows whether correction is active, why it is paused, and how many
 crossings have been corrected this session. Move across an edge to check the counter.
-For equal-size 2560×1080 and 3440×1440 panels, crossing at half height maps y=540 to
-y=720 even when both Windows scaling settings are 100%. Interior pointer speed stays
-unchanged. Physical offsets and unequal panel sizes change that mapping.
+The crossing point uses physical panel dimensions and placement, independently of
+Windows scaling. Interior pointer speed stays unchanged. Physical centring is
+preserved when the panels have different sizes and pixel densities.
 
 Real-device verification scenarios are listed in the [Windows hardware checklist](docs/windows-hardware-checklist.md).
 

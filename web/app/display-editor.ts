@@ -3,7 +3,13 @@ import type {
   OutputConfig,
   DisplayCapabilities,
   Resolution,
+  Position,
 } from "@/types";
+import {
+  connectedPosition,
+  edgesTouch,
+  rectanglesOverlap,
+} from "./arrangement";
 export const sameSource = (a: OutputConfig, b: OutputConfig) =>
   a.enabled &&
   b.enabled &&
@@ -192,7 +198,76 @@ export function layoutError(
         return "Monitors overlap. Drag them apart before saving the layout.";
     }
   }
-  return null;
+  return desktopGeometryError(layout);
+}
+
+const rectangle = (output: OutputConfig) => ({
+  ...output.position,
+  ...output.resolution,
+});
+const sources = (layout: Layout) =>
+  layout.outputs.filter(
+    (o, i) =>
+      o.enabled &&
+      !layout.outputs.slice(0, i).some((other) => sameSource(o, other)),
+  );
+
+export function desktopGeometryError(layout: Layout): string | null {
+  const active = sources(layout);
+  if (
+    active.some((a, i) =>
+      active
+        .slice(i + 1)
+        .some((b) => rectanglesOverlap(rectangle(a), rectangle(b))),
+    )
+  )
+    return "Monitors overlap. Drag them apart before saving the layout.";
+  if (!active.length) return "Keep at least one monitor active.";
+  const connected = new Set([active[0]]);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const output of active) {
+      if (
+        !connected.has(output) &&
+        [...connected].some((o) => edgesTouch(rectangle(o), rectangle(output)))
+      ) {
+        connected.add(output);
+        added = true;
+      }
+    }
+  }
+  return connected.size === active.length
+    ? null
+    : "Display edges must touch. Drag the monitors together to remove gaps before saving.";
+}
+
+// Resolution and rotation can grow into a neighbour or leave a gap. Keep the
+// desktop joined when applying properties without requiring a separate draft.
+export function fitDesktop(layout: Layout): Layout {
+  if (!desktopGeometryError(layout)) return layout;
+  let result = structuredClone(layout);
+  const pending = sources(result).sort(
+    (a, b) => Number(b.primary) - Number(a.primary),
+  );
+  const placed = [pending.shift()!];
+  if (!placed[0]) return layout;
+  while (pending.length) {
+    const index = pending.findIndex(
+      (o) =>
+        placed.some((p) => edgesTouch(rectangle(o), rectangle(p))) &&
+        !placed.some((p) => rectanglesOverlap(rectangle(o), rectangle(p))),
+    );
+    const next = pending.splice(index < 0 ? 0 : index, 1)[0];
+    const position = connectedPosition(
+      rectangle(next),
+      placed.map(rectangle),
+      next.position,
+    );
+    result = editOutput(result, next.display_key, { position });
+    placed.push({ ...next, position });
+  }
+  return rebaseLayout(result);
 }
 
 export function rebaseLayout(layout: Layout): Layout {
@@ -207,4 +282,30 @@ export function rebaseLayout(layout: Layout): Layout {
       },
     })),
   };
+}
+
+// Position drafts contain only offsets, so saving a monitor's properties never
+// applies staged positions or replaces newer live mode/HDR/scaling settings.
+export function arrangementDraft(
+  layout: Layout,
+  offsets: Record<string, Position>,
+): Layout {
+  const applied = new Set<string>();
+  let result = structuredClone(layout);
+  for (const output of layout.outputs) {
+    if (!output.enabled || applied.has(output.display_key)) continue;
+    const members = layout.outputs.filter(
+      (o) => o === output || sameSource(o, output),
+    );
+    members.forEach((o) => applied.add(o.display_key));
+    const offset = members.map((o) => offsets[o.display_key]).find(Boolean);
+    if (offset)
+      result = editOutput(result, output.display_key, {
+        position: {
+          x: output.position.x + offset.x,
+          y: output.position.y + offset.y,
+        },
+      });
+  }
+  return result;
 }

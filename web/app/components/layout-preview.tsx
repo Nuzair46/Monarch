@@ -45,6 +45,7 @@ export function LayoutPreview({
       monitors={monitors}
       disabled={disabled}
       onMove={onMove}
+      joinOnDrop
       label="Display layout preview"
     />
   );

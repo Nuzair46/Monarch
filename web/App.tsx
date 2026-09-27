@@ -10,7 +10,6 @@ import {
   DisplayToggleDialog,
   PendingConfirmationDialog,
 } from "@/app/components/dialogs";
-import { editOutput } from "@/app/display-editor";
 import { MainTab } from "@/app/components/main-tab";
 import { ProfilesTab } from "@/app/components/profiles-tab";
 import { SettingsTab } from "@/app/components/settings-tab";
@@ -40,7 +39,7 @@ import {
   updateSettings,
   type ReleaseUpdateCheckResult,
 } from "./tauri";
-import type { AppSettings, AppSnapshot, DisplayInfo } from "./types";
+import type { AppSettings, AppSnapshot } from "./types";
 
 function normalizeShortcutBaseForCompare(
   value: string | null | undefined,
@@ -362,33 +361,6 @@ function App() {
     );
   }
 
-  async function handleMakePrimaryDisplay(display: DisplayInfo) {
-    if (!snapshot) {
-      return;
-    }
-
-    if (!display.is_active || display.is_primary) {
-      return;
-    }
-
-    if (hasPendingConfirmation) {
-      toast("Resolve pending confirmation first", {
-        description:
-          "Confirm or revert the current layout change before selecting a new primary display.",
-      });
-      return;
-    }
-
-    const nextLayout = editOutput(snapshot.layout, display.id_key, {
-      primary: true,
-    });
-
-    await runAction(
-      () => applyLayout(nextLayout),
-      `${display.friendly_name} set as primary`,
-    );
-  }
-
   function handleConfirmPendingLayout() {
     runPendingLayoutDecision(confirmCurrentLayout);
   }
@@ -570,9 +542,6 @@ function App() {
           onApplyLayout={(layout) => runAction(() => applyLayout(layout))}
           onRestoreLastLayout={() => {
             void runAction(restoreLastLayout, "Restored last layout");
-          }}
-          onMakePrimaryRequest={(selected) => {
-            void handleMakePrimaryDisplay(selected);
           }}
           onToggleRequest={(selected) =>
             setPendingDisplayToggle({

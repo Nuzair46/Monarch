@@ -1,5 +1,9 @@
 import { useRef, useState } from "react";
-import { snapPosition, type MonitorRect } from "@/app/arrangement";
+import {
+  snapPosition,
+  connectedPosition,
+  type MonitorRect,
+} from "@/app/arrangement";
 import type { Position } from "@/types";
 
 export function MonitorArrangement({
@@ -8,12 +12,14 @@ export function MonitorArrangement({
   onMove,
   label,
   step = 10,
+  joinOnDrop = false,
 }: {
   monitors: MonitorRect[];
   disabled?: boolean;
   onMove?: (key: string, position: Position) => void;
   label: string;
   step?: number;
+  joinOnDrop?: boolean;
 }) {
   const svg = useRef<SVGSVGElement>(null);
   const drag = useRef<{
@@ -49,6 +55,18 @@ export function MonitorArrangement({
         x: drag.current.monitor.x,
         y: drag.current.monitor.y,
       });
+    if (!cancel && joinOnDrop && drag.current) {
+      const moving = monitors.find((m) => m.key === drag.current!.monitor.key);
+      if (moving)
+        onMove?.(
+          moving.key,
+          connectedPosition(
+            moving,
+            monitors.filter((m) => m !== moving),
+            { x: moving.x, y: moving.y },
+          ),
+        );
+    }
     drag.current = null;
     setFrozenBounds(null);
   }

@@ -79,22 +79,32 @@ A Windows target source check on Linux can compile code and tests with `MONARCH_
 
 ## Display editing and capabilities
 
-The main preview stages draggable monitor positions. Per-monitor property dialogs
-stage orientation, HDR, scaling, duplication and independent resolution/refresh
-choices in the same draft. Save rebases the primary source to the origin and applies
-through the manager's verified confirmation transaction. Polls do not overwrite an
-unchanged draft; a genuinely changed external layout resets it with an explanation.
+The main preview stages position offsets against the observed layout. Dropped
+monitors join adjacent edges and the preview checks for gaps/overlaps. Save layout
+rebases the primary source to the origin and applies positions through the manager's
+verified confirmation transaction. Per-monitor Settings dialogs have independent
+drafts and Save settings applies directly. They contain primary, orientation, HDR,
+scaling, duplication and independent resolution/refresh choices. Resolution changes
+keep neighbouring source rectangles joined. Saving properties leaves unsaved position
+offsets in the preview, which always uses the latest observed modes and preferences.
 Profiles capture the current layout; there is no saved-profile editing command.
 Missing optional preferences preserve observed state. Geometry history is never
 capability evidence.
 
 The Windows planner chooses one route per target, one common source per clone group,
-and distinct sources for extended surfaces. It submits a complete source-mode table
-to `SDC_VALIDATE`, then applies without `SDC_ALLOW_CHANGES`. Native routing is queried
+and distinct sources for extended surfaces. Position, primary and preference changes
+reuse active source formats and target timings, including the original refresh-rate
+rational, rather than reconstructing them from rounded display values. Changed modes
+invalidate only their own old timing. The planner submits the source/target mode table
+to `SDC_VALIDATE`, then applies without `SDC_ALLOW_CHANGES`. Rejected requests log
+route/mode indices, source rectangles and target timings for diagnosis. Native routing is queried
 again before HDR and DPI setters, and all requested properties (including clone
 membership) are observed before confirmation starts. Failed apply restores captured
 native modes and preferences; the persisted recovery layout covers timeout/restart.
 Wallpaper and SDR calibration recovery remain in the transaction.
+
+The preview follows the [Windows source-surface layout rules](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_source_mode):
+source surfaces cannot overlap or leave gaps, and the primary source is at (0, 0).
 
 Mode lists use DXGI rational refresh rates. A detached target or a cloned source
 cannot supply another target's mode list; only its target-specific preferred mode
@@ -116,6 +126,11 @@ or enter dimensions and X/Y coordinates. Gaps, overlaps and missing calibration 
 reported; the UI prevents enabling an arrangement with no usable boundary.
 Rotations swap panel dimensions. Clones form one cursor surface, with an explicit
 physical representative (or the first member in stable display order).
+
+Initial physical placement detects aligned centres as well as aligned edges; pixel
+offsets cannot be scaled uniformly between monitors with different pixel densities.
+Relative-position controls let users select any two calibrated surfaces and align
+centres or edges. Manual dimensions and coordinates are under an expandable control.
 
 `src/cursor.rs` builds physical boundary mappings outside input callbacks. It maps
 crossing points into physical millimeters and then the neighbor's pixels, retaining

@@ -17,9 +17,10 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
-    DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-    DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE,
-    SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
+    DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_MODE_INFO_TYPE_TARGET,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+    SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    SDC_VALIDATE,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
 use windows::Win32::UI::ColorSystem::{
@@ -118,7 +119,8 @@ pub fn apply_layout_against_snapshot(
     let status =
         unsafe { SetDisplayConfig(Some(&next_paths), Some(&next_modes), SDC_VALIDATE | flags) };
     if status != 0 {
-        return Err(ManagerError::Validation(format!("Windows rejected this resolution, refresh, rotation or duplication combination ({status}); select compatible settings explicitly")));
+        log_rejected_plan(status, &next_paths, &next_modes);
+        return Err(validation_error(status));
     }
     let status = unsafe {
         SetDisplayConfig(
@@ -405,6 +407,47 @@ pub(super) fn plan_layout(
     let mut sources = HashMap::new();
     for path in &mut paths {
         let output = outputs[&path_target_key(path)];
+        // Position/primary/HDR/DPI changes must not round the refresh rational or
+        // throw away the driver's working target timing. Reuse only an active
+        // route to this target with the same requested source mode and rotation.
+        let current = snapshot.layout.outputs.iter().find(|o| {
+            o.enabled
+                && o.display_id.endpoint() == output.display_id.endpoint()
+                && o.resolution == output.resolution
+                && o.refresh_rate_mhz == output.refresh_rate_mhz
+                && o.rotation.unwrap_or(monarch::Rotation::Landscape)
+                    == output.rotation.unwrap_or(monarch::Rotation::Landscape)
+        });
+        let active_path = current.and_then(|_| {
+            snapshot.raw.paths.iter().find(|p| {
+                p.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG != 0
+                    && path_target_key(p) == path_target_key(path)
+                    && p.sourceInfo.adapterId == path.sourceInfo.adapterId
+                    && p.sourceInfo.id == path.sourceInfo.id
+            })
+        });
+        let source_mode = active_path.and_then(|p| {
+            snapshot
+                .raw
+                .modes
+                .get(unsafe { p.sourceInfo.Anonymous.modeInfoIdx } as usize)
+                .filter(|m| {
+                    m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE
+                        && m.id == p.sourceInfo.id
+                        && m.adapterId == p.sourceInfo.adapterId
+                })
+        });
+        let target_mode = active_path.and_then(|p| {
+            snapshot
+                .raw
+                .modes
+                .get(unsafe { p.targetInfo.Anonymous.modeInfoIdx } as usize)
+                .filter(|m| {
+                    m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET
+                        && m.id == p.targetInfo.id
+                        && m.adapterId == p.targetInfo.adapterId
+                })
+        });
         let key = (
             luid_to_u64(
                 path.sourceInfo.adapterId.HighPart,
@@ -415,7 +458,7 @@ pub(super) fn plan_layout(
         if output.resolution.width > 0 {
             let index = *sources.entry(key).or_insert_with(|| {
                 let index = modes.len() as u32;
-                let mode = DISPLAYCONFIG_MODE_INFO {
+                let mut mode = source_mode.copied().unwrap_or(DISPLAYCONFIG_MODE_INFO {
                     infoType: DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
                     id: path.sourceInfo.id,
                     adapterId: path.sourceInfo.adapterId,
@@ -431,6 +474,10 @@ pub(super) fn plan_layout(
                             },
                         },
                     },
+                });
+                mode.Anonymous.sourceMode.position = windows::Win32::Foundation::POINTL {
+                    x: output.position.x,
+                    y: output.position.y,
                 };
                 modes.push(mode);
                 index
@@ -438,6 +485,11 @@ pub(super) fn plan_layout(
             path.sourceInfo.Anonymous.modeInfoIdx = index;
             path.targetInfo.refreshRate.Numerator = output.refresh_rate_mhz;
             path.targetInfo.refreshRate.Denominator = 1000;
+            if let (Some(active), Some(target)) = (active_path, target_mode) {
+                path.targetInfo = active.targetInfo;
+                path.targetInfo.Anonymous.modeInfoIdx = modes.len() as u32;
+                modes.push(*target);
+            }
         }
         if let Some(rotation) = output.rotation {
             path.targetInfo.rotation =
@@ -451,6 +503,57 @@ pub(super) fn plan_layout(
     }
     reorder_paths_for_desired_priority(&mut paths, &outputs);
     Ok((paths, modes))
+}
+
+pub(super) fn validation_error(status: i32) -> ManagerError {
+    let message = match status {
+        87 => "Windows rejected the display configuration data (87). Refresh the display list and try again; if this repeats, include the Monarch diagnostic log in the report.".to_string(),
+        _ => format!("Windows rejected the requested display combination ({status}); select compatible resolution/refresh or Extend"),
+    };
+    ManagerError::Validation(message)
+}
+
+pub(super) fn log_rejected_plan(
+    status: i32,
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+) {
+    diagnostics::log(format!(
+        "display_config:validation_failed:{status}:paths={}:modes={}",
+        paths.len(),
+        modes.len()
+    ));
+    for path in paths {
+        diagnostics::log(format!("display_config:path:target={:?}:source={}:flags={:#x}:source_mode={}:target_mode={}:rotation={}:refresh={}/{}",
+            path_target_key(path), path.sourceInfo.id, path.flags,
+            unsafe {path.sourceInfo.Anonymous.modeInfoIdx}, unsafe {path.targetInfo.Anonymous.modeInfoIdx},
+            path.targetInfo.rotation.0, path.targetInfo.refreshRate.Numerator, path.targetInfo.refreshRate.Denominator));
+    }
+    for (index, mode) in modes.iter().enumerate() {
+        if mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
+            let source = unsafe { mode.Anonymous.sourceMode };
+            diagnostics::log(format!(
+                "display_config:source:{index}:id={}:{}x{}:position={},{}:format={}",
+                mode.id,
+                source.width,
+                source.height,
+                source.position.x,
+                source.position.y,
+                source.pixelFormat.0
+            ));
+        } else if mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET {
+            let signal = unsafe { mode.Anonymous.targetMode.targetVideoSignalInfo };
+            diagnostics::log(format!(
+                "display_config:target:{index}:id={}:{}x{}:refresh={}/{}:pixel_rate={}",
+                mode.id,
+                signal.activeSize.cx,
+                signal.activeSize.cy,
+                signal.vSyncFreq.Numerator,
+                signal.vSyncFreq.Denominator,
+                signal.pixelRate
+            ));
+        }
+    }
 }
 
 pub(super) fn apply_preferences(
@@ -781,5 +884,183 @@ mod tests {
         let mut desired = layout(&[1, 2]);
         desired.outputs[1].enabled = false;
         assert!(ensure_requested_paths(&desired, &snapshot(&[1])).is_ok());
+    }
+
+    fn active_modes() -> TopologySnapshot {
+        use windows::Win32::Devices::Display::*;
+        let mut snapshot = snapshot(&[1, 2]);
+        for (index, path) in snapshot.raw.paths.iter_mut().enumerate() {
+            let output = &mut snapshot.layout.outputs[index];
+            output.refresh_rate_mhz = 59_940;
+            path.targetInfo.targetAvailable = BOOL(1);
+            path.targetInfo.rotation = DISPLAYCONFIG_ROTATION_IDENTITY;
+            path.targetInfo.scaling = DISPLAYCONFIG_SCALING_IDENTITY;
+            path.targetInfo.refreshRate = DISPLAYCONFIG_RATIONAL {
+                Numerator: 60_000,
+                Denominator: 1001,
+            };
+            path.sourceInfo.Anonymous.modeInfoIdx = snapshot.raw.modes.len() as u32;
+            snapshot.raw.modes.push(DISPLAYCONFIG_MODE_INFO {
+                infoType: DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
+                id: path.sourceInfo.id,
+                adapterId: path.sourceInfo.adapterId,
+                Anonymous: DISPLAYCONFIG_MODE_INFO_0 {
+                    sourceMode: DISPLAYCONFIG_SOURCE_MODE {
+                        width: 1920,
+                        height: 1080,
+                        pixelFormat: DISPLAYCONFIG_PIXELFORMAT_32BPP,
+                        position: windows::Win32::Foundation::POINTL {
+                            x: output.position.x,
+                            y: output.position.y,
+                        },
+                    },
+                },
+            });
+            path.targetInfo.Anonymous.modeInfoIdx = snapshot.raw.modes.len() as u32;
+            snapshot.raw.modes.push(DISPLAYCONFIG_MODE_INFO {
+                infoType: DISPLAYCONFIG_MODE_INFO_TYPE_TARGET,
+                id: path.targetInfo.id,
+                adapterId: path.targetInfo.adapterId,
+                Anonymous: DISPLAYCONFIG_MODE_INFO_0 {
+                    targetMode: DISPLAYCONFIG_TARGET_MODE {
+                        targetVideoSignalInfo: DISPLAYCONFIG_VIDEO_SIGNAL_INFO {
+                            pixelRate: 148_351_648,
+                            vSyncFreq: path.targetInfo.refreshRate,
+                            activeSize: DISPLAYCONFIG_2DREGION { cx: 1920, cy: 1080 },
+                            totalSize: DISPLAYCONFIG_2DREGION { cx: 2200, cy: 1125 },
+                            ..Default::default()
+                        },
+                    },
+                },
+            });
+        }
+        snapshot
+    }
+
+    #[test]
+    fn moving_or_changing_primary_preserves_exact_active_target_timings() {
+        let snapshot = active_modes();
+        let mut desired = snapshot.layout.clone();
+        desired.outputs[0].primary = false;
+        desired.outputs[0].position = Position { x: 320, y: -1080 };
+        desired.outputs[1].primary = true;
+        desired.outputs[1].position = Position { x: 0, y: 0 };
+        let (paths, modes) = plan_layout(&desired, &snapshot).unwrap();
+        assert_eq!(modes.len(), 4);
+        for path in paths {
+            let output = desired
+                .outputs
+                .iter()
+                .find(|o| o.display_id.target_id == path.targetInfo.id)
+                .unwrap();
+            let source = unsafe {
+                modes[path.sourceInfo.Anonymous.modeInfoIdx as usize]
+                    .Anonymous
+                    .sourceMode
+            };
+            let target = unsafe {
+                modes[path.targetInfo.Anonymous.modeInfoIdx as usize]
+                    .Anonymous
+                    .targetMode
+                    .targetVideoSignalInfo
+            };
+            assert_eq!((source.width, source.height), (1920, 1080));
+            assert_eq!(
+                (source.position.x, source.position.y),
+                (output.position.x, output.position.y)
+            );
+            assert_eq!(target.pixelRate, 148_351_648);
+            assert_eq!((target.totalSize.cx, target.totalSize.cy), (2200, 1125));
+            assert_eq!(
+                (target.vSyncFreq.Numerator, target.vSyncFreq.Denominator),
+                (60_000, 1001)
+            );
+            assert_eq!(
+                (
+                    path.targetInfo.refreshRate.Numerator,
+                    path.targetInfo.refreshRate.Denominator
+                ),
+                (60_000, 1001)
+            );
+        }
+    }
+
+    #[test]
+    fn changing_mode_discards_only_that_targets_old_timing() {
+        let snapshot = active_modes();
+        for change in 0..3 {
+            let mut desired = snapshot.layout.clone();
+            match change {
+                0 => desired.outputs[0].resolution.width = 1280,
+                1 => desired.outputs[0].refresh_rate_mhz = 60_000,
+                _ => {
+                    desired.outputs[0].rotation = Some(monarch::Rotation::Portrait);
+                    desired.outputs[0].resolution = Resolution {
+                        width: 1080,
+                        height: 1920,
+                    };
+                }
+            }
+            let (paths, modes) = plan_layout(&desired, &snapshot).unwrap();
+            let first = paths.iter().find(|p| p.targetInfo.id == 1).unwrap();
+            let second = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
+            assert_eq!(unsafe { first.targetInfo.Anonymous.modeInfoIdx }, u32::MAX);
+            let target = unsafe {
+                modes[second.targetInfo.Anonymous.modeInfoIdx as usize]
+                    .Anonymous
+                    .targetMode
+                    .targetVideoSignalInfo
+            };
+            assert_eq!(target.pixelRate, 148_351_648);
+        }
+    }
+
+    #[test]
+    fn inactive_routes_never_reuse_another_sources_cached_mode() {
+        let mut snapshot = active_modes();
+        snapshot.layout.outputs[1].enabled = false;
+        snapshot.raw.paths[1].flags = 0;
+        let mut desired = snapshot.layout.clone();
+        desired.outputs[1].enabled = true;
+        let (paths, _) = plan_layout(&desired, &snapshot).unwrap();
+        let second = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
+        assert_eq!(unsafe { second.targetInfo.Anonymous.modeInfoIdx }, u32::MAX);
+    }
+
+    #[test]
+    fn cloned_pair_and_extended_monitor_retain_target_timings_with_one_mode_per_source() {
+        let mut snapshot = active_modes();
+        snapshot.layout.outputs[0].clone_group = Some("pair".into());
+        let mut clone = snapshot.layout.outputs[0].clone();
+        clone.display_id.target_id = 3;
+        clone.display_id.edid_hash = Some(3);
+        snapshot.layout.outputs.push(clone);
+        let mut path = snapshot.raw.paths[0];
+        path.targetInfo.id = 3;
+        path.targetInfo.Anonymous.modeInfoIdx = snapshot.raw.modes.len() as u32;
+        let mut mode = snapshot.raw.modes[1];
+        mode.id = 3;
+        snapshot.raw.modes.push(mode);
+        snapshot.raw.paths.push(path);
+        let (paths, modes) = plan_layout(&snapshot.layout, &snapshot).unwrap();
+        assert_eq!(
+            modes
+                .iter()
+                .filter(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+                .count(),
+            2
+        );
+        assert_eq!(
+            modes
+                .iter()
+                .filter(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
+                .count(),
+            3
+        );
+        let first = paths.iter().find(|p| p.targetInfo.id == 1).unwrap();
+        let third = paths.iter().find(|p| p.targetInfo.id == 3).unwrap();
+        assert_eq!(unsafe { first.sourceInfo.Anonymous.modeInfoIdx }, unsafe {
+            third.sourceInfo.Anonymous.modeInfoIdx
+        });
     }
 }

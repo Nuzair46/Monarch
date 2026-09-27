@@ -11,7 +11,6 @@ type MonitorCardProps = {
   busy: boolean;
   hasPendingConfirmation: boolean;
   activeDisplayCount: number;
-  onMakePrimaryRequest: (display: DisplayInfo) => void;
   onToggleRequest: (display: DisplayInfo) => void;
   onEdit: () => void;
   editDisabled: boolean;
@@ -25,7 +24,6 @@ export function MonitorCard({
   busy,
   hasPendingConfirmation,
   activeDisplayCount,
-  onMakePrimaryRequest,
   onToggleRequest,
   onEdit,
   editDisabled,
@@ -40,13 +38,7 @@ export function MonitorCard({
   return (
     <article className="rounded-xl border p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <button
-          type="button"
-          onClick={onEdit}
-          disabled={editDisabled}
-          aria-label={`Properties for monitor ${monitorNumber}: ${display.friendly_name}`}
-          className="min-w-0 space-y-1 rounded-sm text-left hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50"
-        >
+        <div className="min-w-0 space-y-1">
           <span className="block text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Monitor {monitorNumber}
           </span>
@@ -62,7 +54,7 @@ export function MonitorCard({
               {shortcutLabel}
             </span>
           ) : null}
-        </button>
+        </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2">
           <Badge variant={isActive ? "default" : "secondary"}>
@@ -73,17 +65,16 @@ export function MonitorCard({
       </div>
 
       <div className="mt-4 flex flex-wrap items-center justify-end gap-2 border-t pt-3">
-        {isActive && !isPrimary ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={busy || hasPendingConfirmation}
-            onClick={() => onMakePrimaryRequest(display)}
-          >
-            Make Primary
-          </Button>
-        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={editDisabled}
+          onClick={onEdit}
+          aria-label={`Settings for monitor ${monitorNumber}: ${display.friendly_name}`}
+        >
+          Settings
+        </Button>
         <Button
           type="button"
           size="sm"

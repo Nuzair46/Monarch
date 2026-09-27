@@ -8,6 +8,9 @@ import {
   nativeResolution,
   resolutionChoices,
   refreshChoices,
+  layoutError,
+  rebaseLayout,
+  fitDesktop,
 } from "@/app/display-editor";
 import type { AppSnapshot, Layout, OutputConfig } from "@/types";
 
@@ -32,11 +35,13 @@ export function DisplayProperties({
   initial: Layout;
   displayKey: string;
   busy: boolean;
-  onSave: (layout: Layout) => void;
+  onSave: (layout: Layout) => Promise<boolean>;
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState(() => structuredClone(initial));
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const locked = busy || saving;
   const output = draft.outputs.find((o) => o.display_key === displayKey)!;
   const display = snapshot.displays.find((d) => d.id_key === displayKey);
   const cap = snapshot.capabilities.find((c) => capabilityMatches(output, c));
@@ -48,8 +53,10 @@ export function DisplayProperties({
     !output.enabled ||
     !cap?.modes.length ||
     rates.some((r) => Math.abs(r - output.refresh_rate_mhz) <= 2);
-  const change = (patch: Partial<OutputConfig>) =>
-    setDraft(editOutput(draft, displayKey, patch));
+  const change = (patch: Partial<OutputConfig>) => {
+    const next = editOutput(draft, displayKey, patch);
+    setDraft(patch.resolution ? fitDesktop(next) : next);
+  };
   const attachment = !output.enabled
     ? "detached"
     : output.clone_group
@@ -62,7 +69,7 @@ export function DisplayProperties({
     <Dialog.Root
       open
       onOpenChange={(open) => {
-        if (!open && !busy) onClose();
+        if (!open && !locked) onClose();
       }}
     >
       <Dialog.Portal>
@@ -70,16 +77,34 @@ export function DisplayProperties({
         <Dialog.Content
           className="fixed left-1/2 top-1/2 z-40 max-h-[90vh] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border bg-background p-5"
           onEscapeKeyDown={(e) => {
-            if (busy) e.preventDefault();
+            if (locked) e.preventDefault();
           }}
         >
           <Dialog.Title className="text-lg font-semibold">
-            {display?.friendly_name ?? "Display"} properties
+            {display?.friendly_name ?? "Display"} settings
           </Dialog.Title>
           <Dialog.Description className="mt-1 text-sm text-muted-foreground">
-            Save the layout to apply these changes.
+            Save to apply these settings. You can confirm or revert afterward.
           </Dialog.Description>
-          <fieldset disabled={busy} className="my-5 grid gap-4 sm:grid-cols-2">
+          {draft.outputs.some((o) => {
+            const before = initial.outputs.find(
+              (p) => p.display_key === o.display_key,
+            );
+            return (
+              before &&
+              (before.position.x !== o.position.x ||
+                before.position.y !== o.position.y)
+            );
+          }) && (
+            <p className="mt-2 text-sm text-muted-foreground">
+              Monitor positions will adjust to keep display edges joined and the
+              primary display at the desktop origin.
+            </p>
+          )}
+          <fieldset
+            disabled={locked}
+            className="my-5 grid gap-4 sm:grid-cols-2"
+          >
             <label className="grid gap-1 text-sm sm:col-span-2">
               Display mode
               <select
@@ -89,7 +114,9 @@ export function DisplayProperties({
                 onChange={(e) => {
                   try {
                     setDraft(
-                      changeAttachment(draft, displayKey, e.target.value),
+                      fitDesktop(
+                        changeAttachment(draft, displayKey, e.target.value),
+                      ),
                     );
                     setError(null);
                   } catch (e) {
@@ -258,9 +285,10 @@ export function DisplayProperties({
                 <option value="false">Off</option>
               </select>
             </label>
-            <label className="flex items-center gap-2 text-sm">
+            <label className="flex min-h-9 items-center gap-2 text-sm sm:col-span-2">
               <input
                 type="checkbox"
+                className="m-0 h-4 w-4 shrink-0 accent-primary"
                 checked={output.primary}
                 disabled={!output.enabled || output.primary}
                 onChange={() => change({ primary: true })}
@@ -291,11 +319,31 @@ export function DisplayProperties({
             </p>
           )}
           <div className="mt-5 flex justify-end gap-2 border-t pt-4">
-            <Button variant="outline" disabled={busy} onClick={onClose}>
+            <Button variant="outline" disabled={locked} onClick={onClose}>
               Cancel
             </Button>
-            <Button disabled={busy || !validMode} onClick={() => onSave(draft)}>
-              Done
+            <Button
+              disabled={locked || !validMode}
+              onClick={async () => {
+                const validation = layoutError(draft, snapshot.capabilities);
+                if (validation) {
+                  setError(validation);
+                  return;
+                }
+                setError(null);
+                setSaving(true);
+                try {
+                  if (await onSave(rebaseLayout(draft))) onClose();
+                  else
+                    setError(
+                      "Settings could not be applied. Review the reported error and try again.",
+                    );
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              {saving ? "Saving…" : "Save settings"}
             </Button>
           </div>
         </Dialog.Content>
