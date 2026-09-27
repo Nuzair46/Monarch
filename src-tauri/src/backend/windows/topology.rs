@@ -550,6 +550,41 @@ impl DisplayBackend for WindowsDisplayBackend {
 
     fn apply_layout(&self, layout: Layout) -> Result<(), ManagerError> {
         layout.ensure_valid()?;
+        // Capture before the first mutation, not after an unsuccessful first apply.
+        let previous = capture_pre_recovery_state()?;
+        match self.apply_layout_inner(layout) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let rollback = restore_pre_extend_topology(&previous);
+                let _ = self.refresh_active();
+                Err(ManagerError::Backend(match rollback {
+                    Ok(()) => format!("{error}. The previous display layout was restored."),
+                    Err(rollback_error) => format!("{error}. Restoring the previous layout also failed: {rollback_error}. Use Windows Display Settings to recover."),
+                }))
+            }
+        }
+    }
+
+    fn color_state_signature(&self) -> Result<Option<String>, ManagerError> {
+        WindowsDisplayBackend::color_state_signature(self)
+    }
+
+    fn reapply_color_calibration(&self) -> Result<(), ManagerError> {
+        WindowsDisplayBackend::reapply_color_calibration(self)
+    }
+
+    fn invalidate_cache(&self) -> Result<(), ManagerError> {
+        WindowsDisplayBackend::invalidate_cache(self)
+    }
+
+    fn prepare_attach_targets(&self, desired: &Layout) -> Result<(), ManagerError> {
+        WindowsDisplayBackend::prepare_attach_targets(self, desired)
+    }
+}
+
+impl WindowsDisplayBackend {
+    fn apply_layout_inner(&self, layout: Layout) -> Result<(), ManagerError> {
+        layout.ensure_valid()?;
         diagnostics::log(format!(
             "topology_apply:start:outputs={}",
             layout.outputs.len()
@@ -625,7 +660,8 @@ impl DisplayBackend for WindowsDisplayBackend {
             .cache
             .lock()
             .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
-        let merged_snapshot = merge_snapshot_for_cache(Some(&base_snapshot), next_snapshot.clone());
+        let merged_snapshot =
+            merge_snapshot_for_cache(cache.last_snapshot.as_ref(), next_snapshot.clone());
         let raw_to_persist = merged_snapshot.raw.clone();
         cache.last_snapshot = Some(merged_snapshot);
         merge_sdr_gamma_cache(
@@ -670,22 +706,6 @@ impl DisplayBackend for WindowsDisplayBackend {
         diagnostics::log("topology_apply:done");
 
         Ok(())
-    }
-
-    fn color_state_signature(&self) -> Result<Option<String>, ManagerError> {
-        WindowsDisplayBackend::color_state_signature(self)
-    }
-
-    fn reapply_color_calibration(&self) -> Result<(), ManagerError> {
-        WindowsDisplayBackend::reapply_color_calibration(self)
-    }
-
-    fn invalidate_cache(&self) -> Result<(), ManagerError> {
-        WindowsDisplayBackend::invalidate_cache(self)
-    }
-
-    fn prepare_attach_targets(&self, desired: &Layout) -> Result<(), ManagerError> {
-        WindowsDisplayBackend::prepare_attach_targets(self, desired)
     }
 }
 
@@ -849,7 +869,16 @@ fn enabled_outputs_missing_from_raw<'a>(
     layout: &'a Layout,
     raw: &RawTopologySnapshot,
 ) -> Vec<&'a monarch::OutputConfig> {
-    let connectors = raw_path_connectors(raw);
+    let active = RawTopologySnapshot {
+        paths: raw
+            .paths
+            .iter()
+            .filter(|p| p.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG != 0)
+            .copied()
+            .collect(),
+        modes: Vec::new(),
+    };
+    let connectors = raw_path_connectors(&active);
     layout
         .outputs
         .iter()
@@ -1039,11 +1068,8 @@ fn try_batch_explicit_attach(
 /// setup on a failed attach. Re-applying the pre-recovery layout works because its enabled set
 /// only covers the previously active outputs, and apply's `unwrap_or(false)` disables everything
 /// the recovery added.
-fn restore_pre_extend_topology(pre_extend: &TopologySnapshot) {
-    match apply_layout_against_snapshot(&pre_extend.layout, pre_extend) {
-        Ok(_) => diagnostics::log("recover:restore_ok"),
-        Err(error) => diagnostics::log(format!("recover:restore_failed:{error}")),
-    }
+fn restore_pre_extend_topology(previous: &TopologySnapshot) -> Result<(), ManagerError> {
+    apply_layout_against_snapshot(&previous.layout, previous).map(|_| ())
 }
 
 /// The pre-recovery topology is the ONLY rollback net on a machine with no internal panel, so it
@@ -1084,7 +1110,7 @@ fn settle_poll(
     loop {
         attempt += 1;
         std::thread::sleep(RECOVER_SETTLE_STEP);
-        let snapshot = query_active_topology()?;
+        let snapshot = query_active_only_topology()?;
         let layout = remap_layout_display_ids_for_snapshot(
             working_layout,
             &snapshot.layout,
@@ -1109,22 +1135,11 @@ fn settle_poll(
 /// Apply the desired layout once the recovery has brought every output back.
 fn finish_recovery(
     recovered_snapshot: TopologySnapshot,
-    retry_layout: Layout,
-    pre_state: &TopologySnapshot,
+    mut retry_layout: Layout,
 ) -> Result<(TopologySnapshot, Layout), ManagerError> {
-    let mut retry_layout = retry_layout;
     fill_sentinel_geometry_from_snapshot(&mut retry_layout, &recovered_snapshot);
-    match apply_layout_against_snapshot(&retry_layout, &recovered_snapshot) {
-        Ok(snapshot) => {
-            diagnostics::log("recover:retry_result:ok");
-            Ok((snapshot, retry_layout))
-        }
-        Err(error) => {
-            diagnostics::log(format!("recover:retry_result:{error}"));
-            restore_pre_extend_topology(pre_state);
-            Err(error)
-        }
-    }
+    let snapshot = apply_layout_against_snapshot(&retry_layout, &recovered_snapshot)?;
+    Ok((snapshot, retry_layout))
 }
 
 fn recover_apply_with_topology_extend(
@@ -1132,15 +1147,6 @@ fn recover_apply_with_topology_extend(
     missing: &[&monarch::OutputConfig],
     active_snapshot: &TopologySnapshot,
 ) -> Result<(TopologySnapshot, Layout), ManagerError> {
-    // The rollback net is a hard precondition: never touch the topology without one.
-    let pre_state = match capture_pre_recovery_state() {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            diagnostics::log("recover:abort:no_pre_state_captured");
-            return Err(error);
-        }
-    };
-
     // Every recovery step actually attempted, so the final error can name them honestly.
     let mut attempted: Vec<&str> = Vec::new();
 
@@ -1155,13 +1161,12 @@ fn recover_apply_with_topology_extend(
         match settle_poll(working_layout, ATTACH_SETTLE_DEADLINE, "attach") {
             Ok(SettleOutcome::Settled(snapshot, layout)) => {
                 diagnostics::log("recover:resolved:explicit_attach");
-                return finish_recovery(snapshot, layout, &pre_state);
+                return finish_recovery(snapshot, layout);
             }
             Ok(SettleOutcome::StillMissing(_)) => {
                 diagnostics::log("recover:attach_not_observed:escalating");
             }
             Err(error) => {
-                restore_pre_extend_topology(&pre_state);
                 return Err(error);
             }
         }
@@ -1174,11 +1179,10 @@ fn recover_apply_with_topology_extend(
     let still_missing = match settle_poll(working_layout, RECOVER_SETTLE_DEADLINE, "extend") {
         Ok(SettleOutcome::Settled(snapshot, layout)) => {
             diagnostics::log("recover:resolved:topology_extend");
-            return finish_recovery(snapshot, layout, &pre_state);
+            return finish_recovery(snapshot, layout);
         }
         Ok(SettleOutcome::StillMissing(description)) => description,
         Err(error) => {
-            restore_pre_extend_topology(&pre_state);
             return Err(error);
         }
     };
@@ -1187,7 +1191,6 @@ fn recover_apply_with_topology_extend(
     diagnostics::log(format!("recover:escalate:display_switch:{still_missing}"));
     if let Err(error) = run_display_switch_extend() {
         diagnostics::log(format!("recover:display_switch_failed:{error}"));
-        restore_pre_extend_topology(&pre_state);
         return Err(error);
     }
     attempted.push("DisplaySwitch /extend");
@@ -1196,18 +1199,16 @@ fn recover_apply_with_topology_extend(
     {
         Ok(SettleOutcome::Settled(snapshot, layout)) => {
             diagnostics::log("recover:resolved:display_switch");
-            return finish_recovery(snapshot, layout, &pre_state);
+            return finish_recovery(snapshot, layout);
         }
         Ok(SettleOutcome::StillMissing(description)) => description,
         Err(error) => {
-            restore_pre_extend_topology(&pre_state);
             return Err(error);
         }
     };
 
     // (d) Out of options: undo everything the recovery touched and name what was tried.
     diagnostics::log(format!("recover:still_missing:{still_missing}"));
-    restore_pre_extend_topology(&pre_state);
     Err(ManagerError::Backend(format!(
         "cannot attach display {still_missing}: it did not come back after {}. reconnect it or attach it once from Windows Display settings",
         attempted.join(", then ")
@@ -1327,5 +1328,43 @@ fn struct_from_bytes<T>(bytes: &[u8]) -> Option<T> {
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), value.as_mut_ptr().cast::<u8>(), bytes.len());
         Some(value.assume_init())
+    }
+}
+
+#[cfg(test)]
+mod recovery_verification_tests {
+    use super::*;
+    use monarch::{OutputConfig, Position, Resolution};
+    use windows::Win32::Devices::Display::DISPLAYCONFIG_PATH_INFO;
+
+    #[test]
+    fn an_inactive_database_path_does_not_prove_recovery_succeeded() {
+        let desired = Layout {
+            outputs: vec![OutputConfig {
+                display_id: DisplayId {
+                    adapter_luid: 1,
+                    target_id: 2,
+                    edid_hash: None,
+                },
+                enabled: true,
+                primary: true,
+                position: Position { x: 0, y: 0 },
+                resolution: Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                refresh_rate_mhz: 60_000,
+            }],
+        };
+        let mut path = DISPLAYCONFIG_PATH_INFO::default();
+        path.targetInfo.adapterId.LowPart = 1;
+        path.targetInfo.id = 2;
+        let mut raw = RawTopologySnapshot {
+            paths: vec![path],
+            modes: vec![],
+        };
+        assert_eq!(enabled_outputs_missing_from_raw(&desired, &raw).len(), 1);
+        raw.paths[0].flags = DISPLAYCONFIG_PATH_ACTIVE_FLAG;
+        assert!(enabled_outputs_missing_from_raw(&desired, &raw).is_empty());
     }
 }

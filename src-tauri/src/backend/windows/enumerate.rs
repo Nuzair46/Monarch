@@ -342,6 +342,8 @@ fn enrich_with_missing_target_paths(
             .push(format!("'{candidate_name}':{}", candidate.targetInfo.id));
 
         let mut next_path = candidate;
+        // A database path missing from the live query is inventory, not an active display.
+        next_path.flags &= !DISPLAYCONFIG_PATH_ACTIVE_FLAG;
         unsafe {
             let source_idx = next_path.sourceInfo.Anonymous.modeInfoIdx;
             let remapped_source_idx = remap_mode_index(

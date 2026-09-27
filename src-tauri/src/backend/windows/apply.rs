@@ -73,40 +73,51 @@ pub fn apply_layout_against_snapshot(
     }
     reorder_paths_for_desired_priority(&mut next_paths, &desired_outputs);
 
-    unsafe {
-        // Try an exact apply first to minimize Windows "helpful" topology/mode adjustments that
-        // can disturb remaining displays. Fall back to ALLOW_CHANGES for compatibility.
-        let exact_flags = SDC_APPLY
-            | SDC_USE_SUPPLIED_DISPLAY_CONFIG
-            | SDC_SAVE_TO_DATABASE
-            | SDC_NO_OPTIMIZATION;
-        let mut status = SetDisplayConfig(
-            Some(next_paths.as_slice()),
-            Some(next_modes.as_slice()),
-            exact_flags,
-        );
-        if status != 0 {
-            diagnostics::log(format!("apply:sdc_failed:{status}:exact_flags"));
-            status = SetDisplayConfig(
-                Some(next_paths.as_slice()),
-                Some(next_modes.as_slice()),
-                SDC_APPLY
-                    | SDC_USE_SUPPLIED_DISPLAY_CONFIG
-                    | SDC_SAVE_TO_DATABASE
-                    | SDC_ALLOW_CHANGES,
-            );
+    let mut status = 0;
+    for allow_changes in [false, true] {
+        let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG
+            | if allow_changes {
+                SDC_ALLOW_CHANGES
+            } else {
+                Default::default()
+            };
+        // APPLY-only flags must not leak into a validation request.
+        status =
+            unsafe { SetDisplayConfig(Some(&next_paths), Some(&next_modes), SDC_VALIDATE | flags) };
+        if status == 0 {
+            status = unsafe {
+                SetDisplayConfig(
+                    Some(&next_paths),
+                    Some(&next_modes),
+                    SDC_APPLY | flags | SDC_SAVE_TO_DATABASE | SDC_NO_OPTIMIZATION,
+                )
+            };
         }
-
-        if status != 0 {
-            diagnostics::log(format!("apply:sdc_failed:{status}:allow_changes"));
-            return Err(ManagerError::Backend(format!(
-                "SetDisplayConfig failed: {}",
-                status
-            )));
+        if status == 0 {
+            break;
         }
+        diagnostics::log(format!(
+            "apply:sdc_failed:{status}:allow_changes={allow_changes}"
+        ));
+    }
+    if status != 0 {
+        return Err(ManagerError::Backend(format!(
+            "SetDisplayConfig failed: {status}"
+        )));
     }
 
-    let next_snapshot = super::enumerate::query_active_topology()?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let next_snapshot = loop {
+        let observed = super::enumerate::query_active_only_topology().and_then(|snapshot| {
+            monarch::verification::verify_applied_layout(desired, &snapshot.layout)?;
+            Ok(snapshot)
+        });
+        match observed {
+            Ok(snapshot) => break snapshot,
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
     best_effort_reload_color_calibration();
     best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
     best_effort_restore_wallpapers(&next_snapshot, &saved_wallpapers);
@@ -114,34 +125,8 @@ pub fn apply_layout_against_snapshot(
     Ok(next_snapshot)
 }
 
-/// Build the path array that activates `candidates` on top of the currently active paths: the
-/// active paths keep their mode indices (so the other displays hold their exact geometry) and
-/// each candidate is appended with the ACTIVE flag and no mode indices, letting Windows compute
-/// its mode. This is what Windows Display settings does, and it is the cure for the case
-/// SDC_TOPOLOGY_EXTEND cannot fix: the extend replays the last extended configuration from the
-/// persistence database, which a Monarch detach (saved with SDC_SAVE_TO_DATABASE) already
-/// stripped this display from.
-///
-/// The array is the COMPLETE topology (SDC_USE_SUPPLIED_DISPLAY_CONFIG): any path left out is
-/// deactivated. Every candidate must therefore go in one array — attaching them one call at a
-/// time would detach whatever the previous call attached.
-///
-/// What SDC_VALIDATE probes actually established (on a single-display machine):
-///   active paths + supplied mode array, one path with invalid mode indices -> accepted
-///   every path with invalid mode indices + NULL mode array                 -> 87, always
-/// so the mode-less shape is a parameter-level rejection and is not attempted.
-///
-/// Appending the path of a currently INACTIVE target — the exact operation below — could not be
-/// probed there (that machine has no connected-but-inactive target), but a field log since
-/// confirmed it on real hardware: a TV detached before an app restart, on a 3-display desktop,
-/// came back on the first poll.
-///   recover:explicit_attach:'Smart TV Pro' (target_id=4352, ...):source=2:validate=0
-///   recover:explicit_attach:batch=1:apply=0
-///   recover:settle_poll:attach:1:missing=0
-/// The mandatory SDC_VALIDATE dry-run before every apply still gates each attempt at runtime:
-/// one machine agreeing is not every driver agreeing.
-///
-/// Returns an empty vec when there are no active paths to build on.
+/// Add the candidate targets to the active topology, keeping known modes intact.
+/// All candidates are submitted together because each apply replaces the topology.
 pub(super) fn build_attach_paths(
     candidates: &[&AttachablePath],
     active_snapshot: &TopologySnapshot,
@@ -160,17 +145,14 @@ pub(super) fn build_attach_paths(
     for candidate in candidates {
         let mut next = candidate.path;
         next.flags |= DISPLAYCONFIG_PATH_ACTIVE_FLAG;
-        unsafe {
-            next.sourceInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
-            next.targetInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
-        }
+        next.sourceInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+        next.targetInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
         paths.push(next);
     }
     paths
 }
 
-/// SDC_ALLOW_CHANGES is legal here (and needed so Windows may compute the new mode): it is only
-/// rejected alongside SDC_TOPOLOGY_*.
+/// Permit Windows to compute modes for newly attached targets.
 fn attach_flags() -> windows::Win32::Devices::Display::SET_DISPLAY_CONFIG_FLAGS {
     SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES
 }
@@ -201,8 +183,9 @@ pub(super) fn apply_attach_paths(
     paths: &[DISPLAYCONFIG_PATH_INFO],
     active_snapshot: &TopologySnapshot,
 ) -> i32 {
-    if paths.is_empty() {
-        return -1;
+    let validation = validate_attach_paths(paths, active_snapshot);
+    if validation != 0 {
+        return validation;
     }
     unsafe {
         SetDisplayConfig(
@@ -213,32 +196,16 @@ pub(super) fn apply_attach_paths(
     }
 }
 
-/// Ask Windows to replay the last extended configuration from the persistence database.
-/// Returns the raw SetDisplayConfig status and always logs it — including 0, which does NOT mean
-/// the display came back: when the stored entry already matches the current topology this is a
-/// no-op that succeeds. Only the caller knows which target it is chasing, so only the caller can
-/// judge success, by observing a fresh enumeration.
-///
-/// Flag combination verified empirically with SDC_VALIDATE probes (the MSDN claim that
-/// "SDC_ALLOW_CHANGES is allowed with any other valid combination" is FALSE):
-///   EXTEND|ALLOW_CHANGES|SAVE_TO_DATABASE -> 87   (what this code used to send, always)
-///   EXTEND|ALLOW_CHANGES|PERSIST          -> 87
-///   EXTEND|ALLOW_CHANGES                  -> 87
-///   EXTEND|PERSIST                        -> flags accepted
-///   EXTEND                                -> flags accepted
-///   CLONE|ALLOW_CHANGES -> 87  vs  CLONE  -> flags accepted
-/// i.e. SDC_ALLOW_CHANGES is illegal alongside any SDC_TOPOLOGY_*, and SDC_SAVE_TO_DATABASE
-/// requires SDC_USE_SUPPLIED_DISPLAY_CONFIG (documented), which TOPOLOGY_* cannot carry.
-/// SDC_PATH_PERSIST_IF_REQUIRED matters here: a CCD detach clears the target's path persistence,
-/// and without this flag the extend would skip that display.
+/// Replay the saved extended topology. Validate first; the caller must still observe
+/// the requested active outputs, since successful application may be a no-op.
 pub(super) fn try_topology_extend() -> i32 {
-    let status = unsafe {
-        SetDisplayConfig(
-            None,
-            None,
-            SDC_APPLY | SDC_TOPOLOGY_EXTEND | SDC_PATH_PERSIST_IF_REQUIRED,
-        )
-    };
+    let flags = SDC_TOPOLOGY_EXTEND | SDC_PATH_PERSIST_IF_REQUIRED;
+    let validation = unsafe { SetDisplayConfig(None, None, SDC_VALIDATE | flags) };
+    if validation != 0 {
+        diagnostics::log(format!("apply:extend_validation_failed:{validation}"));
+        return validation;
+    }
+    let status = unsafe { SetDisplayConfig(None, None, SDC_APPLY | flags) };
     diagnostics::log(format!("apply:sdc_status:{status}:topology_extend"));
     status
 }
@@ -415,14 +382,12 @@ fn wait_child_with_timeout(mut child: Child, name: &str, timeout: Duration) -> O
             Err(err) => {
                 diagnostics::log(format!("child_wait:error:{name}:{err}"));
                 let _ = child.kill();
-                let _ = child.wait();
                 return None;
             }
         }
         if Instant::now() >= deadline {
             diagnostics::log(format!("child_wait:timeout:{name}"));
             let _ = child.kill();
-            let _ = child.wait();
             return None;
         }
         std::thread::sleep(poll_step);
