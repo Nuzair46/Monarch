@@ -580,6 +580,12 @@ fn apply_preferences_inner(
     restoring: bool,
 ) -> Result<(), ManagerError> {
     let resolved = monarch::identity::resolve_layout(desired, &refreshed.layout)?;
+    if !restoring {
+        // Detached monitors cannot reliably report HDR/DPI before activation.
+        // Check their actual capabilities now, while failure can still roll back
+        // the entire topology. Recovery itself must attempt every saved setting.
+        monarch::capabilities::validate(&resolved, &super::capabilities::discover(refreshed))?;
+    }
     let mut failures = Vec::new();
     let mut apply_result = |result: Result<(), ManagerError>| -> Result<(), ManagerError> {
         match result {

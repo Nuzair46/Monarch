@@ -146,7 +146,11 @@ impl DisplayBackend for WindowsDisplayBackend {
     }
     fn validate_layout(&self, layout: &Layout) -> Result<(), ManagerError> {
         let connected = query_connected_topology()?;
-        monarch::capabilities::validate(layout, &super::capabilities::discover(&connected))?;
+        monarch::capabilities::validate_transition(
+            layout,
+            &connected.layout,
+            &super::capabilities::discover(&connected),
+        )?;
         let (paths, modes) = super::apply::plan_layout(layout, &connected)?;
         use windows::Win32::Devices::Display::*;
         let status = unsafe {
