@@ -17,6 +17,9 @@ fn layout() -> Layout {
                 enabled: true,
                 primary: id == 1,
                 rotation: Some(Rotation::Landscape),
+                hdr_enabled: None,
+                scale_percent: None,
+                clone_group: None,
                 position: Position {
                     x: (id as i32 - 1) * 1920,
                     y: 0,

@@ -18,8 +18,7 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
     DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-    DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION,
-    SDC_PATH_PERSIST_IF_REQUIRED, SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE,
     SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
@@ -45,6 +44,7 @@ fn enabled_targets(layout: &Layout) -> HashSet<(u64, u32)> {
         .collect()
 }
 
+#[cfg(test)]
 fn ensure_requested_paths(
     desired: &Layout,
     snapshot: &TopologySnapshot,
@@ -109,72 +109,30 @@ pub fn apply_layout_against_snapshot(
     desired: &Layout,
     snapshot: &TopologySnapshot,
 ) -> Result<TopologySnapshot, ManagerError> {
-    desired.ensure_valid()?;
-    ensure_requested_paths(desired, snapshot)?;
+    desired.ensure_supported()?;
     let saved_gamma_ramps = capture_active_gamma_ramps(snapshot);
-
-    let desired_outputs = desired_output_index(desired);
-    let mut next_paths: Vec<DISPLAYCONFIG_PATH_INFO> = snapshot.raw.paths.clone();
-    let mut next_modes: Vec<DISPLAYCONFIG_MODE_INFO> = snapshot.raw.modes.clone();
-    for path in &mut next_paths {
-        let key = path_target_key(path);
-        let desired_output = desired_outputs.get(&key);
-        let enabled = desired_output.map(|output| output.enabled).unwrap_or(false);
-
-        if enabled {
-            path.flags |= DISPLAYCONFIG_PATH_ACTIVE_FLAG;
-        } else {
-            path.flags &= !DISPLAYCONFIG_PATH_ACTIVE_FLAG;
-        }
-
-        if enabled {
-            if let Some(rotation) = desired_output.and_then(|o| o.rotation) {
-                path.targetInfo.rotation =
-                    windows::Win32::Devices::Display::DISPLAYCONFIG_ROTATION(match rotation {
-                        monarch::Rotation::Landscape => 1,
-                        monarch::Rotation::Portrait => 2,
-                        monarch::Rotation::LandscapeFlipped => 3,
-                        monarch::Rotation::PortraitFlipped => 4,
-                    });
-            }
-            apply_desired_source_mode(path, &mut next_modes, desired_output);
-            apply_desired_target_refresh(path, desired_output);
-        }
+    let (next_paths, next_modes) = plan_layout(desired, snapshot)?;
+    let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG;
+    let status =
+        unsafe { SetDisplayConfig(Some(&next_paths), Some(&next_modes), SDC_VALIDATE | flags) };
+    if status != 0 {
+        return Err(ManagerError::Validation(format!("Windows rejected this resolution, refresh, rotation or duplication combination ({status}); select compatible settings explicitly")));
     }
-    reorder_paths_for_desired_priority(&mut next_paths, &desired_outputs);
-
-    let mut status = 0;
-    for allow_changes in [false, true] {
-        let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG
-            | if allow_changes {
-                SDC_ALLOW_CHANGES
-            } else {
-                Default::default()
-            };
-        // APPLY-only flags must not leak into a validation request.
-        status =
-            unsafe { SetDisplayConfig(Some(&next_paths), Some(&next_modes), SDC_VALIDATE | flags) };
-        if status == 0 {
-            status = unsafe {
-                SetDisplayConfig(
-                    Some(&next_paths),
-                    Some(&next_modes),
-                    SDC_APPLY | flags | SDC_SAVE_TO_DATABASE | SDC_NO_OPTIMIZATION,
-                )
-            };
-        }
-        if status == 0 {
-            break;
-        }
-        diagnostics::log(format!(
-            "apply:sdc_failed:{status}:allow_changes={allow_changes}"
-        ));
-    }
+    let status = unsafe {
+        SetDisplayConfig(
+            Some(&next_paths),
+            Some(&next_modes),
+            SDC_APPLY | flags | SDC_SAVE_TO_DATABASE | SDC_NO_OPTIMIZATION,
+        )
+    };
     if status != 0 {
         return Err(ManagerError::Backend(format!(
             "SetDisplayConfig failed: {status}"
         )));
     }
+    // Routing can change when splitting/joining clones; never set DPI on old IDs.
+    let refreshed = wait_for_requested_outputs(desired)?;
+    apply_preferences(desired, &refreshed)?;
 
     let deadline = Instant::now() + Duration::from_secs(3);
     let next_snapshot = loop {
@@ -191,51 +149,6 @@ pub fn apply_layout_against_snapshot(
     best_effort_reload_color_calibration();
     best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
     Ok(next_snapshot)
-}
-
-/// Replay the saved extended topology. Validate first; the caller must still observe
-/// the requested active outputs, since successful application may be a no-op.
-pub(super) fn try_topology_extend() -> i32 {
-    let flags = SDC_TOPOLOGY_EXTEND | SDC_PATH_PERSIST_IF_REQUIRED;
-    let validation = unsafe { SetDisplayConfig(None, None, SDC_VALIDATE | flags) };
-    if validation != 0 {
-        diagnostics::log(format!("apply:extend_validation_failed:{validation}"));
-        return validation;
-    }
-    let status = unsafe { SetDisplayConfig(None, None, SDC_APPLY | flags) };
-    diagnostics::log(format!("apply:sdc_status:{status}:topology_extend"));
-    status
-}
-
-/// Drive the same shell path Win+P uses. Escalation of last resort, decided by the caller when
-/// the CCD extend did not bring the display back.
-pub(super) fn run_display_switch_extend() -> Result<(), ManagerError> {
-    let display_switch_child = Command::new("DisplaySwitch.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .arg("/extend")
-        .spawn()
-        .map_err(|err| {
-            ManagerError::Backend(format!("DisplaySwitch /extend launch failed: {err}"))
-        })?;
-
-    let Some(display_switch_status) = wait_child_with_timeout(
-        display_switch_child,
-        "DisplaySwitch.exe",
-        Duration::from_secs(10),
-    ) else {
-        return Err(ManagerError::Backend(
-            "DisplaySwitch /extend timed out".to_string(),
-        ));
-    };
-
-    if !display_switch_status.success() {
-        return Err(ManagerError::Backend(format!(
-            "DisplaySwitch /extend failed with exit code {:?}",
-            display_switch_status.code()
-        )));
-    }
-
-    Ok(())
 }
 
 pub(super) fn reapply_color_calibration_for_active_with_cached_sdr(
@@ -333,7 +246,7 @@ pub(super) fn active_color_state_signature(snapshot: &TopologySnapshot) -> Strin
     signature
 }
 
-fn best_effort_reload_color_calibration() {
+pub(super) fn best_effort_reload_color_calibration() {
     if std::env::var_os("MONARCH_SKIP_COLOR_RELOAD").is_some() {
         return;
     }
@@ -391,7 +304,9 @@ fn wait_child_with_timeout(mut child: Child, name: &str, timeout: Duration) -> O
     }
 }
 
-fn capture_active_gamma_ramps(snapshot: &TopologySnapshot) -> HashMap<(u64, u32), GammaRampWords> {
+pub(super) fn capture_active_gamma_ramps(
+    snapshot: &TopologySnapshot,
+) -> HashMap<(u64, u32), GammaRampWords> {
     let mut ramps = HashMap::new();
 
     for path in &snapshot.raw.paths {
@@ -419,7 +334,7 @@ fn capture_active_gamma_ramps(snapshot: &TopologySnapshot) -> HashMap<(u64, u32)
     ramps
 }
 
-fn best_effort_restore_gamma_ramps(
+pub(super) fn best_effort_restore_gamma_ramps(
     snapshot: &TopologySnapshot,
     ramps: &HashMap<(u64, u32), GammaRampWords>,
 ) {
@@ -436,6 +351,9 @@ fn best_effort_restore_gamma_ramps(
             path.targetInfo.id,
         );
 
+        if target_advanced_color_enabled(path).unwrap_or(true) {
+            continue;
+        }
         let Some(ramp) = ramps.get(&key) else {
             continue;
         };
@@ -469,51 +387,100 @@ fn path_target_key(path: &DISPLAYCONFIG_PATH_INFO) -> (u64, u32) {
     )
 }
 
-fn apply_desired_source_mode(
-    path: &DISPLAYCONFIG_PATH_INFO,
-    modes: &mut [DISPLAYCONFIG_MODE_INFO],
-    desired_output: Option<&&monarch::OutputConfig>,
-) {
-    let Some(output) = desired_output.copied() else {
-        return;
-    };
-    let monarch::model::ModePreference::Exact {
-        position,
-        resolution,
-    } = output.mode_preference()
-    else {
-        // The recovery planner resolves automatic modes from Windows' observed
-        // source mode before verification; never write a 0x0 mode into CCD.
-        return;
-    };
-
-    let mode_index = unsafe { path.sourceInfo.Anonymous.modeInfoIdx } as usize;
-    let Some(mode) = modes.get_mut(mode_index) else {
-        return;
-    };
-    if mode.infoType.0 != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE.0 {
-        return;
+pub(super) fn plan_layout(
+    desired: &Layout,
+    snapshot: &TopologySnapshot,
+) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), ManagerError> {
+    let mut paths = super::recovery::build_recovery_paths(desired, &snapshot.raw.paths)?;
+    let outputs = desired_output_index(desired);
+    let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = Vec::new();
+    let mut sources = HashMap::new();
+    for path in &mut paths {
+        let output = outputs[&path_target_key(path)];
+        let key = (
+            luid_to_u64(
+                path.sourceInfo.adapterId.HighPart,
+                path.sourceInfo.adapterId.LowPart,
+            ),
+            path.sourceInfo.id,
+        );
+        if output.resolution.width > 0 {
+            let index = *sources.entry(key).or_insert_with(|| {
+                let index = modes.len() as u32;
+                let mode = DISPLAYCONFIG_MODE_INFO {
+                    infoType: DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
+                    id: path.sourceInfo.id,
+                    adapterId: path.sourceInfo.adapterId,
+                    Anonymous: windows::Win32::Devices::Display::DISPLAYCONFIG_MODE_INFO_0 {
+                        sourceMode: windows::Win32::Devices::Display::DISPLAYCONFIG_SOURCE_MODE {
+                            width: output.resolution.width,
+                            height: output.resolution.height,
+                            pixelFormat:
+                                windows::Win32::Devices::Display::DISPLAYCONFIG_PIXELFORMAT_32BPP,
+                            position: windows::Win32::Foundation::POINTL {
+                                x: output.position.x,
+                                y: output.position.y,
+                            },
+                        },
+                    },
+                };
+                modes.push(mode);
+                index
+            });
+            path.sourceInfo.Anonymous.modeInfoIdx = index;
+            path.targetInfo.refreshRate.Numerator = output.refresh_rate_mhz;
+            path.targetInfo.refreshRate.Denominator = 1000;
+        }
+        if let Some(rotation) = output.rotation {
+            path.targetInfo.rotation =
+                windows::Win32::Devices::Display::DISPLAYCONFIG_ROTATION(match rotation {
+                    monarch::Rotation::Landscape => 1,
+                    monarch::Rotation::Portrait => 2,
+                    monarch::Rotation::LandscapeFlipped => 3,
+                    monarch::Rotation::PortraitFlipped => 4,
+                });
+        }
     }
-
-    unsafe {
-        let source = &mut mode.Anonymous.sourceMode;
-        source.position.x = position.x;
-        source.position.y = position.y;
-        source.width = resolution.width;
-        source.height = resolution.height;
-    }
+    reorder_paths_for_desired_priority(&mut paths, &outputs);
+    Ok((paths, modes))
 }
 
-fn apply_desired_target_refresh(
-    path: &mut DISPLAYCONFIG_PATH_INFO,
-    desired_output: Option<&&monarch::OutputConfig>,
-) {
-    let Some(output) = desired_output.copied() else {
-        return;
-    };
-    let desired_refresh_mhz = output.refresh_rate_mhz.max(1);
-    path.targetInfo.refreshRate.Numerator = desired_refresh_mhz;
-    path.targetInfo.refreshRate.Denominator = 1000;
+pub(super) fn apply_preferences(
+    desired: &Layout,
+    refreshed: &TopologySnapshot,
+) -> Result<(), ManagerError> {
+    let resolved = monarch::identity::resolve_layout(desired, &refreshed.layout)?;
+    let mut scaled = HashSet::new();
+    for output in resolved.outputs.iter().filter(|o| o.enabled) {
+        let path = refreshed
+            .raw
+            .paths
+            .iter()
+            .find(|p| {
+                path_target_key(p) == (output.display_id.adapter_luid, output.display_id.target_id)
+            })
+            .ok_or_else(|| {
+                ManagerError::Backend(
+                    "display disappeared before HDR/scaling could be applied".into(),
+                )
+            })?;
+        if let Some(hdr) = output.hdr_enabled {
+            super::hdr::set(path, hdr)?;
+        }
+        let source = (
+            luid_to_u64(
+                path.sourceInfo.adapterId.HighPart,
+                path.sourceInfo.adapterId.LowPart,
+            ),
+            path.sourceInfo.id,
+        );
+        if let Some(scale) = output.scale_percent {
+            if scaled.insert(source) {
+                super::scaling::set(path, scale)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn reorder_paths_for_desired_priority(
@@ -544,7 +511,7 @@ fn path_priority_rank(
     (bucket, output.position.y, output.position.x, key.0, key.1)
 }
 
-fn source_gdi_device_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
+pub(super) fn source_gdi_device_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     unsafe {
         let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
             header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
@@ -692,6 +659,9 @@ mod tests {
                     refresh_rate_mhz: 60_000,
                     primary: index == 0,
                     rotation: None,
+                    hdr_enabled: None,
+                    scale_percent: None,
+                    clone_group: None,
                 })
                 .collect(),
         }

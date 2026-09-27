@@ -46,6 +46,12 @@ pub struct OutputConfigDto {
     pub primary: bool,
     #[serde(default)]
     pub rotation: Option<monarch::Rotation>,
+    #[serde(default)]
+    pub hdr_enabled: Option<bool>,
+    #[serde(default)]
+    pub scale_percent: Option<u32>,
+    #[serde(default)]
+    pub clone_group: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -70,8 +76,37 @@ pub struct AppSnapshotDto {
     pub displays: Vec<DisplayInfoDto>,
     pub layout: LayoutDto,
     pub profiles: Vec<ProfileDto>,
+    pub capabilities: Vec<DisplayCapabilitiesDto>,
     pub settings: AppSettings,
     pub pending_confirmation: Option<PendingConfirmationDto>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct DisplayCapabilitiesDto {
+    pub display_key: String,
+    #[serde(flatten)]
+    pub capabilities: monarch::capabilities::DisplayCapabilities,
+}
+
+#[tauri::command]
+pub async fn get_display_capabilities(
+    state: State<'_, MonarchAppState>,
+) -> CommandResult<Vec<DisplayCapabilitiesDto>> {
+    state.controller.refresh(false);
+    Ok(state.controller.snapshot()?.capabilities)
+}
+
+#[tauri::command]
+pub async fn save_profile_layout<R: Runtime>(
+    app: AppHandle<R>,
+    name: String,
+    layout: LayoutDto,
+) -> CommandResult<()> {
+    execute(
+        &app,
+        Operation::SaveProfileLayout(name, dto_to_layout(layout)?),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -172,10 +207,26 @@ where
         displays,
         layout,
         profiles: Vec::new(),
+        capabilities: manager
+            .get_display_capabilities()?
+            .into_iter()
+            .map(|capabilities| DisplayCapabilitiesDto {
+                display_key: format_display_key(&capabilities.display_id),
+                capabilities,
+            })
+            .collect(),
         settings: manager.settings().clone(),
         pending_confirmation: None,
     };
     update_snapshot_metadata(&mut snapshot, manager);
+    snapshot.profiles = manager
+        .list_profiles()
+        .into_iter()
+        .map(|mut p| {
+            p.layout = monarch::identity::remap_layout(&p.layout, &observed.layout);
+            profile_to_dto(p)
+        })
+        .collect();
     Ok(snapshot)
 }
 
@@ -232,6 +283,9 @@ fn output_to_dto(output: &OutputConfig) -> OutputConfigDto {
         refresh_rate_mhz: output.refresh_rate_mhz,
         primary: output.primary,
         rotation: output.rotation,
+        hdr_enabled: output.hdr_enabled,
+        scale_percent: output.scale_percent,
+        clone_group: output.clone_group.clone(),
     }
 }
 
@@ -256,6 +310,9 @@ fn dto_to_layout(dto: LayoutDto) -> CommandResult<Layout> {
                 refresh_rate_mhz: output.refresh_rate_mhz,
                 primary: output.primary,
                 rotation: output.rotation,
+                hdr_enabled: output.hdr_enabled,
+                scale_percent: output.scale_percent,
+                clone_group: output.clone_group,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;

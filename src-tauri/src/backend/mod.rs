@@ -27,6 +27,23 @@ impl SystemDisplayBackend {
 }
 
 impl DisplayBackend for SystemDisplayBackend {
+    fn get_display_capabilities(
+        &self,
+    ) -> Result<Vec<monarch::capabilities::DisplayCapabilities>, monarch::ManagerError> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Windows(b) => b.get_display_capabilities(),
+            Self::Mock(b) => b.get_display_capabilities(),
+        }
+    }
+    fn validate_layout(&self, layout: &Layout) -> Result<(), monarch::ManagerError> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Windows(b) => b.validate_layout(layout),
+            Self::Mock(b) => b.validate_layout(layout),
+        }
+    }
+
     fn snapshot(&self) -> Result<monarch::DisplaySnapshot, monarch::ManagerError> {
         match self {
             #[cfg(target_os = "windows")]
@@ -154,6 +171,9 @@ fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
                 refresh_rate_mhz: displays[0].refresh_rate_mhz,
                 primary: true,
                 rotation: None,
+                hdr_enabled: None,
+                scale_percent: None,
+                clone_group: None,
             },
             OutputConfig {
                 display_id: displays[1].id.clone(),
@@ -163,6 +183,9 @@ fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
                 refresh_rate_mhz: displays[1].refresh_rate_mhz,
                 primary: false,
                 rotation: None,
+                hdr_enabled: None,
+                scale_percent: None,
+                clone_group: None,
             },
             OutputConfig {
                 display_id: displays[2].id.clone(),
@@ -172,6 +195,9 @@ fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
                 refresh_rate_mhz: displays[2].refresh_rate_mhz,
                 primary: false,
                 rotation: None,
+                hdr_enabled: None,
+                scale_percent: None,
+                clone_group: None,
             },
         ],
     };

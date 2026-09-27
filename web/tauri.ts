@@ -3,7 +3,7 @@ import { getVersion as tauriGetVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import packageJson from "../package.json";
-import type { AppSettings, AppSnapshot, ConfirmationEvent, Layout, } from "./types";
+import type { AppSettings, AppSnapshot, ConfirmationEvent, Layout, DisplayCapabilities, } from "./types";
 export type EventPayloadMap = {
   "monarch://state-changed": void;
   "monarch://confirmation": ConfirmationEvent;
@@ -218,4 +218,11 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
     return mock.updateSettings(settings);
   }
   return invoke("update_settings", { settings });
+}
+
+export async function getDisplayCapabilities(): Promise<DisplayCapabilities[]> {
+  return useWebMock ? mock.getDisplayCapabilities() : invoke("get_display_capabilities");
+}
+export async function saveProfileLayout(name: string, layout: Layout): Promise<void> {
+  return useWebMock ? mock.saveProfileLayout(name, layout) : invoke("save_profile_layout", {name,layout});
 }

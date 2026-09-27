@@ -272,6 +272,9 @@ fn layout() -> Layout {
                 enabled: true,
                 primary: target == 1,
                 rotation: Some(Rotation::Landscape),
+                hdr_enabled: None,
+                scale_percent: None,
+                clone_group: None,
                 position: Position {
                     x: (target as i32 - 1) * 1920,
                     y: 0,
@@ -284,4 +287,59 @@ fn layout() -> Layout {
             })
             .collect(),
     }
+}
+
+#[test]
+fn valid_v2_migration_preserves_every_record_and_original_bytes() {
+    let dir = TempDir::new();
+    let store = dir.store();
+    let expected = saved_config();
+    let mut v2 = serde_json::to_value(&expected).unwrap();
+    v2["schema_version"] = serde_json::json!(2);
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for key in [
+                    "hdr_enabled",
+                    "scale_percent",
+                    "clone_group",
+                    "cursor_correction_enabled",
+                    "cursor_calibrations",
+                ] {
+                    map.remove(key);
+                }
+                for child in map.values_mut() {
+                    strip(child);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    strip(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    strip(&mut v2);
+    let bytes = serde_json::to_vec_pretty(&v2).unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+    assert_eq!(store.load().unwrap(), expected);
+    assert_eq!(
+        fs::read(store.path().with_extension("json.v2.bak")).unwrap(),
+        bytes
+    );
+    assert_eq!(store.load().unwrap(), expected);
+}
+
+#[test]
+fn failed_migration_backup_does_not_replace_v2_config() {
+    let dir = TempDir::new();
+    let store = dir.store();
+    let mut old = saved_config();
+    old.schema_version = 2;
+    let bytes = serde_json::to_vec(&old).unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+    fs::create_dir(store.path().with_extension("json.v2.bak")).unwrap();
+    assert!(store.load().is_err());
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
 }

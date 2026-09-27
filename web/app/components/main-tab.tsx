@@ -20,6 +20,7 @@ type MainTabProps = {
   hasPendingConfirmation: boolean;
   shortcutsEnabled: boolean;
   displayShortcutBase: string | null;
+  onEdit: () => void;
   onRestoreLastLayout: () => void;
   onMakePrimaryRequest: (display: DisplayInfo) => void;
   onToggleRequest: (display: DisplayInfo) => void;
@@ -33,6 +34,7 @@ export function MainTab({
   hasPendingConfirmation,
   shortcutsEnabled,
   displayShortcutBase,
+  onEdit,
   onRestoreLastLayout,
   onMakePrimaryRequest,
   onToggleRequest,
@@ -49,6 +51,7 @@ export function MainTab({
             <CardHeader className="gap-3 md:flex-row md:items-start md:justify-between">
               <CardTitle className="text-base">Layout Preview</CardTitle>
               <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button size="sm" variant="outline" disabled={actionBusy || hasPendingConfirmation} onClick={onEdit}>Edit displays</Button>
                 <Badge variant="outline">{activeDisplayCount} active</Badge>
                 <Badge variant="secondary">{snapshot.displays.length} detected</Badge>
               </div>

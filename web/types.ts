@@ -24,6 +24,9 @@ export type OutputConfig = {
   resolution: Resolution;
   refresh_rate_mhz: number;
   primary: boolean;
+  hdr_enabled?: boolean | null;
+  scale_percent?: number | null;
+  clone_group?: string | null;
   rotation?: "landscape" | "portrait" | "landscape_flipped" | "portrait_flipped" | null;
 };
 
@@ -56,6 +59,7 @@ export type AppSnapshot = {
   displays: DisplayInfo[];
   layout: Layout;
   profiles: Profile[];
+  capabilities: DisplayCapabilities[];
   settings: AppSettings;
   pending_confirmation: PendingConfirmation | null;
 };
@@ -65,3 +69,16 @@ export type ConfirmationEvent =
   | { kind: "confirmed" }
   | { kind: "reverted"; reason: "manual" | "timeout" }
   | { kind: "rollback_failed"; message: string };
+
+export type DisplayCapabilities = {
+  display_key: string;
+  modes: { resolution: Resolution; refresh_rate_mhz: number }[];
+  modes_unavailable_reason: string | null;
+  hdr_supported: boolean;
+  hdr_enabled: boolean | null;
+  hdr_unavailable_reason: string | null;
+  scale_percent: number | null;
+  scale_percentages: number[];
+  scaling_unavailable_reason: string | null;
+  physical_size_mm: Resolution | null;
+};

@@ -21,6 +21,9 @@ fn inventory(ids: Vec<DisplayId>) -> Layout {
                 enabled: false,
                 primary: false,
                 rotation: None,
+                hdr_enabled: None,
+                scale_percent: None,
+                clone_group: None,
                 position: Position { x: 0, y: 0 },
                 resolution: Resolution {
                     width: 0,

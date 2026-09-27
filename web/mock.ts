@@ -1,4 +1,5 @@
-import type { AppSettings, AppSnapshot, Layout, Profile } from './types';
+import type { AppSettings, AppSnapshot, Layout, Profile, DisplayCapabilities } from './types';
+import { normalizeGroups } from "@/app/display-editor";
 import type { EventPayloadMap } from './tauri';
 import { DEFAULT_MONITOR_SHORTCUT_BASE, DEFAULT_PROFILE_SHORTCUT_BASE } from '@/app/ui';
 type MockListener = (event: {
@@ -75,24 +76,7 @@ function ensureMockLayoutValid(layout: Layout): void {
   if (enabled.length === 0) {
     throw new Error("cannot disable the last active display");
   }
-  let primaryFound = false;
-  for (const output of layout.outputs) {
-    if (!output.enabled) {
-      output.primary = false;
-      continue;
-    }
-    if (output.primary && !primaryFound) {
-      primaryFound = true;
-      continue;
-    }
-    output.primary = false;
-  }
-  if (!primaryFound) {
-    const firstEnabled = layout.outputs.find((output) => output.enabled);
-    if (firstEnabled) {
-      firstEnabled.primary = true;
-    }
-  }
+  normalizeGroups(layout);
   const primary = layout.outputs.find((output) => output.enabled && output.primary)!;
   const offset = { ...primary.position };
   for (const output of layout.outputs) {
@@ -125,6 +109,14 @@ function replaceMockLayout(nextLayout: Layout): void {
   ensureNoPending();
   const validatedLayout = cloneLayout(nextLayout);
   ensureMockLayoutValid(validatedLayout);
+  for (const o of validatedLayout.outputs.filter((o)=>o.enabled)) {
+    const cap = mockState.capabilities.find((c)=>c.display_key===o.display_key);
+    if (!cap) throw new Error("Display unavailable; reconnect it before applying.");
+    const portrait = o.rotation === "portrait" || o.rotation === "portrait_flipped";
+    if (!cap.modes.some((m)=>m.resolution.width === (portrait?o.resolution.height:o.resolution.width) && m.resolution.height === (portrait?o.resolution.width:o.resolution.height) && m.refresh_rate_mhz===o.refresh_rate_mhz)) throw new Error("Unsupported resolution/refresh combination; select a reported mode.");
+    if (o.hdr_enabled != null && !cap.hdr_supported) throw new Error("HDR unavailable; choose Preserve HDR.");
+    if (o.scale_percent != null && !cap.scale_percentages.includes(o.scale_percent)) throw new Error("Unsupported scaling; choose Preserve scaling.");
+  }
   mockRestorableLayout = cloneLayout(mockState.layout);
   mockState.layout = validatedLayout;
   const timeout_ms = mockState.settings.revert_timeout_secs * 1000;
@@ -183,6 +175,7 @@ function buildMockSnapshot(): AppSnapshot {
       },
       {
         display_key: displays[2].id_key,
+        rotation: "portrait",
         enabled: false,
         position: { x: -1080, y: 0 },
         resolution: { ...displays[2].resolution },
@@ -191,10 +184,26 @@ function buildMockSnapshot(): AppSnapshot {
       },
     ],
   };
+  normalizeGroups(layout);
   return {
     generation: 0,
     displays,
     layout,
+    capabilities: displays.map((display,index)=>({
+      display_key:display.id_key,
+      modes: [
+        {resolution:{width:1920,height:1080},refresh_rate_mhz:60000},
+        {resolution:{width:1920,height:1080},refresh_rate_mhz:59940},
+        ...(index < 2 ? [{resolution:{width:2560,height:1440},refresh_rate_mhz:60000}] : []),
+        ...(index === 0 ? [{resolution:{width:2560,height:1440},refresh_rate_mhz:144000}] : []),
+      ],
+      modes_unavailable_reason:null,
+      hdr_supported:index===0,hdr_enabled:index===0?false:null,
+      hdr_unavailable_reason:index===0?null:"HDR is unsupported on this monitor.",
+      scale_percent:index<2?100:null,scale_percentages:index<2?[100,125,150,175,200]:[],
+      scaling_unavailable_reason:index<2?null:"Scaling is unavailable while this monitor is detached.",
+      physical_size_mm:{width:index===0?600:520,height:index===0?340:290},
+    })),
     profiles: [
       { name: "Desk", layout: cloneLayout(layout) },
       {
@@ -340,4 +349,14 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
   };
   emitMockStateChanged();
   return;
+}
+
+export async function getDisplayCapabilities(): Promise<DisplayCapabilities[]> { return deepClone(mockState.capabilities); }
+export async function saveProfileLayout(name: string, layout: Layout): Promise<void> {
+  ensureNoPending();
+  name = name.trim();
+  if (!name) throw new Error("Profile name cannot be empty.");
+  const saved = cloneLayout(layout); ensureMockLayoutValid(saved);
+  mockState.profiles = [...mockState.profiles.filter((p)=>p.name!==name), {name,layout:saved}].sort((a,b)=>a.name.localeCompare(b.name));
+  emitMockStateChanged();
 }

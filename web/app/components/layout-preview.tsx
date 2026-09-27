@@ -11,21 +11,18 @@ function previewOutputs(snapshot: AppSnapshot | null) {
   }
 
   const knownDisplayKeys = new Set(snapshot.displays.map((display) => display.id_key));
-  return snapshot.layout.outputs.filter(
+  const outputs = snapshot.layout.outputs.filter(
     (output) => output.enabled || knownDisplayKeys.has(output.display_key),
   );
+  return outputs.filter((o,i)=>!o.enabled || !o.clone_group || outputs.findIndex((a)=>a.enabled && a.clone_group === o.clone_group)===i);
 }
 
 function getOutputResolution(
   output: LayoutOutput,
   displayByKey: Map<string, AppSnapshot["displays"][number]>,
 ) {
-  const display = displayByKey.get(output.display_key);
-  if (!display?.is_active) {
-    return output.resolution;
-  }
-
-  return display.resolution;
+  void displayByKey;
+  return output.resolution;
 }
 
 function layoutBounds(snapshot: AppSnapshot | null, outputs: LayoutOutput[]) {
@@ -70,7 +67,7 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
     );
   }
 
-  const scale = Math.min(720 / bounds.width, 300 / bounds.height);
+  const scale = Math.min(720 / Math.max(1,bounds.width), 300 / Math.max(1,bounds.height));
 
   return (
     <div
@@ -88,8 +85,9 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
           const display = displayByKey.get(output.display_key);
           const monitorNumber = monitorNumberByDisplayKey.get(output.display_key);
           const active = output.enabled;
-          const previewResolution =
-            display?.is_active && active ? display.resolution : output.resolution;
+          const previewResolution = output.resolution;
+          const members = snapshot.layout.outputs.filter((o)=>o.enabled && output.enabled && output.clone_group && o.clone_group===output.clone_group);
+          const numbers = members.length > 1 ? members.map((o)=>monitorNumberByDisplayKey.get(o.display_key) ?? "?").join(" + ") : monitorNumber;
 
           return (
             <div
@@ -116,7 +114,7 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
                 <div className="flex min-w-0 items-start gap-1">
                   {monitorNumber ? (
                     <span className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded border bg-background/70 px-1.5 text-[11px] font-bold leading-none">
-                      {monitorNumber}
+                      {numbers}
                     </span>
                   ) : null}
                   <span className="truncate text-[10px] font-medium leading-tight">
@@ -130,7 +128,7 @@ export function LayoutPreview({ snapshot }: { snapshot: AppSnapshot | null }) {
                 ) : null}
               </div>
               <span className="text-[9px] leading-none text-muted-foreground">
-                {active ? "Active" : "Detached"}
+                {members.length > 1 ? "Duplicated" : active ? "Active" : "Detached"}
               </span>
             </div>
           );

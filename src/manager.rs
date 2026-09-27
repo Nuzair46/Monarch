@@ -143,12 +143,25 @@ where
     pub fn apply_layout(&mut self, layout: Layout) -> Result<(), ManagerError> {
         self.ensure_no_pending_confirmation()?;
         let mut layout = layout;
+        layout.normalize_clone_groups();
         layout.ensure_valid()?;
         normalize_primary(&mut layout);
 
-        let (layout, current_layout) = self.remap_and_resolve_for_apply(layout)?;
+        let (mut layout, current_layout) = self.remap_and_resolve_for_apply(layout)?;
+        for output in &mut layout.outputs {
+            if let Some(current) = current_layout
+                .outputs
+                .iter()
+                .find(|o| o.display_id == output.display_id && o.enabled)
+            {
+                output.hdr_enabled = output.hdr_enabled.or(current.hdr_enabled);
+                output.scale_percent = output.scale_percent.or(current.scale_percent);
+            }
+        }
+
         layout.ensure_supported()?;
         current_layout.ensure_supported()?;
+        self.backend.validate_layout(&layout)?;
         let mut next = self.config.clone();
         next.last_known_good_layout = Some(current_layout.clone());
         next.last_restorable_layout = Some(current_layout.clone());
@@ -256,8 +269,21 @@ where
         layout.outputs[index].enabled = !currently_enabled;
         if !layout.outputs[index].enabled {
             layout.outputs[index].primary = false;
+            layout.outputs[index].clone_group = None;
         }
 
+        layout.normalize_clone_groups();
+        if !currently_enabled && layout.ensure_supported().is_err() {
+            let right = layout
+                .outputs
+                .iter()
+                .enumerate()
+                .filter(|(i, o)| *i != index && o.enabled)
+                .map(|(_, o)| o.position.x + o.resolution.width as i32)
+                .max()
+                .unwrap_or(0);
+            layout.outputs[index].position = crate::Position { x: right, y: 0 };
+        }
         normalize_primary(&mut layout);
         self.apply_layout(layout)
     }
@@ -295,6 +321,55 @@ where
         }
 
         self.commit_config(next)
+    }
+
+    /// Persist a draft without querying or changing live displays. Disconnected
+    /// monitors are intentionally retained; capabilities are checked at Apply.
+    pub fn save_profile_layout(
+        &mut self,
+        name: String,
+        mut layout: Layout,
+    ) -> Result<(), ManagerError> {
+        self.ensure_no_pending_confirmation()?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ManagerError::Validation(
+                "profile name cannot be empty".into(),
+            ));
+        }
+        let observed = self.backend.snapshot()?;
+        for output in &mut layout.outputs {
+            let evidence = observed
+                .layout
+                .outputs
+                .iter()
+                .chain(self.config.profiles.iter().flat_map(|p| &p.layout.outputs))
+                .find(|o| {
+                    o.display_id.endpoint() == output.display_id.endpoint()
+                        && o.display_id.edid_hash == output.display_id.edid_hash
+                });
+            if let Some(evidence) = evidence {
+                crate::identity::preserve_evidence(&evidence.display_id, &mut output.display_id);
+            }
+        }
+        layout.normalize_clone_groups();
+        layout.ensure_supported()?;
+        normalize_primary(&mut layout);
+        let mut next = self.config.clone();
+        sync_display_fingerprints(&mut next, &observed.displays);
+        next.profiles.retain(|p| p.name != name);
+        next.profiles.push(Profile {
+            name: name.into(),
+            layout,
+        });
+        next.profiles.sort_by(|a, b| a.name.cmp(&b.name));
+        self.commit_config(next)
+    }
+
+    pub fn get_display_capabilities(
+        &self,
+    ) -> Result<Vec<crate::capabilities::DisplayCapabilities>, ManagerError> {
+        self.backend.get_display_capabilities()
     }
 
     pub fn list_profiles(&self) -> Vec<Profile> {
@@ -546,26 +621,17 @@ where
 }
 
 fn normalize_primary(layout: &mut Layout) {
-    let mut primary_found = false;
-
+    layout.normalize_clone_groups();
+    let primary = layout
+        .outputs
+        .iter()
+        .find(|o| o.enabled && o.primary)
+        .or_else(|| layout.outputs.iter().find(|o| o.enabled))
+        .cloned();
     for output in &mut layout.outputs {
-        if !output.enabled {
-            output.primary = false;
-            continue;
-        }
-
-        if output.primary && !primary_found {
-            primary_found = true;
-            continue;
-        }
-
-        output.primary = false;
-    }
-
-    if !primary_found {
-        if let Some(output) = layout.outputs.iter_mut().find(|output| output.enabled) {
-            output.primary = true;
-        }
+        output.primary = primary.as_ref().is_some_and(|p| {
+            output.enabled && (output.display_id == p.display_id || output.shares_source(p))
+        });
     }
 
     if let Some(primary) = layout
@@ -694,6 +760,9 @@ mod tests {
                     refresh_rate_mhz: 60_000,
                     primary: true,
                     rotation: None,
+                    hdr_enabled: None,
+                    scale_percent: None,
+                    clone_group: None,
                 },
                 OutputConfig {
                     display_id: sample_display_id_on_adapter(adapter_luid, 2),
@@ -706,6 +775,9 @@ mod tests {
                     refresh_rate_mhz: 144_000,
                     primary: false,
                     rotation: None,
+                    hdr_enabled: None,
+                    scale_percent: None,
+                    clone_group: None,
                 },
             ],
         }
@@ -1240,6 +1312,9 @@ mod tests {
                         refresh_rate_mhz: display_one.refresh_rate_mhz,
                         primary: true,
                         rotation: None,
+                        hdr_enabled: None,
+                        scale_percent: None,
+                        clone_group: None,
                     },
                     OutputConfig {
                         display_id: display_three_reusing_target.id.clone(),
@@ -1249,6 +1324,9 @@ mod tests {
                         refresh_rate_mhz: display_three_reusing_target.refresh_rate_mhz,
                         primary: false,
                         rotation: None,
+                        hdr_enabled: None,
+                        scale_percent: None,
+                        clone_group: None,
                     },
                 ],
             },
@@ -1275,6 +1353,9 @@ mod tests {
                             refresh_rate_mhz: 60_000,
                             primary: true,
                             rotation: None,
+                            hdr_enabled: None,
+                            scale_percent: None,
+                            clone_group: None,
                         },
                         OutputConfig {
                             display_id: DisplayId {
@@ -1292,6 +1373,9 @@ mod tests {
                             refresh_rate_mhz: 60_000,
                             primary: false,
                             rotation: None,
+                            hdr_enabled: None,
+                            scale_percent: None,
+                            clone_group: None,
                         },
                     ],
                 },
@@ -1376,6 +1460,9 @@ mod tests {
                     refresh_rate_mhz: 60_000,
                     primary: true,
                     rotation: None,
+                    hdr_enabled: None,
+                    scale_percent: None,
+                    clone_group: None,
                 },
                 OutputConfig {
                     display_id: stale_id.clone(),
@@ -1388,6 +1475,9 @@ mod tests {
                     refresh_rate_mhz: 144_000,
                     primary: false,
                     rotation: None,
+                    hdr_enabled: None,
+                    scale_percent: None,
+                    clone_group: None,
                 },
                 OutputConfig {
                     display_id: fresh_id.clone(),
@@ -1400,6 +1490,9 @@ mod tests {
                     refresh_rate_mhz: 144_000,
                     primary: false,
                     rotation: None,
+                    hdr_enabled: None,
+                    scale_percent: None,
+                    clone_group: None,
                 },
             ],
         };
@@ -1419,6 +1512,9 @@ mod tests {
             refresh_rate_mhz: 60_000,
             primary,
             rotation: None,
+            hdr_enabled: None,
+            scale_percent: None,
+            clone_group: None,
         }
     }
 
@@ -1570,6 +1666,9 @@ mod tests {
             refresh_rate_mhz: 144_000,
             primary: false,
             rotation: None,
+            hdr_enabled: None,
+            scale_percent: None,
+            clone_group: None,
         };
         let layout = Layout {
             outputs: vec![
@@ -1584,6 +1683,9 @@ mod tests {
                     refresh_rate_mhz: 60_000,
                     primary: true,
                     rotation: None,
+                    hdr_enabled: None,
+                    scale_percent: None,
+                    clone_group: None,
                 },
                 twin_output(&twin_left_id, 1920),
                 twin_output(&twin_right_id, 4480),

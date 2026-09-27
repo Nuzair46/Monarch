@@ -10,6 +10,8 @@ import {
   DisplayToggleDialog,
   PendingConfirmationDialog,
 } from "@/app/components/dialogs";
+import { editOutput } from "@/app/display-editor";
+import { DisplayEditor } from "@/app/components/display-editor";
 import { MainTab } from "@/app/components/main-tab";
 import { ProfilesTab } from "@/app/components/profiles-tab";
 import { SettingsTab } from "@/app/components/settings-tab";
@@ -35,11 +37,13 @@ import {
   restoreLastLayout,
   rollbackPending,
   saveProfile,
+  saveProfileLayout,
   toggleDisplay,
   updateSettings,
   type ReleaseUpdateCheckResult,
 } from "./tauri";
 import type {
+  Layout,
   AppSettings,
   AppSnapshot,
   DisplayInfo,
@@ -50,6 +54,7 @@ function normalizeShortcutBaseForCompare(value: string | null | undefined): stri
 }
 
 function App() {
+  const [editing,setEditing] = useState<{name:string|null;layout:Layout}|null>(null);
   const [view, setView] = useState<View>("main");
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -363,29 +368,7 @@ function App() {
       return;
     }
 
-    let foundTarget = false;
-    const nextLayout = {
-      outputs: snapshot.layout.outputs.map((output) => {
-        if (output.display_key === display.id_key) {
-          foundTarget = true;
-          return {
-            ...output,
-            primary: output.enabled,
-          };
-        }
-        return {
-          ...output,
-          primary: false,
-        };
-      }),
-    };
-
-    if (!foundTarget) {
-      const message = "Could not find display in current layout.";
-      setError(message);
-      toast.error(message);
-      return;
-    }
+    const nextLayout = editOutput(snapshot.layout,display.id_key,{primary:true});
 
     await runAction(
       () => applyLayout(nextLayout),
@@ -570,6 +553,7 @@ function App() {
           displayShortcutBase={
             snapshot?.settings.display_toggle_shortcut_base ?? null
           }
+          onEdit={()=>snapshot && setEditing({name:null,layout:snapshot.layout})}
           onRestoreLastLayout={() => {
             void runAction(restoreLastLayout, "Restored last layout");
           }}
@@ -601,6 +585,7 @@ function App() {
           onSaveCurrentLayout={() => {
             void handleSaveCurrentLayout();
           }}
+          onEditProfile={(name)=>{const profile=snapshot?.profiles.find((p)=>p.name===name); if(profile) setEditing({name,layout:profile.layout});}}
           onApplyProfile={(name) => {
             void runAction(() => applyProfile(name), "Profile applied");
           }}
@@ -655,7 +640,13 @@ function App() {
           }}
         />
 
-        <DeleteProfileDialog
+        {editing && snapshot && <DisplayEditor key={editing.name ?? "current"} initial={editing.layout} name={editing.name} snapshot={snapshot} busy={actionBusy}
+        onClose={()=>setEditing(null)}
+        onSave={(layout)=>{void runAction(()=>saveProfileLayout(editing.name!,layout),"Profile saved").then((ok)=>{if(ok)setEditing(null);});}}
+        onApply={(layout)=>{void runAction(()=>applyLayout(layout)).then((ok)=>{if(ok)setEditing(null);});}}
+      />}
+
+      <DeleteProfileDialog
           pendingProfileDelete={pendingProfileDelete}
           busy={actionBusy}
           onOpenChange={(open) => {

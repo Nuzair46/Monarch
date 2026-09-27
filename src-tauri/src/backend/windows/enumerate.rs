@@ -156,6 +156,9 @@ fn seed_connected_inactive_displays(
             refresh_rate_mhz,
             primary: false,
             rotation: None,
+            hdr_enabled: None,
+            scale_percent: None,
+            clone_group: None,
         });
         snapshot.displays.push(DisplayInfo {
             id: display_id,
@@ -247,8 +250,42 @@ pub(super) fn snapshot_from_raw(
             refresh_rate_mhz: display.refresh_rate_mhz,
             primary: display.is_primary,
             rotation: Some(rotation_from_windows(path.targetInfo.rotation)),
+            hdr_enabled: super::hdr::query(path).map(|h| h.enabled),
+            scale_percent: super::scaling::query(path).map(|s| s.current),
+            clone_group: None,
         });
         displays.push(display);
+    }
+
+    // Group only observed active paths that share a Windows source. Persist a
+    // local ordinal, never an adapter/source address; verification compares members.
+    let mut source_groups: std::collections::BTreeMap<(u64, u32), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for path in raw.paths.iter().filter(|p| p.flags & 1 != 0) {
+        if let Some(index) = outputs.iter().position(|o| {
+            o.display_id.target_id == path.targetInfo.id
+                && o.display_id.adapter_luid
+                    == luid_to_u64(
+                        path.targetInfo.adapterId.HighPart,
+                        path.targetInfo.adapterId.LowPart,
+                    )
+        }) {
+            source_groups
+                .entry((
+                    luid_to_u64(
+                        path.sourceInfo.adapterId.HighPart,
+                        path.sourceInfo.adapterId.LowPart,
+                    ),
+                    path.sourceInfo.id,
+                ))
+                .or_default()
+                .push(index);
+        }
+    }
+    for (ordinal, members) in source_groups.values().filter(|g| g.len() > 1).enumerate() {
+        for index in members {
+            outputs[*index].clone_group = Some(format!("clone-{}", ordinal + 1));
+        }
     }
 
     if !outputs

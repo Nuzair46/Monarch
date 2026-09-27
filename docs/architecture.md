@@ -71,3 +71,25 @@ Instance mutex and pipe names include the user SID and Windows session ID. The n
 `yarn test` exercises asynchronous subscription disposal, the browser confirmation contract and version-bump fixtures, including a locked Cargo check. Both Cargo lockfiles are committed with release version changes. Release builds test core and desktop code using locked dependencies and create the permanent tag only after the Windows build succeeds. Keep Tauri, its runtimes and the CLI compatible when updating the lockfiles.
 
 A Windows target source check on Linux can compile code and tests with `MONARCH_SKIP_TAURI_BUILD=1`; it does not execute Win32 calls or prove the MSI build. Hardware acceptance remains necessary for GPU/driver behavior, slideshow/disabled backgrounds, mixed adapters, dock changes, localized registry handling and multiple login sessions.
+
+Display profile editing (schema 3): output preferences include optional HDR, standard
+per-source scaling and layout-local clone groups. `save_profile_layout` persists a
+draft; it never applies displays. Missing optional preferences preserve observed
+state. Version 2 is migrated only after validation, with its original bytes retained
+in `config.json.v2.bak`. Geometry history remains preferences, not capabilities.
+
+The Windows planner chooses one route per target, one common source per clone group,
+and distinct sources for extended surfaces. It submits a complete source-mode table
+to `SDC_VALIDATE`, then applies without `SDC_ALLOW_CHANGES`. Native routing is queried
+again before HDR and DPI setters, and all requested properties (including clone
+membership) are observed before confirmation starts. Failed apply restores captured
+native modes and preferences; the persisted recovery layout covers timeout/restart.
+Wallpaper and SDR calibration recovery remain in the transaction.
+
+Mode lists use DXGI rational refresh rates. A detached target or a cloned source
+cannot supply another target's mode list; only its target-specific preferred mode
+and any observed active mode are offered until it is extended. Windows validates
+the complete combination again at apply. HDR probes the HDR-specific request before
+falling back to the older advanced-color request. Scaling is isolated in
+`backend/windows/scaling.rs`: the undocumented -3/-4 device-info requests are used
+only for readable standard ranges, with no custom/global or registry scaling.

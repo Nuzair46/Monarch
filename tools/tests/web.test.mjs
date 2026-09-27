@@ -46,7 +46,7 @@ test('subscriptions dispose existing listeners and surface only live failures', 
 });
 
 test('browser mock obeys confirmation, rollback, timeout and custom-shortcut contracts', async () => {
-  const mock = await import(compiledModule('web/mock.ts', { '@/app/ui': compiledModule('web/app/ui.ts') }));
+  const mock = await import(compiledModule('web/mock.ts', { '@/app/ui': compiledModule('web/app/ui.ts'), '@/app/display-editor': compiledModule('web/app/display-editor.ts') }));
   const initial = await mock.getSnapshot();
   await mock.toggleDisplay(initial.displays[1].id_key);
   assert.ok((await mock.getSnapshot()).pending_confirmation);
@@ -67,4 +67,36 @@ test('browser mock obeys confirmation, rollback, timeout and custom-shortcut con
   await new Promise((resolve) => setTimeout(resolve, 1100));
   assert.deepEqual((await mock.getSnapshot()).layout, initial.layout);
   assert.equal((await mock.getSnapshot()).pending_confirmation, null);
+});
+
+test('editor drafts save without mutation, retain unavailable monitors, and apply/revert preferences', async () => {
+  const mock = await import(compiledModule('web/mock.ts', { '@/app/ui': compiledModule('web/app/ui.ts'), '@/app/display-editor': compiledModule('web/app/display-editor.ts') }) + '#drafts');
+  const {editOutput,changeAttachment} = await import(compiledModule('web/app/display-editor.ts'));
+  const initial = await mock.getSnapshot();
+  let draft = editOutput(initial.layout,initial.displays[0].id_key,{hdr_enabled:true,scale_percent:150,refresh_rate_mhz:60000});
+  await mock.saveProfileLayout('Draft',draft);
+  assert.deepEqual((await mock.getSnapshot()).layout,initial.layout);
+  assert.equal((await mock.getSnapshot()).pending_confirmation,null);
+  await mock.applyProfile('Draft');
+  assert.equal((await mock.getSnapshot()).layout.outputs[0].hdr_enabled,true);
+  await mock.rollbackPending();
+  assert.deepEqual((await mock.getSnapshot()).layout,initial.layout);
+  draft = changeAttachment(draft,initial.displays[1].id_key,initial.displays[0].id_key);
+  assert.equal(draft.outputs[1].clone_group,draft.outputs[0].clone_group);
+  assert.equal(draft.outputs[1].primary,true);
+  await mock.applyLayout(draft); await mock.rollbackPending();
+  const extended=changeAttachment(draft,initial.displays[1].id_key,'extend');
+  assert.equal(extended.outputs[0].clone_group,null);
+  assert.ok(extended.outputs[1].position.x>=extended.outputs[0].resolution.width);
+  const detached=changeAttachment(draft,initial.displays[0].id_key,'detached');
+  assert.equal(detached.outputs[1].clone_group,null);assert.equal(detached.outputs[1].enabled,true);
+  const missing=structuredClone(initial.layout);missing.outputs[1].display_key='missing';
+  await mock.saveProfileLayout('Disconnected',missing);
+  await assert.rejects(mock.applyProfile('Disconnected'),/unavailable/);
+  assert.deepEqual((await mock.getSnapshot()).layout,initial.layout);
+  const caps=await mock.getDisplayCapabilities();
+  assert.ok(caps[0].modes.some((m)=>m.refresh_rate_mhz===59940));
+  assert.equal(caps[1].hdr_supported,false);
+  assert.ok(caps[2].scaling_unavailable_reason);
+  await assert.rejects(mock.applyLayout(editOutput(initial.layout,initial.displays[1].id_key,{hdr_enabled:true})),/HDR/);
 });

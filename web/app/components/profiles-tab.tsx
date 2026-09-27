@@ -21,6 +21,7 @@ type ProfilesTabProps = {
   newProfileName: string;
   onNewProfileNameChange: (value: string) => void;
   onSaveCurrentLayout: () => void;
+  onEditProfile: (name: string) => void;
   onApplyProfile: (name: string) => void;
   onDeleteProfileRequest: (name: string) => void;
 };
@@ -35,6 +36,7 @@ export function ProfilesTab({
   newProfileName,
   onNewProfileNameChange,
   onSaveCurrentLayout,
+  onEditProfile,
   onApplyProfile,
   onDeleteProfileRequest,
 }: ProfilesTabProps) {
@@ -99,6 +101,7 @@ export function ProfilesTab({
                       </div>
 
                       <div className="flex flex-wrap gap-2 sm:justify-end">
+                        <Button size="sm" variant="outline" disabled={actionBusy || hasPendingConfirmation} onClick={()=>onEditProfile(profile.name)}>Edit</Button>
                         <Button
                           type="button"
                           size="sm"

@@ -2,70 +2,18 @@
 
 use std::collections::HashSet;
 
+use super::win32_types::luid_to_u64;
 use monarch::{Layout, ManagerError};
 use windows::Win32::Devices::Display::{
-    SetDisplayConfig, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_ROTATION_IDENTITY,
-    DISPLAYCONFIG_SCALING_PREFERRED, DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED,
-    SDC_ALLOW_CHANGES, SDC_ALLOW_PATH_ORDER_CHANGES, SDC_APPLY, SDC_TOPOLOGY_SUPPLIED,
-    SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_ROTATION_IDENTITY, DISPLAYCONFIG_SCALING_PREFERRED,
+    DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED,
 };
-
-use super::apply::wait_for_requested_outputs;
-use super::win32_types::{luid_to_u64, TopologySnapshot};
 
 const PATH_ACTIVE: u32 = 1;
 const MODE_INDEX_INVALID: u32 = u32::MAX;
 type PathEndpoint = (u64, u32);
 
-/// Reconnect the requested targets using fresh QDC_ALL_PATHS data. The caller remaps the
-/// desired IDs against this inventory, verifies the result, and reapplies saved geometry.
-pub(super) fn recover_layout(
-    desired: &Layout,
-    connected: &TopologySnapshot,
-) -> Result<TopologySnapshot, ManagerError> {
-    let paths = build_recovery_paths(desired, &connected.raw.paths)?;
-
-    // A topology-only request must contain one chosen path per target, no mode table, and
-    // invalid source/target mode indices. Try Windows' saved modes for this exact topology.
-    // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setdisplayconfig
-    let database_flags = SDC_TOPOLOGY_SUPPLIED | SDC_ALLOW_PATH_ORDER_CHANGES;
-    let mut database_status =
-        unsafe { SetDisplayConfig(Some(paths.as_slice()), None, SDC_VALIDATE | database_flags) };
-    if database_status == 0 {
-        database_status =
-            unsafe { SetDisplayConfig(Some(paths.as_slice()), None, SDC_APPLY | database_flags) };
-    }
-    let database_result = if database_status == 0 {
-        wait_for_requested_outputs(desired)
-    } else {
-        Err(ManagerError::Backend(format!(
-            "saved topology status {database_status}"
-        )))
-    };
-    match database_result {
-        Ok(snapshot) => return Ok(snapshot),
-        Err(database_error) => {
-            // The database may only know the reduced desktop. With unspecified modes, Windows
-            // can compute a working configuration for the explicit complete target set instead.
-            let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES;
-            let mut best_mode_status =
-                unsafe { SetDisplayConfig(Some(paths.as_slice()), None, SDC_VALIDATE | flags) };
-            if best_mode_status == 0 {
-                best_mode_status =
-                    unsafe { SetDisplayConfig(Some(paths.as_slice()), None, SDC_APPLY | flags) };
-            }
-            if best_mode_status != 0 {
-                return Err(ManagerError::Backend(format!(
-                    "display reconnect failed: {database_error}; best-mode status {best_mode_status}"
-                )));
-            }
-        }
-    }
-
-    wait_for_requested_outputs(desired)
-}
-
-fn build_recovery_paths(
+pub(super) fn build_recovery_paths(
     desired: &Layout,
     available: &[DISPLAYCONFIG_PATH_INFO],
 ) -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, ManagerError> {
@@ -87,7 +35,7 @@ fn build_recovery_paths(
 
     let mut targets = HashSet::new();
     let mut candidates = Vec::with_capacity(outputs.len());
-    for output in outputs {
+    for output in &outputs {
         let target = (output.display_id.adapter_luid, output.display_id.target_id);
         if !targets.insert(target) {
             return Err(ManagerError::Validation(
@@ -114,9 +62,9 @@ fn build_recovery_paths(
     // choice can consume the only source available to a later display. Backtrack to find
     // a complete matching, keeping sources distinct so displays are extended, not cloned.
     let mut selected = Vec::with_capacity(candidates.len());
-    if !select_distinct_sources(&candidates, 0, &mut HashSet::new(), &mut selected) {
+    if !select_sources(&candidates, &outputs, 0, &mut HashSet::new(), &mut selected) {
         return Err(ManagerError::Backend(
-            "Windows reports no extended-desktop path assignment for all requested displays"
+            "Windows reports no compatible source assignment for the requested duplicate/extend groups; choose Extend or a different group"
                 .to_string(),
         ));
     }
@@ -140,8 +88,9 @@ fn build_recovery_paths(
     Ok(selected)
 }
 
-fn select_distinct_sources(
+fn select_sources(
     candidates: &[Vec<DISPLAYCONFIG_PATH_INFO>],
+    outputs: &[&monarch::OutputConfig],
     index: usize,
     used_sources: &mut HashSet<PathEndpoint>,
     selected: &mut Vec<DISPLAYCONFIG_PATH_INFO>,
@@ -151,15 +100,24 @@ fn select_distinct_sources(
     }
     for path in &candidates[index] {
         let source = source_key(path);
-        if !used_sources.insert(source) {
+        let shared = outputs[..index]
+            .iter()
+            .position(|o| o.shares_source(outputs[index]));
+        if let Some(previous) = shared {
+            if source != source_key(&selected[previous]) {
+                continue;
+            }
+        } else if !used_sources.insert(source) {
             continue;
         }
         selected.push(*path);
-        if select_distinct_sources(candidates, index + 1, used_sources, selected) {
+        if select_sources(candidates, outputs, index + 1, used_sources, selected) {
             return true;
         }
         selected.pop();
-        used_sources.remove(&source);
+        if shared.is_none() {
+            used_sources.remove(&source);
+        }
     }
     false
 }
@@ -210,6 +168,9 @@ mod tests {
             refresh_rate_mhz: 60_000,
             primary,
             rotation: None,
+            hdr_enabled: None,
+            scale_percent: None,
+            clone_group: None,
         }
     }
 
@@ -378,5 +339,64 @@ mod tests {
             selected.targetInfo.scanLineOrdering,
             DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED
         );
+    }
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::*;
+    use windows::core::BOOL;
+    fn output(id: u32, group: Option<&str>) -> monarch::OutputConfig {
+        monarch::OutputConfig {
+            display_id: monarch::DisplayId {
+                adapter_luid: 1,
+                target_id: id,
+                edid_hash: None,
+                identity: Default::default(),
+            },
+            enabled: true,
+            primary: group.is_some(),
+            position: monarch::Position {
+                x: if group.is_some() { 0 } else { 1920 },
+                y: 0,
+            },
+            resolution: monarch::Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            refresh_rate_mhz: 59940,
+            rotation: Some(monarch::Rotation::Landscape),
+            hdr_enabled: None,
+            scale_percent: None,
+            clone_group: group.map(String::from),
+        }
+    }
+    fn path(source: u32, target: u32) -> DISPLAYCONFIG_PATH_INFO {
+        let mut p = DISPLAYCONFIG_PATH_INFO::default();
+        p.sourceInfo.adapterId.LowPart = 1;
+        p.sourceInfo.id = source;
+        p.targetInfo.adapterId.LowPart = 1;
+        p.targetInfo.id = target;
+        p.targetInfo.targetAvailable = BOOL(1);
+        p
+    }
+    #[test]
+    fn cloned_pair_and_extended_display_use_two_sources() {
+        let l = Layout {
+            outputs: vec![
+                output(1, Some("pair")),
+                output(2, Some("pair")),
+                output(3, None),
+            ],
+        };
+        let paths = build_recovery_paths(
+            &l,
+            &[path(0, 1), path(1, 1), path(0, 2), path(1, 2), path(0, 3)],
+        )
+        .unwrap();
+        assert_eq!(source_key(&paths[0]), (1, 1));
+        assert_eq!(source_key(&paths[1]), (1, 1));
+        assert_eq!(source_key(&paths[2]), (1, 0));
+        assert!(build_recovery_paths(&l, &[path(0, 1), path(1, 2), path(2, 3)]).is_err());
     }
 }

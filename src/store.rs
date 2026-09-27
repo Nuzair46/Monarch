@@ -63,6 +63,11 @@ impl ConfigStore for FileConfigStore {
                 {
                     return Ok(config);
                 }
+                if let Some(config) = migrate_v2(&bytes) {
+                    atomic_write(&self.path.with_extension("json.v2.bak"), &bytes)?;
+                    self.save(&config)?;
+                    return Ok(config);
+                }
                 self.reset()?;
                 Ok(AppConfig::default())
             }
@@ -203,4 +208,15 @@ impl ConfigStore for MemoryConfigStore {
         *guard = config.clone();
         Ok(())
     }
+}
+
+/// Only a structurally valid v2 configuration is migrated. Serde still rejects
+/// unknown fields and missing required old fields before compatible defaults apply.
+fn migrate_v2(bytes: &[u8]) -> Option<AppConfig> {
+    let mut config: AppConfig = serde_json::from_slice(bytes).ok()?;
+    if config.schema_version != 2 {
+        return None;
+    }
+    config.schema_version = crate::model::CONFIG_SCHEMA_VERSION;
+    config.is_supported().then_some(config)
 }

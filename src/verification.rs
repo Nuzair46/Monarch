@@ -30,16 +30,28 @@ pub fn verify_applied_layout(desired: &Layout, actual: &Layout) -> Result<(), Ma
             observed.keys().collect::<Vec<_>>()
         )));
     }
+    for a in expected.values() {
+        for b in expected.values().filter(|b| b.display_id != a.display_id) {
+            let actual_a = &observed[&(a.display_id.adapter_luid, a.display_id.target_id)];
+            let actual_b = &observed[&(b.display_id.adapter_luid, b.display_id.target_id)];
+            if a.shares_source(b) != actual_a.shares_source(actual_b) {
+                return Err(ManagerError::Backend("Windows applied different display duplication; previous settings must be restored".into()));
+            }
+        }
+    }
     for (key, wanted) in expected {
         let got = &observed[&key];
         if wanted.rotation.is_some() && wanted.rotation != got.rotation
-            || wanted.position != got.position
-            || wanted.resolution != got.resolution
+            || (wanted.resolution.width > 0
+                && (wanted.position != got.position || wanted.resolution != got.resolution))
             || wanted.primary != got.primary
-            || wanted.refresh_rate_mhz.abs_diff(got.refresh_rate_mhz) > 2
+            || (wanted.resolution.width > 0
+                && wanted.refresh_rate_mhz.abs_diff(got.refresh_rate_mhz) > 2)
+            || (wanted.hdr_enabled.is_some() && wanted.hdr_enabled != got.hdr_enabled)
+            || (wanted.scale_percent.is_some() && wanted.scale_percent != got.scale_percent)
         {
             return Err(ManagerError::Backend(format!(
-                "Windows did not apply the requested placement, primary display, rotation, resolution or refresh rate for display {} on adapter {:016x}", key.1, key.0
+                "Windows did not apply the requested placement, primary display, rotation, resolution, refresh rate, HDR or scaling for display {} on adapter {:016x}", key.1, key.0
             )));
         }
     }
@@ -64,6 +76,9 @@ mod tests {
                     enabled: true,
                     primary: id == 1,
                     rotation: None,
+                    hdr_enabled: None,
+                    scale_percent: None,
+                    clone_group: None,
                     position: Position {
                         x: (id as i32 - 1) * 1920,
                         y: 0,

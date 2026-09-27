@@ -3,6 +3,15 @@ use std::sync::{Arc, Mutex};
 use crate::{DisplayInfo, DisplaySnapshot, Layout, ManagerError};
 
 pub trait DisplayBackend {
+    fn get_display_capabilities(
+        &self,
+    ) -> Result<Vec<crate::capabilities::DisplayCapabilities>, ManagerError> {
+        Ok(Vec::new())
+    }
+    fn validate_layout(&self, _layout: &Layout) -> Result<(), ManagerError> {
+        Ok(())
+    }
+
     fn snapshot(&self) -> Result<DisplaySnapshot, ManagerError> {
         Ok(DisplaySnapshot {
             generation: 0,

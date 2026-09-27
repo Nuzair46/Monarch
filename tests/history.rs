@@ -15,6 +15,9 @@ fn observed(serial: &str) -> Layout {
             enabled: true,
             primary: true,
             rotation: Some(Rotation::Portrait),
+            hdr_enabled: None,
+            scale_percent: None,
+            clone_group: None,
             resolution: Resolution {
                 width: 1080,
                 height: 1920,
