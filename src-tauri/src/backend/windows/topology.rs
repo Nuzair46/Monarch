@@ -6,16 +6,16 @@ use std::mem::{size_of, MaybeUninit};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::diagnostics;
 use monarch::{DisplayBackend, DisplayId, DisplayInfo, Layout, ManagerError};
 use serde::{Deserialize, Serialize};
 
 use super::apply::{
     active_color_state_signature, apply_layout_against_snapshot, capture_sdr_gamma_ramps,
     force_topology_extend, gamma_ramp_looks_identity,
-    reapply_color_calibration_for_active_with_cached_sdr,
-    GammaRampKey, GammaRampWords,
+    reapply_color_calibration_for_active_with_cached_sdr, GammaRampKey, GammaRampWords,
 };
-use super::enumerate::query_active_topology;
+use super::enumerate::{query_active_topology, snapshot_from_raw};
 use super::win32_types::{RawTopologySnapshot, TopologySnapshot};
 
 const PERSISTED_RAW_SNAPSHOT_VERSION: u32 = 1;
@@ -79,58 +79,11 @@ impl WindowsDisplayBackend {
             cache.last_snapshot.as_ref(),
             snapshot.clone(),
         ));
-
-        let mut merged_layout = cache
-            .last_layout
-            .clone()
-            .unwrap_or_else(|| snapshot.layout.clone());
-        for output in &mut merged_layout.outputs {
-            if let Some(active) = snapshot
-                .layout
-                .outputs
-                .iter()
-                .find(|active| active.display_id == output.display_id)
-            {
-                *output = active.clone();
-            } else {
-                output.enabled = false;
-                output.primary = false;
-            }
-        }
-        for active in &snapshot.layout.outputs {
-            if !merged_layout
-                .outputs
-                .iter()
-                .any(|o| o.display_id == active.display_id)
-            {
-                merged_layout.outputs.push(active.clone());
-            }
-        }
-        if !merged_layout.outputs.iter().any(|o| o.enabled && o.primary) {
-            if let Some(first) = merged_layout.outputs.iter_mut().find(|o| o.enabled) {
-                first.primary = true;
-            }
-        }
-        cache.last_layout = Some(merged_layout);
-
-        for display in &mut cache.last_displays {
-            if let Some(active) = snapshot.displays.iter().find(|d| d.id == display.id) {
-                *display = active.clone();
-            } else {
-                display.is_active = false;
-                display.is_primary = false;
-            }
-        }
-        for active in &snapshot.displays {
-            if !cache.last_displays.iter().any(|d| d.id == active.id) {
-                cache.last_displays.push(active.clone());
-            }
-        }
-        cache.last_displays.sort_by(|a, b| {
-            a.friendly_name
-                .cmp(&b.friendly_name)
-                .then(a.id.target_id.cmp(&b.id.target_id))
-        });
+        cache.last_layout = Some(merge_layout_with_fresh(
+            cache.last_layout.as_ref(),
+            &snapshot.layout,
+        ));
+        cache.last_displays = merge_displays_with_fresh(&cache.last_displays, &snapshot.displays);
         Ok(())
     }
 
@@ -195,9 +148,15 @@ fn merge_persisted_raw_for_fresh(
         return fresh;
     }
 
-    let mut merged = fresh;
-    merged.raw = persisted_raw.clone();
-    merged
+    let Ok(persisted_snapshot) = snapshot_from_raw(persisted_raw.clone()) else {
+        return fresh;
+    };
+
+    TopologySnapshot {
+        raw: persisted_snapshot.raw,
+        layout: merge_layout_with_fresh(Some(&persisted_snapshot.layout), &fresh.layout),
+        displays: merge_displays_with_fresh(&persisted_snapshot.displays, &fresh.displays),
+    }
 }
 
 fn raw_covers_active_outputs_raw(raw: &RawTopologySnapshot, layout: &Layout) -> bool {
@@ -213,6 +172,64 @@ fn raw_covers_active_outputs_raw(raw: &RawTopologySnapshot, layout: &Layout) -> 
                     && path.targetInfo.id == output.display_id.target_id
             })
         })
+}
+
+fn merge_layout_with_fresh(previous: Option<&Layout>, fresh: &Layout) -> Layout {
+    let mut merged = previous.cloned().unwrap_or_else(|| fresh.clone());
+    for output in &mut merged.outputs {
+        if let Some(active) = fresh
+            .outputs
+            .iter()
+            .find(|active| active.display_id == output.display_id)
+        {
+            *output = active.clone();
+        } else {
+            output.enabled = false;
+            output.primary = false;
+        }
+    }
+    for active in &fresh.outputs {
+        if !merged
+            .outputs
+            .iter()
+            .any(|output| output.display_id == active.display_id)
+        {
+            merged.outputs.push(active.clone());
+        }
+    }
+    if !merged
+        .outputs
+        .iter()
+        .any(|output| output.enabled && output.primary)
+    {
+        if let Some(first) = merged.outputs.iter_mut().find(|output| output.enabled) {
+            first.primary = true;
+        }
+    }
+    merged
+}
+
+fn merge_displays_with_fresh(previous: &[DisplayInfo], fresh: &[DisplayInfo]) -> Vec<DisplayInfo> {
+    let mut merged = previous.to_vec();
+    for display in &mut merged {
+        if let Some(active) = fresh.iter().find(|active| active.id == display.id) {
+            *display = active.clone();
+        } else {
+            display.is_active = false;
+            display.is_primary = false;
+        }
+    }
+    for active in fresh {
+        if !merged.iter().any(|display| display.id == active.id) {
+            merged.push(active.clone());
+        }
+    }
+    merged.sort_by(|left, right| {
+        left.friendly_name
+            .cmp(&right.friendly_name)
+            .then(left.id.target_id.cmp(&right.id.target_id))
+    });
+    merged
 }
 
 impl DisplayBackend for WindowsDisplayBackend {
@@ -239,6 +256,10 @@ impl DisplayBackend for WindowsDisplayBackend {
 
     fn apply_layout(&self, layout: Layout) -> Result<(), ManagerError> {
         layout.ensure_valid()?;
+        diagnostics::log(format!(
+            "topology_apply:start:outputs={}",
+            layout.outputs.len()
+        ));
 
         // Re-query the currently active topology so detach-only operations use a minimal base.
         // This reduces the chance of Windows re-touching unrelated outputs.
@@ -269,24 +290,28 @@ impl DisplayBackend for WindowsDisplayBackend {
             match apply_layout_against_snapshot(&working_layout, &base_snapshot) {
                 Ok(snapshot) => (snapshot, working_layout),
                 Err(error) if is_set_display_invalid_parameter(&error) => {
+                    diagnostics::log("topology_apply:retry:reason=setdisplayconfig_87");
                     force_topology_extend()?;
                     std::thread::sleep(std::time::Duration::from_millis(700));
                     let recovered_snapshot = query_active_topology()?;
-                    let retry_layout =
-                        remap_layout_display_ids_for_snapshot(&working_layout, &recovered_snapshot.layout);
-                    let snapshot = apply_layout_against_snapshot(&retry_layout, &recovered_snapshot)?;
+                    let retry_layout = remap_layout_display_ids_for_snapshot(
+                        &working_layout,
+                        &recovered_snapshot.layout,
+                    );
+                    let snapshot =
+                        apply_layout_against_snapshot(&retry_layout, &recovered_snapshot)?;
                     (snapshot, retry_layout)
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    diagnostics::log(format!("topology_apply:error:{error}"));
+                    return Err(error);
+                }
             };
         let mut cache = self
             .cache
             .lock()
             .map_err(|_| ManagerError::Backend("windows backend cache poisoned".to_string()))?;
-        let merged_snapshot = merge_snapshot_for_cache(
-            Some(&base_snapshot),
-            next_snapshot.clone(),
-        );
+        let merged_snapshot = merge_snapshot_for_cache(Some(&base_snapshot), next_snapshot.clone());
         let raw_to_persist = merged_snapshot.raw.clone();
         cache.last_snapshot = Some(merged_snapshot);
         merge_sdr_gamma_cache(
@@ -328,6 +353,7 @@ impl DisplayBackend for WindowsDisplayBackend {
         cache.last_displays = displays;
         drop(cache);
         best_effort_persist_raw_snapshot(&raw_to_persist);
+        diagnostics::log("topology_apply:done");
 
         Ok(())
     }
@@ -406,16 +432,21 @@ fn remap_layout_display_ids_for_snapshot(desired: &Layout, current: &Layout) -> 
         let mut replacement = None;
 
         if let Some(edid_hash) = output.display_id.edid_hash {
-            let candidates =
-                unique_unused_candidates(current_by_edid.get(&edid_hash).cloned().unwrap_or_default(), &used);
+            let candidates = unique_unused_candidates(
+                current_by_edid.get(&edid_hash).cloned().unwrap_or_default(),
+                &used,
+            );
             if candidates.len() == 1 {
                 replacement = Some(candidates[0].display_id.clone());
             }
         }
 
-        if replacement.is_none() {
-            let candidates =
-                unique_unused_candidates_by_target_id(output.display_id.target_id, &current.outputs, &used);
+        if replacement.is_none() && output.display_id.edid_hash.is_none() {
+            let candidates = unique_unused_candidates_by_target_id(
+                output.display_id.target_id,
+                &current.outputs,
+                &used,
+            );
             if candidates.len() == 1 {
                 replacement = Some(candidates[0].display_id.clone());
             }
@@ -477,7 +508,9 @@ fn persist_raw_snapshot(raw: &RawTopologySnapshot) -> Result<(), ManagerError> {
     let path = persisted_raw_snapshot_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
-            ManagerError::Backend(format!("failed to create persisted snapshot directory: {err}"))
+            ManagerError::Backend(format!(
+                "failed to create persisted snapshot directory: {err}"
+            ))
         })?;
     }
 
@@ -505,16 +538,16 @@ fn load_persisted_raw_snapshot() -> Option<RawTopologySnapshot> {
 
     let mut paths = Vec::with_capacity(payload.paths.len());
     for bytes in payload.paths {
-        paths.push(struct_from_bytes::<windows::Win32::Devices::Display::DISPLAYCONFIG_PATH_INFO>(
-            &bytes,
-        )?);
+        paths.push(struct_from_bytes::<
+            windows::Win32::Devices::Display::DISPLAYCONFIG_PATH_INFO,
+        >(&bytes)?);
     }
 
     let mut modes = Vec::with_capacity(payload.modes.len());
     for bytes in payload.modes {
-        modes.push(struct_from_bytes::<windows::Win32::Devices::Display::DISPLAYCONFIG_MODE_INFO>(
-            &bytes,
-        )?);
+        modes.push(struct_from_bytes::<
+            windows::Win32::Devices::Display::DISPLAYCONFIG_MODE_INFO,
+        >(&bytes)?);
     }
 
     Some(RawTopologySnapshot { paths, modes })
@@ -539,11 +572,7 @@ fn struct_from_bytes<T>(bytes: &[u8]) -> Option<T> {
 
     let mut value = MaybeUninit::<T>::uninit();
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            value.as_mut_ptr().cast::<u8>(),
-            bytes.len(),
-        );
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), value.as_mut_ptr().cast::<u8>(), bytes.len());
         Some(value.assume_init())
     }
 }

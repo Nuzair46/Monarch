@@ -3,8 +3,8 @@ pub mod events;
 pub mod ipc;
 pub mod shortcuts;
 pub mod single_instance;
-pub mod state;
 pub mod startup;
+pub mod state;
 
 pub fn run() {
     state::run_app();
