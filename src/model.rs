@@ -7,23 +7,23 @@ use crate::ManagerError;
 pub const DEFAULT_PROFILE_SHORTCUT_BASE: &str = "Ctrl+Shift";
 pub const DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE: &str = "Ctrl+Alt";
 
-fn default_global_shortcuts_enabled() -> bool {
-    true
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DisplayId {
     pub adapter_luid: u64,
     pub target_id: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub edid_hash: Option<u64>,
-    #[serde(default)]
     pub identity: MonitorIdentity,
 }
 
 /// Evidence about a monitor, independent of its current GPU address.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MonitorIdentity {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub device_path: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub edid_serial: Option<String>,
 }
 
@@ -47,12 +47,14 @@ pub enum Rotation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Resolution {
     pub width: u32,
     pub height: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Position {
     pub x: i32,
     pub y: i32,
@@ -69,6 +71,7 @@ pub struct DisplayInfo {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     pub display_id: DisplayId,
     pub enabled: bool,
@@ -76,13 +79,13 @@ pub struct OutputConfig {
     pub resolution: Resolution,
     pub refresh_rate_mhz: u32,
     pub primary: bool,
-    /// None in legacy profiles means preserve the observed orientation.
-    #[serde(default)]
+    /// Unknown orientation is explicit for outputs without an observed mode.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub rotation: Option<Rotation>,
 }
 
-/// Legacy files encode an automatic mode as 0x0. Resolve that representation at
-/// the planning boundary; an automatic mode must never reach SetDisplayConfig.
+/// An output without an observed mode uses 0x0. Resolve that automatic preference
+/// at the planning boundary before passing a source mode to SetDisplayConfig.
 pub enum ModePreference<'a> {
     Automatic,
     Exact {
@@ -105,6 +108,7 @@ impl OutputConfig {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Layout {
     pub outputs: Vec<OutputConfig>,
 }
@@ -195,26 +199,30 @@ impl Layout {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub name: String,
     pub layout: Layout,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DisplayFingerprint {
     pub display_id: DisplayId,
     pub friendly_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct AppSettings {
     pub revert_timeout_secs: u64,
     pub start_with_windows: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub startup_profile_name: Option<String>,
-    #[serde(default = "default_global_shortcuts_enabled")]
     pub global_shortcuts_enabled: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub profile_shortcut_base: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub display_toggle_shortcut_base: Option<String>,
     pub profile_shortcuts: BTreeMap<String, String>,
     pub display_toggle_shortcuts: BTreeMap<String, String>,
@@ -235,17 +243,60 @@ impl Default for AppSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub schema_version: u32,
     pub profiles: Vec<Profile>,
     pub display_fingerprints: Vec<DisplayFingerprint>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub last_known_good_layout: Option<Layout>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub last_restorable_layout: Option<Layout>,
     pub settings: AppSettings,
     /// Written before mutation; removed only after confirmation or verified recovery.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub pending_recovery: Option<Layout>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
+            profiles: Vec::new(),
+            display_fingerprints: Vec::new(),
+            last_known_good_layout: None,
+            last_restorable_layout: None,
+            settings: AppSettings::default(),
+            pending_recovery: None,
+        }
+    }
+}
+
+impl AppConfig {
+    /// Supported means the current format and valid saved data, independent of
+    /// which monitors happen to be connected when Monarch starts.
+    pub fn is_supported(&self) -> bool {
+        let mut names = HashSet::new();
+        self.schema_version == CONFIG_SCHEMA_VERSION
+            && (1..=60).contains(&self.settings.revert_timeout_secs)
+            && self.profiles.iter().all(|profile| {
+                !profile.name.trim().is_empty()
+                    && names.insert(&profile.name)
+                    && profile.layout.ensure_supported().is_ok()
+            })
+            && self
+                .last_known_good_layout
+                .iter()
+                .chain(&self.last_restorable_layout)
+                .chain(&self.pending_recovery)
+                .all(|layout| layout.ensure_supported().is_ok())
+            && self
+                .settings
+                .display_toggle_shortcuts
+                .keys()
+                .all(|key| crate::identity::parse_display_key(key).is_ok())
+    }
 }
 
 pub const CONFIG_SCHEMA_VERSION: u32 = 2;

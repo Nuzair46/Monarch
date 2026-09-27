@@ -162,7 +162,7 @@ fn restarting_manager_recovers_unconfirmed_change() {
 }
 
 #[test]
-fn legacy_custom_shortcut_mode_is_preserved() {
+fn custom_shortcut_mode_is_preserved() {
     let mut config = AppConfig::default();
     config.settings.profile_shortcut_base = None;
     config
@@ -228,27 +228,6 @@ fn rotation_round_trips_and_is_verified() {
 }
 
 #[test]
-fn legacy_profile_without_rotation_preserves_current_orientation() {
-    let mut current = layout();
-    current.outputs[1].rotation = Some(Rotation::Portrait);
-    let mut legacy = current.clone();
-    legacy.outputs[0].rotation = None;
-    legacy.outputs[1].rotation = None;
-    let config = AppConfig {
-        profiles: vec![Profile {
-            name: "legacy".into(),
-            layout: legacy,
-        }],
-        ..Default::default()
-    };
-    let backend = MockBackend::new(vec![], current.clone()).unwrap();
-    let mut manager =
-        MonarchDisplayManager::new(backend.clone(), MemoryConfigStore::new(config)).unwrap();
-    manager.apply_profile("legacy").unwrap();
-    assert_eq!(backend.current_layout().unwrap(), current);
-}
-
-#[test]
 fn failed_delete_does_not_remove_profile_from_memory() {
     let store = store();
     let backend = MockBackend::new(vec![], layout()).unwrap();
@@ -260,12 +239,14 @@ fn failed_delete_does_not_remove_profile_from_memory() {
 }
 
 #[test]
-fn legacy_configuration_is_migrated_and_custom_shortcuts_survive_settings_save() {
-    let legacy: AppConfig = serde_json::from_value(serde_json::json!({
-        "settings": { "profile_shortcut_base": null, "profile_shortcuts": { "work": "Ctrl+Alt+W" } }
-    }))
-    .unwrap();
-    let store = MemoryConfigStore::new(legacy);
+fn current_custom_shortcuts_survive_settings_save() {
+    let mut config = AppConfig::default();
+    config.settings.profile_shortcut_base = None;
+    config
+        .settings
+        .profile_shortcuts
+        .insert("work".into(), "Ctrl+Alt+W".into());
+    let store = MemoryConfigStore::new(config);
     let backend = MockBackend::new(vec![], layout()).unwrap();
     let mut manager = MonarchDisplayManager::new(backend, store.clone()).unwrap();
     assert_eq!(
@@ -280,7 +261,43 @@ fn legacy_configuration_is_migrated_and_custom_shortcuts_survive_settings_save()
 }
 
 #[test]
-fn startup_migration_preserves_serial_when_current_query_temporarily_loses_it() {
+fn invalid_shortcut_keys_cannot_write_configuration_that_would_reset_on_restart() {
+    let store = MemoryConfigStore::default();
+    let backend = MockBackend::new(vec![], layout()).unwrap();
+    let mut manager = MonarchDisplayManager::new(backend, store.clone()).unwrap();
+    let before = store.snapshot().unwrap();
+    let mut settings = manager.settings().clone();
+    settings
+        .display_toggle_shortcuts
+        .insert("64:1".into(), "Ctrl+Alt+W".into());
+    assert!(manager.update_settings(settings).is_err());
+    assert_eq!(manager.config(), &before);
+    assert_eq!(store.snapshot().unwrap(), before);
+}
+
+#[test]
+fn unsupported_desktop_at_confirmation_preserves_the_valid_recovery_journal() {
+    let store = MemoryConfigStore::default();
+    let backend = MockBackend::new(vec![], layout()).unwrap();
+    let mut manager = MonarchDisplayManager::new(backend.clone(), store.clone()).unwrap();
+    let mut desired = layout();
+    desired.outputs[1].enabled = false;
+    manager.apply_layout(desired).unwrap();
+    let pending = store.snapshot().unwrap();
+    // Windows Display Settings can change the desktop during confirmation.
+    let mut cloned = layout();
+    cloned.outputs[1].position.x = 0;
+    backend.apply_layout(cloned).unwrap();
+    assert!(manager.confirm_current_layout().is_err());
+    assert!(manager.has_pending_confirmation());
+    assert_eq!(store.snapshot().unwrap(), pending);
+    manager.rollback_pending().unwrap();
+    assert_eq!(backend.current_layout().unwrap(), layout());
+    assert!(store.snapshot().unwrap().is_supported());
+}
+
+#[test]
+fn startup_preserves_saved_profile_when_current_query_temporarily_loses_identity() {
     let mut saved = layout();
     saved.outputs[0].display_id.identity.edid_serial = Some("serial-123".into());
     let mut current = saved.clone();
@@ -288,19 +305,12 @@ fn startup_migration_preserves_serial_when_current_query_temporarily_loses_it() 
     let config = AppConfig {
         profiles: vec![Profile {
             name: "work".into(),
-            layout: saved,
+            layout: saved.clone(),
         }],
         ..Default::default()
     };
     let store = MemoryConfigStore::new(config);
     let backend = MockBackend::new(vec![], current).unwrap();
     let manager = MonarchDisplayManager::new(backend, store).unwrap();
-    assert_eq!(
-        manager.list_profiles()[0].layout.outputs[0]
-            .display_id
-            .identity
-            .edid_serial
-            .as_deref(),
-        Some("serial-123")
-    );
+    assert_eq!(manager.list_profiles()[0].layout, saved);
 }

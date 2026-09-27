@@ -6,16 +6,17 @@
 
 - Discover connected, disabled monitors from fresh Windows inventory, including after sequential detach operations, restart, and resume.
 - Reconnect the exact requested monitor set using a complete source assignment and verify the observed result before reporting success.
-- Use a shared identity resolver for profiles, toggles, recovery, and remembered geometry. Validated EDID serials can identify a monitor after moving ports; device paths and legacy connection fingerprints remain compatibility fallbacks. Ambiguous matches and conflicting serials fail explicitly.
-- Save and verify display rotation. Legacy profiles without rotation preserve the observed orientation.
+- Use a shared identity resolver for profiles, toggles, recovery, and remembered geometry. Validated EDID serials can identify a monitor after moving ports; device paths and connection fingerprints provide fallback evidence. Ambiguous matches and conflicting serials fail explicitly.
+- Save and verify display rotation.
 - Reject duplicate targets, invalid geometry, and unsupported cloned or overlapping layouts before changing displays. Profile restoration supports extended desktops.
-- Replace persisted native Win32 byte snapshots with validated geometry preferences. Native attachment routes always come from a fresh query; old `topology_snapshot.json` files are ignored. Existing profiles remain compatible.
+- Replace persisted native Win32 byte snapshots with validated geometry preferences. Native attachment routes always come from a fresh query; old `topology_snapshot.json` files are ignored.
 
 ### Recovery and settings reliability
 
 - Persist recovery intent before changing displays. Failed applies remain eligible for rollback, and unfinished transactions are recovered when Monarch restarts.
 - Keep the recovery journal until restoration and configuration persistence both succeed. Retry transient recovery failures and report exhausted retries without losing manual recovery.
 - Save configuration through a flushed temporary file and atomic replacement, retaining a valid backup. Failed profile/settings writes preserve the previous live state.
+- Remove profile/configuration migrations. Outdated, malformed or unsupported configuration deletes `config.json` and its backup and starts Monarch with default settings and no saved profiles. Valid current-format profiles and recovery journals are retained, including when a monitor is disconnected.
 - Use numeric Windows registry status codes for startup registration, fixing missing-value errors on non-English Windows (#45). Unchanged startup settings no longer trigger a registry write on every settings save.
 - Preserve slideshow mode, options, disabled backgrounds, placement and color around display operations, avoiding unnecessary wallpaper resets (#36). Balance COM initialization on failure and release interfaces before apartment shutdown.
 - Preserve custom shortcut bindings and stop generating a second copy of indexed shortcut mappings. Monitor shortcut order uses identity evidence instead of friendly names.

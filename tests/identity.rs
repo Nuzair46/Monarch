@@ -95,9 +95,20 @@ fn display_keys_round_trip_and_reject_trailing_data() {
         identity::parse_display_key(&identity::display_key(&saved)).unwrap(),
         saved
     );
-    for invalid in ["", "a:2:3:4", "no:2:3", "a:-2:3", "a:2:z"] {
+    for invalid in ["", "a:2", "a:2:3:4", "no:2:3", "a:-2:3", "a:2:z"] {
         assert!(identity::parse_display_key(invalid).is_err());
     }
+}
+
+#[test]
+fn target_number_alone_does_not_identify_a_monitor_after_an_adapter_change() {
+    let mut saved = id(1, 1, None, None);
+    saved.edid_hash = None;
+    let connected = id(2, 1, None, None);
+    assert_eq!(
+        identity::resolve(&saved, &inventory(vec![connected])),
+        Match::Missing
+    );
 }
 
 fn edid(serial: u32) -> [u8; 128] {

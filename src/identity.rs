@@ -49,7 +49,7 @@ pub fn resolve(requested: &DisplayId, current: &Layout) -> Resolution {
     };
     let hash_matches =
         |id: &DisplayId| requested.edid_hash.is_some() && requested.edid_hash == id.edid_hash;
-    let legacy = requested.edid_hash.is_none()
+    let unidentified = requested.edid_hash.is_none()
         && requested.identity.edid_serial.is_none()
         && requested.identity.device_path.is_none();
     // Endpoints can be reused after reconnect/reboot. Require agreeing evidence
@@ -57,7 +57,7 @@ pub fn resolve(requested: &DisplayId, current: &Layout) -> Resolution {
     let exact = matching(&|id| {
         id.endpoint() == requested.endpoint()
             && compatible(id)
-            && (serial_matches(id) || path_matches(id) || hash_matches(id) || legacy)
+            && (serial_matches(id) || path_matches(id) || hash_matches(id) || unidentified)
     });
     if !exact.is_empty() {
         return unique(exact);
@@ -73,13 +73,7 @@ pub fn resolve(requested: &DisplayId, current: &Layout) -> Resolution {
     if requested.edid_hash.is_some() {
         return unique(matching(&|id| compatible(id) && hash_matches(id)));
     }
-    // Only hashless legacy records may fall back to a target number. A failed
-    // identity query must not turn a modern saved identity into a weak match.
-    if legacy {
-        unique(matching(&|id| id.target_id == requested.target_id))
-    } else {
-        Resolution::Missing
-    }
+    Resolution::Missing
 }
 
 pub fn remap_layout(desired: &Layout, current: &Layout) -> Layout {
@@ -140,14 +134,15 @@ pub fn display_key(id: &DisplayId) -> String {
 pub fn parse_display_key(key: &str) -> Result<DisplayId, crate::ManagerError> {
     let parts: Vec<_> = key.split(':').collect();
     let invalid = || crate::ManagerError::Validation("invalid display key".into());
-    if !(2..=3).contains(&parts.len()) {
+    if parts.len() != 3 {
         return Err(invalid());
     }
     Ok(DisplayId {
         adapter_luid: u64::from_str_radix(parts[0], 16).map_err(|_| invalid())?,
         target_id: parts[1].parse().map_err(|_| invalid())?,
         edid_hash: match parts.get(2) {
-            None | Some(&"-") => None,
+            Some(&"-") => None,
+            None => return Err(invalid()),
             Some(value) => Some(u64::from_str_radix(value, 16).map_err(|_| invalid())?),
         },
         identity: Default::default(),

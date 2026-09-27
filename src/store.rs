@@ -8,6 +8,9 @@ use crate::{AppConfig, ManagerError};
 pub trait ConfigStore {
     fn load(&self) -> Result<AppConfig, ManagerError>;
     fn save(&self, config: &AppConfig) -> Result<(), ManagerError>;
+    fn reset(&self) -> Result<(), ManagerError> {
+        self.save(&AppConfig::default())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -52,26 +55,44 @@ impl Default for FileConfigStore {
 
 impl ConfigStore for FileConfigStore {
     fn load(&self) -> Result<AppConfig, ManagerError> {
-        let read = |path: &Path| -> Result<AppConfig, ManagerError> {
-            Ok(serde_json::from_slice(&fs::read(path)?)?)
-        };
-        match read(&self.path) {
-            Ok(config) => Ok(config),
-            Err(primary_error) => match read(&self.path.with_extension("json.bak")) {
-                Ok(config) => Ok(config),
-                Err(_) if !self.path.exists() && !self.path.with_extension("json.bak").exists() => {
-                    Ok(AppConfig::default())
+        match fs::read(&self.path) {
+            Ok(bytes) => {
+                if let Some(config) = serde_json::from_slice::<AppConfig>(&bytes)
+                    .ok()
+                    .filter(AppConfig::is_supported)
+                {
+                    return Ok(config);
                 }
-                Err(_) => Err(primary_error),
-            },
+                self.reset()?;
+                Ok(AppConfig::default())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Removing the primary means a fresh start; never resurrect an old backup.
+                self.reset()?;
+                Ok(AppConfig::default())
+            }
+            Err(error) => Err(error.into()),
         }
+    }
+
+    fn reset(&self) -> Result<(), ManagerError> {
+        for path in [&self.path, &self.path.with_extension("json.bak")] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 
     fn save(&self, config: &AppConfig) -> Result<(), ManagerError> {
         let body = serde_json::to_vec_pretty(config)?;
         if let Ok(previous) = fs::read(&self.path) {
-            // Never replace a usable backup with a corrupt primary file.
-            if serde_json::from_slice::<AppConfig>(&previous).is_ok() {
+            // Backups only contain supported current-format configuration.
+            if serde_json::from_slice::<AppConfig>(&previous)
+                .is_ok_and(|config| config.is_supported())
+            {
                 atomic_write(&self.path.with_extension("json.bak"), &previous)?;
             }
         }

@@ -55,45 +55,19 @@ where
 {
     pub fn new(backend: B, store: S) -> Result<Self, ManagerError> {
         let mut config = store.load()?;
-        if config.schema_version > crate::model::CONFIG_SCHEMA_VERSION {
-            return Err(ManagerError::Validation(
-                "configuration was written by a newer Monarch version".into(),
-            ));
+        if !config.is_supported() {
+            store.reset()?;
+            config = AppConfig::default();
         }
-        let migrated = config.schema_version != crate::model::CONFIG_SCHEMA_VERSION;
-        config.schema_version = crate::model::CONFIG_SCHEMA_VERSION;
         let snapshot = backend.snapshot()?;
         let current_layout = snapshot.layout;
         let current_displays = snapshot.displays;
-        let mut should_persist = migrated;
-        if config
-            .settings
-            .profile_shortcut_base
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-            && config.settings.profile_shortcuts.is_empty()
-        {
-            config.settings.profile_shortcut_base = Some(DEFAULT_PROFILE_SHORTCUT_BASE.to_string());
-            should_persist = true;
-        }
-        if config
-            .settings
-            .display_toggle_shortcut_base
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-            && config.settings.display_toggle_shortcuts.is_empty()
-        {
-            config.settings.display_toggle_shortcut_base =
-                Some(DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE.to_string());
-            should_persist = true;
-        }
-        let confirmation_timeout = Duration::from_secs(config.settings.revert_timeout_secs.max(1));
+        let mut should_persist = false;
+        let confirmation_timeout = Duration::from_secs(config.settings.revert_timeout_secs);
 
-        if config.last_known_good_layout.is_none() || config.last_restorable_layout.is_none() {
+        if current_layout.ensure_supported().is_ok()
+            && (config.last_known_good_layout.is_none() || config.last_restorable_layout.is_none())
+        {
             if config.last_known_good_layout.is_none() {
                 config.last_known_good_layout = Some(current_layout.clone());
             }
@@ -103,9 +77,6 @@ where
             should_persist = true;
         }
         if sync_display_fingerprints(&mut config, &current_displays) {
-            should_persist = true;
-        }
-        if migrate_saved_layout_ids_with_fingerprints(&mut config, &current_layout) {
             should_persist = true;
         }
         if should_persist {
@@ -212,8 +183,7 @@ where
         let mut confirmed_config = self.config.clone();
         confirmed_config.last_known_good_layout = Some(current_layout);
         confirmed_config.pending_recovery = None;
-        self.store.save(&confirmed_config)?;
-        self.config = confirmed_config;
+        self.commit_config(confirmed_config)?;
         self.pending_confirmation = None;
         Ok(())
     }
@@ -233,8 +203,7 @@ where
         let mut restored_config = self.config.clone();
         restored_config.last_known_good_layout = Some(previous_layout);
         restored_config.pending_recovery = None;
-        self.store.save(&restored_config)?;
-        self.config = restored_config;
+        self.commit_config(restored_config)?;
         self.pending_confirmation = None;
         Ok(())
     }
@@ -371,20 +340,7 @@ where
         let mut current_layout = self.backend.get_layout()?;
         current_layout.ensure_valid()?;
         normalize_primary(&mut current_layout);
-        let mut target_layout = remap_layout_display_ids_with_fingerprints(
-            &target_layout,
-            &current_layout,
-            &self.config.display_fingerprints,
-        );
-        for output in &mut target_layout.outputs {
-            if output.rotation.is_none() {
-                output.rotation = current_layout
-                    .outputs
-                    .iter()
-                    .find(|o| o.display_id == output.display_id)
-                    .and_then(|o| o.rotation);
-            }
-        }
+        let target_layout = remap_layout_display_ids(&target_layout, &current_layout);
 
         if ensure_all_enabled_outputs_resolve(&target_layout, &current_layout).is_ok() {
             return Ok((target_layout, current_layout));
@@ -394,20 +350,7 @@ where
         let mut current_layout = self.backend.get_layout()?;
         current_layout.ensure_valid()?;
         normalize_primary(&mut current_layout);
-        let mut target_layout = remap_layout_display_ids_with_fingerprints(
-            &target_layout,
-            &current_layout,
-            &self.config.display_fingerprints,
-        );
-        for output in &mut target_layout.outputs {
-            if output.rotation.is_none() {
-                output.rotation = current_layout
-                    .outputs
-                    .iter()
-                    .find(|o| o.display_id == output.display_id)
-                    .and_then(|o| o.rotation);
-            }
-        }
+        let target_layout = remap_layout_display_ids(&target_layout, &current_layout);
         self.ensure_outputs_resolve_or_report_disconnected(&target_layout, &current_layout)?;
         Ok((target_layout, current_layout))
     }
@@ -591,6 +534,11 @@ where
     }
 
     fn commit_config(&mut self, next: AppConfig) -> Result<(), ManagerError> {
+        if !next.is_supported() {
+            return Err(ManagerError::Validation(
+                "configuration contains unsupported profiles or settings".into(),
+            ));
+        }
         self.store.save(&next)?;
         self.config = next;
         Ok(())
@@ -675,92 +623,6 @@ fn sync_display_fingerprints(config: &mut AppConfig, displays: &[DisplayInfo]) -
             .sort_by(|left, right| left.display_id.cmp(&right.display_id));
     }
     changed
-}
-
-fn migrate_saved_layout_ids_with_fingerprints(
-    config: &mut AppConfig,
-    current_layout: &Layout,
-) -> bool {
-    let mut changed = false;
-    let mut remap_profile_layout = |layout: &mut Layout| {
-        let mut remapped = remap_layout_display_ids_with_fingerprints(
-            layout,
-            current_layout,
-            &config.display_fingerprints,
-        );
-        for (previous, current) in layout.outputs.iter().zip(&mut remapped.outputs) {
-            if current_layout
-                .outputs
-                .iter()
-                .any(|o| o.display_id == current.display_id)
-            {
-                crate::identity::preserve_evidence(&previous.display_id, &mut current.display_id);
-            }
-        }
-        if &remapped != layout {
-            *layout = remapped;
-            changed = true;
-        }
-    };
-
-    for profile in &mut config.profiles {
-        remap_profile_layout(&mut profile.layout);
-    }
-
-    if let Some(layout) = &mut config.last_known_good_layout {
-        remap_profile_layout(layout);
-    }
-    if let Some(layout) = &mut config.last_restorable_layout {
-        remap_profile_layout(layout);
-    }
-
-    if let Some(layout) = &mut config.pending_recovery {
-        remap_profile_layout(layout);
-    }
-    let mut shortcuts = std::collections::BTreeMap::new();
-    for (key, shortcut) in &config.settings.display_toggle_shortcuts {
-        let replacement = crate::identity::parse_display_key(key)
-            .ok()
-            .and_then(|id| {
-                let known = config
-                    .display_fingerprints
-                    .iter()
-                    .find(|f| {
-                        f.display_id.endpoint() == id.endpoint()
-                            && f.display_id.edid_hash == id.edid_hash
-                    })
-                    .map(|f| &f.display_id)
-                    .unwrap_or(&id);
-                match resolve(known, current_layout) {
-                    IdentityResolution::Resolved(id) => Some(crate::identity::display_key(&id)),
-                    _ => None,
-                }
-            })
-            .unwrap_or_else(|| key.clone());
-        changed |= replacement != *key;
-        shortcuts.insert(replacement, shortcut.clone());
-    }
-    config.settings.display_toggle_shortcuts = shortcuts;
-    changed
-}
-
-fn remap_layout_display_ids_with_fingerprints(
-    desired: &Layout,
-    current: &Layout,
-    fingerprints: &[crate::DisplayFingerprint],
-) -> Layout {
-    let mut enriched = desired.clone();
-    for output in &mut enriched.outputs {
-        if output.display_id.identity == Default::default() {
-            if let Some(known) = fingerprints.iter().find(|f| {
-                f.display_id.endpoint() == output.display_id.endpoint()
-                    && f.display_id.edid_hash == output.display_id.edid_hash
-            }) {
-                output.display_id.identity = known.display_id.identity.clone();
-            }
-        }
-    }
-    remap_layout_display_ids(&enriched, current)
 }
 
 fn ensure_all_enabled_outputs_resolve(
@@ -1605,15 +1467,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_profile_hashless_fallback_does_not_guess_across_adapters() {
+    fn apply_profile_without_identity_does_not_guess_across_adapters() {
         // Two candidates share target_id 2 but live on different adapters (stale LUID entry vs
-        // fresh one). The hash-less fallback must not guess between them: iGPU/dGPU pairs reuse
+        // fresh one). Target numbers must not identify monitors: iGPU/dGPU pairs reuse
         // target id numbering, so a cross-adapter pick could hit the wrong physical monitor.
         let (displays, layout, _, _) = duplicate_edid_current_state();
         let backend = MockBackend::new(displays, layout).unwrap();
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
-                name: "legacy".to_string(),
+                name: "unidentified".to_string(),
                 layout: Layout {
                     outputs: vec![
                         profile_output(
@@ -1643,11 +1505,11 @@ mod tests {
         });
         let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
 
-        let err = manager.apply_profile("legacy").unwrap_err();
+        let err = manager.apply_profile("unidentified").unwrap_err();
         assert!(matches!(
             err,
             ManagerError::Validation(message)
-                if message.contains("ambiguous")
+                if message.contains("not connected")
         ));
     }
 
@@ -1766,120 +1628,6 @@ mod tests {
             ManagerError::Validation(message)
                 if message.contains("ambiguous")
         ));
-    }
-
-    #[test]
-    fn apply_profile_hashless_legacy_output_remaps_to_seeded_inactive_display() {
-        // Field case (Guido's TV): a legacy profile entry saved without edid_hash by an old
-        // build, while the detached TV exists only as an ALL_PATHS-seeded inactive display
-        // under the current adapter LUID. The hash-less target_id fallback must accept the
-        // seeded candidate (Some(hash) on the candidate, None on the request) and remap.
-        let primary_id = DisplayId {
-            adapter_luid: 9,
-            target_id: 1,
-            edid_hash: Some(1),
-            identity: Default::default(),
-        };
-        let seeded_tv_id = DisplayId {
-            adapter_luid: 9,
-            target_id: 4352,
-            edid_hash: Some(77),
-            identity: Default::default(),
-        };
-        let displays = vec![
-            DisplayInfo {
-                id: primary_id.clone(),
-                friendly_name: "Primary".to_string(),
-                is_active: true,
-                is_primary: true,
-                resolution: Resolution {
-                    width: 1920,
-                    height: 1080,
-                },
-                refresh_rate_mhz: 60_000,
-            },
-            DisplayInfo {
-                id: seeded_tv_id.clone(),
-                friendly_name: "TV".to_string(),
-                is_active: false,
-                is_primary: false,
-                resolution: Resolution {
-                    width: 0,
-                    height: 0,
-                },
-                refresh_rate_mhz: 60_000,
-            },
-        ];
-        let layout = Layout {
-            outputs: vec![
-                OutputConfig {
-                    display_id: primary_id,
-                    enabled: true,
-                    position: Position { x: 0, y: 0 },
-                    resolution: Resolution {
-                        width: 1920,
-                        height: 1080,
-                    },
-                    refresh_rate_mhz: 60_000,
-                    primary: true,
-                    rotation: None,
-                },
-                OutputConfig {
-                    display_id: seeded_tv_id.clone(),
-                    enabled: false,
-                    position: Position { x: 0, y: 0 },
-                    resolution: Resolution {
-                        width: 0,
-                        height: 0,
-                    },
-                    refresh_rate_mhz: 60_000,
-                    primary: false,
-                    rotation: None,
-                },
-            ],
-        };
-        let backend = MockBackend::new(displays, layout).unwrap();
-        let store = MemoryConfigStore::new(AppConfig {
-            profiles: vec![Profile {
-                name: "couch".to_string(),
-                layout: Layout {
-                    outputs: vec![
-                        profile_output(
-                            DisplayId {
-                                adapter_luid: 1,
-                                target_id: 1,
-                                edid_hash: None,
-                                identity: Default::default(),
-                            },
-                            0,
-                            true,
-                        ),
-                        profile_output(
-                            DisplayId {
-                                adapter_luid: 1,
-                                target_id: 4352,
-                                edid_hash: None,
-                                identity: Default::default(),
-                            },
-                            1920,
-                            false,
-                        ),
-                    ],
-                },
-            }],
-            ..AppConfig::default()
-        });
-        let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
-
-        manager.apply_profile("couch").unwrap();
-
-        let applied = backend.current_layout().unwrap();
-        let tv = applied
-            .outputs
-            .iter()
-            .find(|output| output.display_id == seeded_tv_id)
-            .expect("expected TV output remapped to the seeded display");
-        assert!(tv.enabled);
     }
 
     #[test]

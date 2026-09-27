@@ -26,9 +26,9 @@ Native Win32 calls are synchronous and cannot be cancelled safely by the worker.
 
 `DisplayEndpoint(adapter_luid, target_id)` addresses a live Windows target. It is not a permanent physical identity. `MonitorIdentity` retains device-path evidence and a validated EDID serial qualified by manufacturer/product. Invalid EDID headers/checksums, missing serials and failed device queries remain unknown.
 
-The shared resolver first accepts an exact endpoint with agreeing available evidence, then a unique serial, then a unique device path, then the legacy connection hash. A known conflicting serial forbids connection-based fallback. Only records without any saved identity evidence may use a unique target-number fallback. An active candidate does not win merely because it is active. Multiple candidates return an explicit ambiguous result.
+The shared resolver first accepts an exact endpoint with agreeing available evidence, then a unique serial, then a unique device path, then a unique connection hash. A known conflicting serial forbids connection-based fallback. A target number alone cannot identify a monitor on another adapter. An active candidate does not win merely because it is active. Multiple candidates return an explicit ambiguous result.
 
-The legacy `edid_hash` field is retained for old config/key compatibility; it is a connection fingerprint, not a complete EDID hash. Existing display keys still use the old wire format. Stored fingerprints enrich old keys, and config migration remaps profiles, recovery layouts and custom display shortcuts. Missing or ambiguous records are preserved so reconnecting hardware can make them usable again.
+The `edid_hash` field is a connection fingerprint, not a complete EDID hash. Display keys contain three components: adapter LUID, target number and connection hash (or `-` when unknown). Stored fingerprints associate shortcut keys with monitor evidence. Current-format profiles and recovery layouts resolve their saved evidence against the live inventory at apply time; startup does not rewrite saved profiles. Missing or ambiguous monitors remain in supported configuration so reconnecting hardware can make them usable again.
 
 Identical panels with missing or duplicated serials cannot be reliably distinguished after arbitrary port swaps. Monarch refuses ambiguous restoration. Reconnect to the saved port or re-save the profile after checking Windows' display arrangement. Indexed shortcut numbers follow the current inventory sorted by serial/path/connection evidence; adding or removing displays can change those numbers. Custom bindings retain monitor-specific keys.
 
@@ -40,7 +40,7 @@ One `QDC_ALL_PATHS` result produces the connected inventory and its active layou
 
 Raw `DISPLAYCONFIG_PATH_INFO` and `DISPLAYCONFIG_MODE_INFO` arrays exist only during a native operation. Recovery rebuilds a complete target/source assignment from live candidates. The old native-byte cache is no longer read. Saved profiles and recovery layouts continue to supply their typed geometry.
 
-## Transactions and compatibility
+## Transactions and configuration
 
 1. Resolve and validate the requested layout and capture the current layout.
 2. Atomically persist `pending_recovery` and the previous layout before the first mutation.
@@ -50,9 +50,11 @@ Raw `DISPLAYCONFIG_PATH_INFO` and `DISPLAYCONFIG_MODE_INFO` arrays exist only du
 
 Startup reconstructs an unfinished journal as an immediately expired transaction. The worker attempts recovery before ordinary queued actions. Automation from profiles, hotkeys and the tray can auto-confirm only a successful operation. A persistence failure keeps recovery available.
 
-Configuration schema 2 accepts older JSON through defaults and migrates saved identities using current evidence. Future schema versions are rejected without rewriting the file. Mutators clone state, save, then commit it in memory. File writes flush a unique temporary file before atomic replacement; Windows uses `MoveFileExW` with replacement and write-through. A valid previous config is retained as `config.json.bak`. Corrupt primary JSON falls back to that backup, which may represent the previous revision; two unusable copies produce an error instead of silently discarding settings.
+Only complete, valid configuration in the current schema (2) is supported. Missing or unknown fields, older or newer schema versions, and unsupported saved layouts trigger a reset. Monarch deletes `config.json` and `config.json.bak` and continues startup with default settings and no saved profiles; it never migrates old profiles or restores the backup automatically. A missing primary file also discards an orphaned backup. Filesystem access failures remain errors. Disconnected monitors do not invalidate an otherwise supported profile or recovery journal. An unsupported live desktop can still be displayed in the app, but does not seed saved recovery layouts.
 
-Legacy `0x0` geometry becomes an explicit automatic mode preference at the planning boundary. Recovery obtains real geometry from Windows before verification. Explicit layouts reject duplicate endpoints, multiple enabled primaries and out-of-range values. Source coordinates describe desktop geometry; rotation is stored separately. Old profiles lacking rotation preserve the observed orientation. Cloned/overlapping layouts are rejected before mutation because the assignment solver models extended desktops. See [Microsoft's source-mode coordinate rules](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_source_mode).
+Mutators clone state, save, then commit it in memory. File writes flush a unique temporary file before atomic replacement; Windows uses `MoveFileExW` with replacement and write-through. A supported previous config is retained as `config.json.bak` for manual recovery.
+
+An output without an observed mode uses `0x0` geometry, which becomes an automatic mode preference at the planning boundary. Recovery obtains real geometry from Windows before verification. Explicit layouts reject duplicate endpoints, multiple enabled primaries and out-of-range values. Source coordinates describe desktop geometry; rotation is stored separately and must be present, with `null` representing an unknown orientation. Cloned/overlapping layouts are rejected before mutation because the assignment solver models extended desktops. See [Microsoft's source-mode coordinate rules](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_source_mode).
 
 ## Windows integration
 
