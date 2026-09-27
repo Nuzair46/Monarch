@@ -35,9 +35,11 @@ jobs:
       - run: yarn build
       - run: cargo test --locked
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - run: cargo build --locked --release --manifest-path src-tauri/Cargo.toml
+      - run: yarn build:msi
       - uses: actions/upload-artifact@v4
         with:
           name: monarch-windows-${{ github.event.pull_request.head.sha || github.sha }}
-          path: src-tauri/target/release/monarch-desktop.exe
+          path: |
+            src-tauri/target/release/monarch-desktop.exe
+            src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
