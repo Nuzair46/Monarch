@@ -73,7 +73,7 @@ export function MainTab({
             </CardHeader>
             <CardContent className="grid max-h-[38rem] gap-3 overflow-auto pr-1">
               {snapshot.displays.map((display, index) => {
-                const shortcutLabel = indexedShortcutLabel(displayShortcutBase, index);
+                const shortcutLabel = displayShortcutBase ? indexedShortcutLabel(displayShortcutBase, index) : snapshot.settings.display_toggle_shortcuts[display.id_key] ?? null;
 
                 return (
                   <MonitorCard

@@ -1,17 +1,19 @@
 pub mod backend;
 pub mod error;
+pub mod history;
+pub mod identity;
 pub mod manager;
 pub mod model;
 pub mod store;
 pub mod verification;
 pub mod watchdog;
 
-pub use backend::{DisplayBackend, MockBackend, Win32DisplayBackend};
+pub use backend::{DisplayBackend, MockBackend};
 pub use error::ManagerError;
 pub use manager::MonarchDisplayManager;
 pub use model::{
-    AppConfig, AppSettings, DisplayFingerprint, DisplayId, DisplayInfo, Layout, OutputConfig,
-    Position, Profile, Resolution, DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE,
-    DEFAULT_PROFILE_SHORTCUT_BASE,
+    AppConfig, AppSettings, DisplayEndpoint, DisplayFingerprint, DisplayId, DisplayInfo,
+    DisplaySnapshot, Layout, MonitorIdentity, OutputConfig, Position, Profile, Resolution,
+    Rotation, DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE, DEFAULT_PROFILE_SHORTCUT_BASE,
 };
 pub use store::{ConfigStore, FileConfigStore, MemoryConfigStore};

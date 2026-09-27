@@ -7,42 +7,43 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use crate::app::events::{
     handle_profile_apply_external_action, handle_toggle_display_external_action,
 };
-use crate::app::state::{format_display_key, MonarchAppState};
+use crate::app::state::MonarchAppState;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ShortcutAction {
     ApplyProfile(String),
     ToggleDisplay(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ShortcutBinding {
     shortcut: String,
     action: ShortcutAction,
     label: String,
 }
 
-fn sync_shortcuts_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn registered_bindings() -> &'static Mutex<Option<Vec<ShortcutBinding>>> {
+    static REGISTERED: OnceLock<Mutex<Option<Vec<ShortcutBinding>>>> = OnceLock::new();
+    REGISTERED.get_or_init(|| Mutex::new(None))
 }
 
 pub fn sync_global_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    // Serialize concurrent syncs: two racing callers can otherwise interleave
-    // unregister_all/on_shortcut and leave zero shortcuts registered until the next sync.
-    // Blocking lock (not try_lock) so the last caller always converges on the latest state.
-    let _sync_guard = sync_shortcuts_lock()
+    let mut registered = registered_bindings()
         .lock()
         .map_err(|_| "shortcut sync lock poisoned".to_string())?;
     let bindings = collect_bindings(app)?;
     validate_unique_shortcuts(&bindings)?;
+    if registered.as_ref() == Some(&bindings) {
+        return Ok(());
+    }
+    *registered = None;
 
     let manager = app.global_shortcut();
     manager
         .unregister_all()
         .map_err(|err| format!("failed to clear existing global shortcuts: {err}"))?;
 
-    for binding in bindings {
+    for binding in &bindings {
         let shortcut_string = binding.shortcut.clone();
         let action = binding.action.clone();
         let label = binding.label.clone();
@@ -55,14 +56,14 @@ pub fn sync_global_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
 
                 let app_handle = app_handle.clone();
                 let action = action.clone();
-                std::thread::spawn(move || match action {
+                match action {
                     ShortcutAction::ApplyProfile(name) => {
                         handle_profile_apply_external_action(&app_handle, &name)
                     }
                     ShortcutAction::ToggleDisplay(display_key) => {
                         handle_toggle_display_external_action(&app_handle, &display_key)
                     }
-                });
+                }
             })
         {
             let _ = manager.unregister_all();
@@ -72,30 +73,23 @@ pub fn sync_global_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
         }
     }
 
+    *registered = Some(bindings);
     Ok(())
 }
 
 fn collect_bindings<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<ShortcutBinding>, String> {
     let state = app.state::<MonarchAppState>();
-    let guard = state
-        .0
-        .lock()
-        .map_err(|_| "state mutex poisoned".to_string())?;
-
-    let settings = guard.manager.settings().clone();
+    let snapshot = state.controller.snapshot()?;
+    let settings = snapshot.settings;
     if !settings.global_shortcuts_enabled {
         return Ok(Vec::new());
     }
-    let existing_profiles = guard
-        .manager
-        .list_profiles()
+    let existing_profiles = snapshot
+        .profiles
         .into_iter()
-        .map(|profile| profile.name)
+        .map(|p| p.name)
         .collect::<BTreeSet<_>>();
-    let current_displays = guard
-        .manager
-        .list_displays()
-        .map_err(|err| err.to_string())?;
+    let current_displays = snapshot.displays;
 
     let profile_shortcut_base = settings.profile_shortcut_base.clone().and_then(|value| {
         let trimmed = value.trim();
@@ -155,7 +149,7 @@ fn collect_bindings<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<ShortcutBindin
             let Some(shortcut) = compose_index_shortcut(base, index) else {
                 continue;
             };
-            let display_key = format_display_key(&display.id);
+            let display_key = display.id_key.clone();
             bindings.push(ShortcutBinding {
                 shortcut,
                 label: format!("display '{}'", display.friendly_name),

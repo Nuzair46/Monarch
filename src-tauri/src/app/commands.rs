@@ -1,4 +1,4 @@
-use std::{process::Command, time::Duration};
+use std::process::Command;
 
 use monarch::{
     AppSettings, DisplayId, DisplayInfo, Layout, OutputConfig, Position, Profile, Resolution,
@@ -8,13 +8,9 @@ use tauri::{
     AppHandle, PhysicalPosition, Position as TauriPosition, Runtime, State, WebviewWindow,
 };
 
-use crate::app::events::{
-    emit_confirmation, emit_state_changed, refresh_tray_menu, spawn_confirmation_watchdog,
-    spawn_deferred_tray_refresh, ConfirmationEvent, ConfirmationRevertReason,
-};
+use crate::app::coordinator::Operation;
 use crate::app::state::{format_display_key, MonarchAppState};
-use crate::app::{shortcuts, startup};
-use crate::diagnostics;
+use tauri::Manager;
 
 type CommandResult<T> = Result<T, String>;
 
@@ -48,6 +44,8 @@ pub struct OutputConfigDto {
     pub resolution: ResolutionDto,
     pub refresh_rate_mhz: u32,
     pub primary: bool,
+    #[serde(default)]
+    pub rotation: Option<monarch::Rotation>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -68,6 +66,7 @@ pub struct PendingConfirmationDto {
 
 #[derive(Clone, Serialize)]
 pub struct AppSnapshotDto {
+    pub generation: u64,
     pub displays: Vec<DisplayInfoDto>,
     pub layout: LayoutDto,
     pub profiles: Vec<ProfileDto>,
@@ -76,363 +75,68 @@ pub struct AppSnapshotDto {
 }
 
 #[tauri::command]
-pub async fn list_displays(
-    state: State<'_, MonarchAppState>,
-) -> CommandResult<Vec<DisplayInfoDto>> {
-    let guard = state
-        .0
-        .lock()
-        .map_err(|_| "state mutex poisoned".to_string())?;
-    let displays = guard
-        .manager
-        .list_displays()
-        .map_err(|err| err.to_string())?;
-    Ok(displays.into_iter().map(display_to_dto).collect())
-}
-
-#[tauri::command]
-pub async fn get_layout(state: State<'_, MonarchAppState>) -> CommandResult<LayoutDto> {
-    let guard = state
-        .0
-        .lock()
-        .map_err(|_| "state mutex poisoned".to_string())?;
-    let layout = guard.manager.get_layout().map_err(|err| err.to_string())?;
-    layout_to_dto(&layout)
-}
-
-#[tauri::command]
-pub async fn list_profiles(state: State<'_, MonarchAppState>) -> CommandResult<Vec<ProfileDto>> {
-    let guard = state
-        .0
-        .lock()
-        .map_err(|_| "state mutex poisoned".to_string())?;
-    Ok(guard
-        .manager
-        .list_profiles()
-        .into_iter()
-        .map(profile_to_dto)
-        .collect::<Result<Vec<_>, _>>()?)
-}
-
-#[tauri::command]
 pub async fn get_snapshot(state: State<'_, MonarchAppState>) -> CommandResult<AppSnapshotDto> {
-    let guard = state
-        .0
-        .lock()
-        .map_err(|_| "state mutex poisoned".to_string())?;
-    snapshot_from_manager(&guard.manager).map_err(|err| err.to_string())
+    state.controller.snapshot()
+}
+
+async fn execute<R: Runtime>(app: &AppHandle<R>, operation: Operation) -> CommandResult<()> {
+    let controller = app.state::<MonarchAppState>().controller.clone();
+    controller.execute(operation).await
 }
 
 #[tauri::command]
 pub async fn toggle_display<R: Runtime>(
     app: AppHandle<R>,
     window: WebviewWindow<R>,
-    state: State<'_, MonarchAppState>,
     display_key: String,
 ) -> CommandResult<()> {
-    diagnostics::log(format!("ui_cmd:toggle_display:start:{display_key}"));
-    let display_id =
-        crate::app::state::parse_display_key(&display_key).map_err(|err| err.to_string())?;
-
-    {
-        let guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        maybe_move_window_before_detach(
-            &window,
-            &guard.manager.get_layout().map_err(|e| e.to_string())?,
-            &display_id,
-        );
-    }
-
-    let timeout = {
-        let mut guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard
-            .manager
-            .toggle_display(&display_id)
-            .map_err(|err| err.to_string())?;
-        guard
-            .manager
-            .pending_confirmation_remaining()
-            .unwrap_or_else(|| Duration::from_secs(10))
-    };
-
-    let _ = shortcuts::sync_global_shortcuts(&app);
-    refresh_tray_menu(&app);
-    emit_state_changed(&app);
-    emit_confirmation(
-        &app,
-        ConfirmationEvent::Applied {
-            timeout_ms: timeout.as_millis() as u64,
-        },
-    );
-    spawn_confirmation_watchdog(app, timeout);
-    Ok(())
+    let id = monarch::identity::parse_display_key(&display_key).map_err(|e| e.to_string())?;
+    let snapshot = app.state::<MonarchAppState>().controller.snapshot()?;
+    maybe_move_window_before_detach(&window, &dto_to_layout(snapshot.layout)?, &id);
+    execute(&app, Operation::Toggle(display_key, false)).await
 }
 
 #[tauri::command]
-pub async fn apply_layout<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, MonarchAppState>,
-    layout: LayoutDto,
-) -> CommandResult<()> {
-    diagnostics::log(format!(
-        "ui_cmd:apply_layout:start:outputs={}",
-        layout.outputs.len()
-    ));
-    let layout = dto_to_layout(layout)?;
-    let timeout = {
-        let mut guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard
-            .manager
-            .apply_layout(layout)
-            .map_err(|err| err.to_string())?;
-        guard
-            .manager
-            .pending_confirmation_remaining()
-            .unwrap_or_else(|| Duration::from_secs(10))
-    };
-
-    let _ = shortcuts::sync_global_shortcuts(&app);
-    refresh_tray_menu(&app);
-    emit_state_changed(&app);
-    emit_confirmation(
-        &app,
-        ConfirmationEvent::Applied {
-            timeout_ms: timeout.as_millis() as u64,
-        },
-    );
-    spawn_confirmation_watchdog(app, timeout);
-    Ok(())
+pub async fn apply_layout<R: Runtime>(app: AppHandle<R>, layout: LayoutDto) -> CommandResult<()> {
+    execute(&app, Operation::ApplyLayout(dto_to_layout(layout)?)).await
 }
 
 #[tauri::command]
-pub async fn save_profile<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, MonarchAppState>,
-    name: String,
-) -> CommandResult<()> {
-    {
-        let mut guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard
-            .manager
-            .save_profile(name)
-            .map_err(|err| err.to_string())?;
-    }
-    let _ = shortcuts::sync_global_shortcuts(&app);
-    refresh_tray_menu(&app);
-    emit_state_changed(&app);
-    Ok(())
+pub async fn apply_profile<R: Runtime>(app: AppHandle<R>, name: String) -> CommandResult<()> {
+    execute(&app, Operation::ApplyProfile(name, false)).await
 }
 
 #[tauri::command]
-pub async fn apply_profile<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, MonarchAppState>,
-    name: String,
-) -> CommandResult<()> {
-    diagnostics::log(format!("ui_cmd:apply_profile:start:{name}"));
-    let pending_timeout = {
-        let mut guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard
-            .manager
-            .apply_profile(&name)
-            .map_err(|err| err.to_string())?;
-        guard.manager.pending_confirmation_remaining()
-    };
-    let _ = shortcuts::sync_global_shortcuts(&app);
-    refresh_tray_menu(&app);
-    emit_state_changed(&app);
-    if let Some(timeout) = pending_timeout {
-        emit_confirmation(
-            &app,
-            ConfirmationEvent::Applied {
-                timeout_ms: timeout.as_millis() as u64,
-            },
-        );
-        spawn_confirmation_watchdog(app, timeout);
-    }
-    Ok(())
+pub async fn save_profile<R: Runtime>(app: AppHandle<R>, name: String) -> CommandResult<()> {
+    execute(&app, Operation::SaveProfile(name)).await
 }
 
 #[tauri::command]
-pub async fn delete_profile<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, MonarchAppState>,
-    name: String,
-) -> CommandResult<()> {
-    {
-        let mut guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard
-            .manager
-            .delete_profile(&name)
-            .map_err(|err| err.to_string())?;
-    }
-    let _ = shortcuts::sync_global_shortcuts(&app);
-    refresh_tray_menu(&app);
-    emit_state_changed(&app);
-    Ok(())
+pub async fn delete_profile<R: Runtime>(app: AppHandle<R>, name: String) -> CommandResult<()> {
+    execute(&app, Operation::DeleteProfile(name)).await
 }
 
 #[tauri::command]
-pub async fn restore_last_layout<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, MonarchAppState>,
-) -> CommandResult<()> {
-    diagnostics::log("ui_cmd:restore:start");
-    {
-        let mut guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard
-            .manager
-            .restore_last_layout()
-            .map_err(|err| err.to_string())?;
-    }
-    let _ = shortcuts::sync_global_shortcuts(&app);
-    refresh_tray_menu(&app);
-    emit_state_changed(&app);
-    Ok(())
+pub async fn restore_last_layout<R: Runtime>(app: AppHandle<R>) -> CommandResult<()> {
+    execute(&app, Operation::Restore).await
 }
 
 #[tauri::command]
-pub async fn confirm_current_layout<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, MonarchAppState>,
-) -> CommandResult<()> {
-    diagnostics::log("ui_cmd:confirm");
-    {
-        let mut guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard
-            .manager
-            .confirm_current_layout()
-            .map_err(|err| err.to_string())?;
-    }
-    // Avoid a synchronous tray rebuild here. It queries display state again and can block on some
-    // systems immediately after topology changes, which leaves the UI action stuck in "busy".
-    emit_state_changed(&app);
-    spawn_deferred_tray_refresh(app.clone(), Duration::from_millis(250));
-    emit_confirmation(&app, ConfirmationEvent::Confirmed);
-    Ok(())
+pub async fn confirm_current_layout<R: Runtime>(app: AppHandle<R>) -> CommandResult<()> {
+    execute(&app, Operation::Confirm).await
 }
 
 #[tauri::command]
-pub async fn rollback_pending<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, MonarchAppState>,
-) -> CommandResult<()> {
-    diagnostics::log("ui_cmd:rollback");
-    {
-        let mut guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard
-            .manager
-            .rollback_pending()
-            .map_err(|err| err.to_string())?;
-    }
-    // Avoid a synchronous tray rebuild here for the same reason as confirm_current_layout().
-    emit_state_changed(&app);
-    spawn_deferred_tray_refresh(app.clone(), Duration::from_millis(250));
-    emit_confirmation(
-        &app,
-        ConfirmationEvent::Reverted {
-            reason: ConfirmationRevertReason::Manual,
-        },
-    );
-    Ok(())
+pub async fn rollback_pending<R: Runtime>(app: AppHandle<R>) -> CommandResult<()> {
+    execute(&app, Operation::Rollback).await
 }
 
 #[tauri::command]
 pub async fn update_settings<R: Runtime>(
     app: AppHandle<R>,
-    state: State<'_, MonarchAppState>,
     settings: AppSettings,
 ) -> CommandResult<()> {
-    let previous_settings = {
-        let guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard.manager.settings().clone()
-    };
-    let startup_enabled = settings.start_with_windows;
-    {
-        let mut guard = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())?;
-        guard
-            .manager
-            .update_settings(settings)
-            .map_err(|err| err.to_string())?;
-    }
-    if let Err(err) = startup::sync_start_with_windows(startup_enabled) {
-        let rollback_err = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())
-            .and_then(|mut guard| {
-                guard
-                    .manager
-                    .update_settings(previous_settings.clone())
-                    .map_err(|inner| inner.to_string())
-            });
-
-        if let Err(rollback_err) = rollback_err {
-            return Err(format!(
-                "{err} (and failed to restore previous settings: {rollback_err})"
-            ));
-        }
-
-        return Err(err);
-    }
-    if let Err(err) = shortcuts::sync_global_shortcuts(&app) {
-        let rollback_err = state
-            .0
-            .lock()
-            .map_err(|_| "state mutex poisoned".to_string())
-            .and_then(|mut guard| {
-                guard
-                    .manager
-                    .update_settings(previous_settings.clone())
-                    .map_err(|inner| inner.to_string())
-            });
-        let _ = startup::sync_start_with_windows(previous_settings.start_with_windows);
-        let _ = shortcuts::sync_global_shortcuts(&app);
-
-        if let Err(rollback_err) = rollback_err {
-            return Err(format!(
-                "{err} (and failed to restore previous settings: {rollback_err})"
-            ));
-        }
-
-        return Err(err);
-    }
-    refresh_tray_menu(&app);
-    emit_state_changed(&app);
-    Ok(())
+    execute(&app, Operation::Settings(settings)).await
 }
 
 #[tauri::command]
@@ -455,32 +159,42 @@ where
     B: monarch::DisplayBackend,
     S: monarch::ConfigStore,
 {
-    let displays = manager
-        .list_displays()?
+    let observed = manager.snapshot()?;
+    let generation = observed.generation;
+    let displays = observed
+        .displays
         .into_iter()
         .map(display_to_dto)
         .collect::<Vec<_>>();
-    let layout = layout_to_dto(&manager.get_layout()?).map_err(monarch::ManagerError::Backend)?;
-    let profiles = manager
+    let layout = layout_to_dto(&observed.layout);
+    let mut snapshot = AppSnapshotDto {
+        generation,
+        displays,
+        layout,
+        profiles: Vec::new(),
+        settings: manager.settings().clone(),
+        pending_confirmation: None,
+    };
+    update_snapshot_metadata(&mut snapshot, manager);
+    Ok(snapshot)
+}
+
+pub fn update_snapshot_metadata<B: monarch::DisplayBackend, S: monarch::ConfigStore>(
+    snapshot: &mut AppSnapshotDto,
+    manager: &monarch::MonarchDisplayManager<B, S>,
+) {
+    snapshot.profiles = manager
         .list_profiles()
         .into_iter()
         .map(profile_to_dto)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(monarch::ManagerError::Backend)?;
-    let pending_confirmation =
+        .collect();
+    snapshot.settings = manager.settings().clone();
+    snapshot.pending_confirmation =
         manager
             .pending_confirmation_remaining()
             .map(|remaining| PendingConfirmationDto {
                 remaining_ms: remaining.as_millis() as u64,
             });
-
-    Ok(AppSnapshotDto {
-        displays,
-        layout,
-        profiles,
-        settings: manager.settings().clone(),
-        pending_confirmation,
-    })
 }
 
 fn display_to_dto(display: DisplayInfo) -> DisplayInfoDto {
@@ -497,18 +211,14 @@ fn display_to_dto(display: DisplayInfo) -> DisplayInfoDto {
     }
 }
 
-fn layout_to_dto(layout: &Layout) -> Result<LayoutDto, String> {
-    Ok(LayoutDto {
-        outputs: layout
-            .outputs
-            .iter()
-            .map(output_to_dto)
-            .collect::<Result<Vec<_>, _>>()?,
-    })
+fn layout_to_dto(layout: &Layout) -> LayoutDto {
+    LayoutDto {
+        outputs: layout.outputs.iter().map(output_to_dto).collect(),
+    }
 }
 
-fn output_to_dto(output: &OutputConfig) -> Result<OutputConfigDto, String> {
-    Ok(OutputConfigDto {
+fn output_to_dto(output: &OutputConfig) -> OutputConfigDto {
+    OutputConfigDto {
         display_key: format_display_key(&output.display_id),
         enabled: output.enabled,
         position: PositionDto {
@@ -521,7 +231,8 @@ fn output_to_dto(output: &OutputConfig) -> Result<OutputConfigDto, String> {
         },
         refresh_rate_mhz: output.refresh_rate_mhz,
         primary: output.primary,
-    })
+        rotation: output.rotation,
+    }
 }
 
 fn dto_to_layout(dto: LayoutDto) -> CommandResult<Layout> {
@@ -544,17 +255,18 @@ fn dto_to_layout(dto: LayoutDto) -> CommandResult<Layout> {
                 },
                 refresh_rate_mhz: output.refresh_rate_mhz,
                 primary: output.primary,
+                rotation: output.rotation,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(Layout { outputs })
 }
 
-fn profile_to_dto(profile: Profile) -> Result<ProfileDto, String> {
-    Ok(ProfileDto {
+fn profile_to_dto(profile: Profile) -> ProfileDto {
+    ProfileDto {
         name: profile.name,
-        layout: layout_to_dto(&profile.layout)?,
-    })
+        layout: layout_to_dto(&profile.layout),
+    }
 }
 
 fn open_external_url_with_system(url: &str) -> CommandResult<()> {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
+import { subscriptions } from "@/app/subscriptions";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs } from "@/components/ui/tabs";
 import { AppHeader } from "@/app/components/app-header";
@@ -21,7 +22,7 @@ import {
   type PendingDisplayToggle,
   type View,
 } from "@/app/ui";
-import { capitalizeToastError, formatMs, shortcutSlotKey } from "@/app/utils";
+import { capitalizeToastError, formatMs } from "@/app/utils";
 
 import {
   applyLayout,
@@ -43,40 +44,6 @@ import type {
   AppSnapshot,
   DisplayInfo,
 } from "./types";
-
-function buildShortcutFromBase(base: string | null, slotIndex: number): string | null {
-  const trimmedBase = (base ?? "").trim();
-  if (!trimmedBase) {
-    return null;
-  }
-  const slotKey = shortcutSlotKey(slotIndex);
-  if (!slotKey) {
-    return null;
-  }
-  return `${trimmedBase}+${slotKey}`;
-}
-
-function buildProfileShortcutMap(snapshot: AppSnapshot, base: string | null): Record<string, string> {
-  const next: Record<string, string> = {};
-  snapshot.profiles.forEach((profile, index) => {
-    const shortcut = buildShortcutFromBase(base, index);
-    if (shortcut) {
-      next[profile.name] = shortcut;
-    }
-  });
-  return next;
-}
-
-function buildDisplayShortcutMap(snapshot: AppSnapshot, base: string | null): Record<string, string> {
-  const next: Record<string, string> = {};
-  snapshot.displays.forEach((display, index) => {
-    const shortcut = buildShortcutFromBase(base, index);
-    if (shortcut) {
-      next[display.id_key] = shortcut;
-    }
-  });
-  return next;
-}
 
 function normalizeShortcutBaseForCompare(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
@@ -125,10 +92,10 @@ function App() {
           next.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
         );
         setProfileShortcutBaseInput(
-          next.settings.profile_shortcut_base ?? DEFAULT_PROFILE_SHORTCUT_BASE,
+          next.settings.profile_shortcut_base ?? "",
         );
         setDisplayShortcutBaseInput(
-          next.settings.display_toggle_shortcut_base ?? DEFAULT_MONITOR_SHORTCUT_BASE,
+          next.settings.display_toggle_shortcut_base ?? "",
         );
       }
       setError(null);
@@ -225,16 +192,13 @@ function App() {
   useEffect(() => {
     void refreshState();
 
-    let unlistenState: (() => void) | undefined;
-    let unlistenConfirm: (() => void) | undefined;
+    const listeners = subscriptions((error) => setError(String(error)));
 
-    void listenMonarchEvent("monarch://state-changed", () => {
+    listeners.add(listenMonarchEvent("monarch://state-changed", () => {
       void refreshState();
-    }).then((dispose) => {
-      unlistenState = dispose;
-    });
+    }));
 
-    void listenMonarchEvent<"monarch://confirmation">("monarch://confirmation", (event) => {
+    listeners.add(listenMonarchEvent<"monarch://confirmation">("monarch://confirmation", (event) => {
       const payload = event.payload;
 
       if (payload.kind === "applied") {
@@ -263,9 +227,7 @@ function App() {
       }
 
       void refreshState();
-    }).then((dispose) => {
-      unlistenConfirm = dispose;
-    });
+    }));
 
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === "visible") {
@@ -277,10 +239,9 @@ function App() {
     document.addEventListener("visibilitychange", handleVisibilityOrFocus);
 
     return () => {
+      listeners.dispose();
       window.removeEventListener("focus", handleVisibilityOrFocus);
       document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
-      unlistenState?.();
-      unlistenConfirm?.();
     };
   }, []);
 
@@ -328,9 +289,9 @@ function App() {
       globalShortcutsEnabled !==
         (snapshot.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED) ||
       profileShortcutBaseInput.trim() !==
-        (snapshot.settings.profile_shortcut_base ?? DEFAULT_PROFILE_SHORTCUT_BASE) ||
+        (snapshot.settings.profile_shortcut_base ?? "") ||
       displayShortcutBaseInput.trim() !==
-        (snapshot.settings.display_toggle_shortcut_base ?? DEFAULT_MONITOR_SHORTCUT_BASE)
+        (snapshot.settings.display_toggle_shortcut_base ?? "")
     );
   }, [
     displayShortcutBaseInput,
@@ -549,11 +510,11 @@ function App() {
       start_with_windows: startWithWindowsEnabled,
       startup_profile_name: startupProfileName,
       global_shortcuts_enabled: globalShortcutsEnabled,
-      profile_shortcut_base: profileShortcutBaseInput.trim() || DEFAULT_PROFILE_SHORTCUT_BASE,
+      profile_shortcut_base: profileShortcutBaseInput.trim() || null,
       display_toggle_shortcut_base:
-        displayShortcutBaseInput.trim() || DEFAULT_MONITOR_SHORTCUT_BASE,
-      profile_shortcuts: buildProfileShortcutMap(snapshot, profileShortcutBaseInput),
-      display_toggle_shortcuts: buildDisplayShortcutMap(snapshot, displayShortcutBaseInput),
+        displayShortcutBaseInput.trim() || null,
+      profile_shortcuts: snapshot.settings.profile_shortcuts,
+      display_toggle_shortcuts: snapshot.settings.display_toggle_shortcuts,
     };
     const normalizedRevertTimeout = String(parsedRevertTimeout);
     void runAction(async () => {
@@ -566,10 +527,10 @@ function App() {
         nextSettings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
       );
       setProfileShortcutBaseInput(
-        nextSettings.profile_shortcut_base ?? DEFAULT_PROFILE_SHORTCUT_BASE,
+        nextSettings.profile_shortcut_base ?? "",
       );
       setDisplayShortcutBaseInput(
-        nextSettings.display_toggle_shortcut_base ?? DEFAULT_MONITOR_SHORTCUT_BASE,
+        nextSettings.display_toggle_shortcut_base ?? "",
       );
     }, "Settings updated");
   }
@@ -586,6 +547,8 @@ function App() {
         className="mx-auto flex w-full max-w-7xl flex-col gap-4 p-4 pb-8 sm:p-6"
       >
         <AppHeader />
+
+        {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
 
         {loading ? (
           <Card>
@@ -605,7 +568,7 @@ function App() {
             snapshot?.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED
           }
           displayShortcutBase={
-            snapshot?.settings.display_toggle_shortcut_base ?? DEFAULT_MONITOR_SHORTCUT_BASE
+            snapshot?.settings.display_toggle_shortcut_base ?? null
           }
           onRestoreLastLayout={() => {
             void runAction(restoreLastLayout, "Restored last layout");
@@ -631,7 +594,7 @@ function App() {
             snapshot?.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED
           }
           profileShortcutBase={
-            snapshot?.settings.profile_shortcut_base ?? DEFAULT_PROFILE_SHORTCUT_BASE
+            snapshot?.settings.profile_shortcut_base ?? null
           }
           newProfileName={newProfileName}
           onNewProfileNameChange={setNewProfileName}

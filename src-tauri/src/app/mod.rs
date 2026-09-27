@@ -1,6 +1,8 @@
 pub mod commands;
+pub mod coordinator;
 pub mod events;
 pub mod ipc;
+mod session;
 pub mod shortcuts;
 pub mod single_instance;
 pub mod startup;

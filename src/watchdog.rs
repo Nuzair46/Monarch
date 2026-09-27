@@ -30,28 +30,76 @@ pub fn poll_confirmation<B: DisplayBackend, S: ConfigStore>(
     ))
 }
 
-/// Retry transient display or persistence failures. Exhaustion leaves the manager's
-/// pending recovery intact for a manual retry and returns an error to the UI.
-pub fn run_confirmation_watchdog(
+/// A nonblocking retry schedule, owned by the display worker for one transaction.
+/// Exhaustion leaves durable recovery intact and reports the error once.
+pub struct ConfirmationWatchdog {
+    next_attempt: Instant,
+    failures: usize,
+    finished: bool,
+}
+
+impl ConfirmationWatchdog {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            next_attempt: now,
+            failures: 0,
+            finished: false,
+        }
+    }
+
+    pub fn poll(
+        &mut self,
+        now: Instant,
+        poll: impl FnOnce() -> Result<ConfirmationPoll, String>,
+    ) -> Result<ConfirmationPoll, String> {
+        if self.finished {
+            return Ok(ConfirmationPoll::Finished { reverted: false });
+        }
+        if now < self.next_attempt {
+            return Ok(ConfirmationPoll::Waiting(self.next_attempt - now));
+        }
+        match poll() {
+            Ok(result) => {
+                if let ConfirmationPoll::Waiting(delay) = result {
+                    self.next_attempt = now + delay;
+                } else {
+                    self.finished = true;
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                let delays = [
+                    Duration::from_millis(250),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                ];
+                if let Some(delay) = delays.get(self.failures) {
+                    self.failures += 1;
+                    self.next_attempt = now.max(Instant::now()) + *delay;
+                    Ok(ConfirmationPoll::Waiting(*delay))
+                } else {
+                    self.finished = true;
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+// Drive the same nonblocking production schedule with a simulated clock in core tests.
+#[cfg(test)]
+pub(crate) fn run_confirmation_watchdog(
     mut poll: impl FnMut() -> Result<ConfirmationPoll, String>,
     mut sleep: impl FnMut(Duration),
 ) -> Result<bool, String> {
-    let delays = [
-        Duration::from_millis(250),
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-    ];
-    let mut failures = 0;
+    let mut now = Instant::now();
+    let mut watchdog = ConfirmationWatchdog::new(now);
     loop {
-        match poll() {
-            Ok(ConfirmationPoll::Finished { reverted }) => return Ok(reverted),
-            Ok(ConfirmationPoll::Waiting(delay)) => sleep(delay),
-            Err(error) => {
-                let Some(delay) = delays.get(failures) else {
-                    return Err(error);
-                };
-                failures += 1;
-                sleep(*delay);
+        match watchdog.poll(now, &mut poll)? {
+            ConfirmationPoll::Finished { reverted } => return Ok(reverted),
+            ConfirmationPoll::Waiting(delay) => {
+                sleep(delay);
+                now = now.max(Instant::now()) + delay;
             }
         }
     }

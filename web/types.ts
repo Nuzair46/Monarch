@@ -24,6 +24,7 @@ export type OutputConfig = {
   resolution: Resolution;
   refresh_rate_mhz: number;
   primary: boolean;
+  rotation?: "landscape" | "portrait" | "landscape_flipped" | "portrait_flipped" | null;
 };
 
 export type Layout = {
@@ -51,6 +52,7 @@ export type PendingConfirmation = {
 };
 
 export type AppSnapshot = {
+  generation: number;
   displays: DisplayInfo[];
   layout: Layout;
   profiles: Profile[];
@@ -61,5 +63,5 @@ export type AppSnapshot = {
 export type ConfirmationEvent =
   | { kind: "applied"; timeout_ms: number }
   | { kind: "confirmed" }
-  | { kind: "reverted"; reason: "manual" | "timeout" | "error" }
+  | { kind: "reverted"; reason: "manual" | "timeout" }
   | { kind: "rollback_failed"; message: string };

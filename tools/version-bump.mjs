@@ -71,8 +71,28 @@ function replaceCargoPackageVersion(filePath, nextVersion) {
   writeText(filePath, `${content.slice(0, start)}${nextSection}${content.slice(end)}`);
 }
 
+function lockVersion(file, name) {
+  const sections = readText(file).split('[[package]]');
+  const section = sections.find((entry) => entry.match(/^name = "([^"\n]+)"/m)?.[1] === name);
+  const version = section?.match(/^version = "([^"\n]+)"/m)?.[1];
+  if (!version) throw new Error(`Missing ${name} in ${file}`);
+  return version;
+}
+
+function updateLockVersion(file, names, version) {
+  const sections = readText(file).split('[[package]]');
+  const next = sections.map((entry) => {
+    const name = entry.match(/^name = "([^"\n]+)"/m)?.[1];
+    return names.includes(name) ? entry.replace(/^version = "[^"\n]+"/m, `version = "${version}"`) : entry;
+  });
+  writeText(file, next.join('[[package]]'));
+}
+
 function readVersions() {
   const versions = {
+    "Cargo.lock (monarch)": lockVersion(path.join(rootDir, "Cargo.lock"), "monarch"),
+    "src-tauri/Cargo.lock (monarch)": lockVersion(path.join(rootDir, "src-tauri/Cargo.lock"), "monarch"),
+    "src-tauri/Cargo.lock (monarch-desktop)": lockVersion(path.join(rootDir, "src-tauri/Cargo.lock"), "monarch-desktop"),
     "Cargo.toml": parseCargoPackageVersion(VERSION_FILES.cargoRoot),
     "src-tauri/Cargo.toml": parseCargoPackageVersion(VERSION_FILES.cargoTauri),
     "package.json": String(parseJson(VERSION_FILES.packageJson).version ?? ""),
@@ -158,6 +178,8 @@ function main() {
     return;
   }
 
+  updateLockVersion(path.join(rootDir, "Cargo.lock"), ["monarch"], nextVersion);
+  updateLockVersion(path.join(rootDir, "src-tauri/Cargo.lock"), ["monarch", "monarch-desktop"], nextVersion);
   replaceCargoPackageVersion(VERSION_FILES.cargoRoot, nextVersion);
   replaceCargoPackageVersion(VERSION_FILES.cargoTauri, nextVersion);
   updateJsonVersion(VERSION_FILES.packageJson, nextVersion);
@@ -167,7 +189,9 @@ function main() {
   console.log("Updated:");
   for (const file of [
     "Cargo.toml",
+    "Cargo.lock",
     "src-tauri/Cargo.toml",
+    "src-tauri/Cargo.lock",
     "package.json",
     "src-tauri/tauri.conf.json",
   ]) {

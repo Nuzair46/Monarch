@@ -1,8 +1,15 @@
 use std::sync::{Arc, Mutex};
 
-use crate::{DisplayInfo, Layout, ManagerError};
+use crate::{DisplayInfo, DisplaySnapshot, Layout, ManagerError};
 
 pub trait DisplayBackend {
+    fn snapshot(&self) -> Result<DisplaySnapshot, ManagerError> {
+        Ok(DisplaySnapshot {
+            generation: 0,
+            displays: self.list_displays()?,
+            layout: self.get_layout()?,
+        })
+    }
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, ManagerError>;
     fn get_layout(&self) -> Result<Layout, ManagerError>;
     fn apply_layout(&self, layout: Layout) -> Result<(), ManagerError>;
@@ -17,10 +24,8 @@ pub trait DisplayBackend {
     fn invalidate_cache(&self) -> Result<(), ManagerError> {
         Ok(())
     }
-    /// Best-effort hook called before rejecting a layout whose enabled outputs cannot be
-    /// resolved against the current enumeration: give the backend one chance to force the
-    /// display stack to re-expose attachable targets (e.g. a topology extend on Windows).
-    /// Backends without such a mechanism treat this as a no-op.
+    /// Refresh inventory or record diagnostics before rejecting unresolved outputs.
+    /// This hook must not mutate the active topology.
     fn prepare_attach_targets(&self, _desired: &Layout) -> Result<(), ManagerError> {
         Ok(())
     }
@@ -57,6 +62,17 @@ impl MockBackend {
 }
 
 impl DisplayBackend for MockBackend {
+    fn snapshot(&self) -> Result<DisplaySnapshot, ManagerError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ManagerError::Backend("mock backend lock poisoned".into()))?;
+        Ok(DisplaySnapshot {
+            generation: 0,
+            displays: state.displays.clone(),
+            layout: state.layout.clone(),
+        })
+    }
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, ManagerError> {
         let state = self
             .state
@@ -106,38 +122,5 @@ fn sync_displays_from_layout(state: &mut MockBackendState) {
             display.is_active = false;
             display.is_primary = false;
         }
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Win32DisplayBackend;
-
-impl DisplayBackend for Win32DisplayBackend {
-    fn list_displays(&self) -> Result<Vec<DisplayInfo>, ManagerError> {
-        Err(ManagerError::Backend(
-            "Win32 backend not implemented in this skeleton".to_string(),
-        ))
-    }
-
-    fn get_layout(&self) -> Result<Layout, ManagerError> {
-        Err(ManagerError::Backend(
-            "Win32 backend not implemented in this skeleton".to_string(),
-        ))
-    }
-
-    fn apply_layout(&self, _layout: Layout) -> Result<(), ManagerError> {
-        Err(ManagerError::Backend(
-            "Win32 backend not implemented in this skeleton".to_string(),
-        ))
-    }
-
-    fn color_state_signature(&self) -> Result<Option<String>, ManagerError> {
-        Ok(None)
-    }
-
-    fn reapply_color_calibration(&self) -> Result<(), ManagerError> {
-        Err(ManagerError::Backend(
-            "Win32 backend not implemented in this skeleton".to_string(),
-        ))
     }
 }
