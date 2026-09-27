@@ -17,6 +17,7 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
     DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
     DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION,
+    SDC_PATH_PERSIST_IF_REQUIRED,
     SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
@@ -108,20 +109,23 @@ pub fn apply_layout_against_snapshot(
 }
 
 pub(super) fn force_topology_extend() -> Result<(), ManagerError> {
+    // SAVE_TO_DATABASE requires USE_SUPPLIED_DISPLAY_CONFIG, which cannot be combined
+    // with TOPOLOGY_EXTEND. PATH_PERSIST_IF_REQUIRED is valid for this topology request.
+    // Contributor probes also rejected ALLOW_CHANGES with EXTEND on their hardware;
+    // omit it here, without assuming that observation holds for every driver.
+    // A successful call is not proof that every requested display became active.
     let set_display_status = unsafe {
         SetDisplayConfig(
             None,
             None,
-            SDC_APPLY | SDC_TOPOLOGY_EXTEND | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE,
+            SDC_APPLY | SDC_TOPOLOGY_EXTEND | SDC_PATH_PERSIST_IF_REQUIRED,
         )
     };
     if set_display_status == 0 {
         return Ok(());
     }
 
-    // Some driver stacks reject direct topology-extend through SetDisplayConfig during
-    // early-login / post-reboot states. Win+P still succeeds there, so fall back to the same
-    // shell path via DisplaySwitch.
+    // Fall back to the same shell path Win+P uses.
     let display_switch_status = Command::new("DisplaySwitch.exe")
         .creation_flags(CREATE_NO_WINDOW)
         .arg("/extend")
