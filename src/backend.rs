@@ -12,6 +12,18 @@ pub trait DisplayBackend {
     fn reapply_color_calibration(&self) -> Result<(), ManagerError> {
         Ok(())
     }
+    /// Drop any cached display state so the next query rebuilds it from a fresh enumeration.
+    /// Backends without a cache treat this as a no-op.
+    fn invalidate_cache(&self) -> Result<(), ManagerError> {
+        Ok(())
+    }
+    /// Best-effort hook called before rejecting a layout whose enabled outputs cannot be
+    /// resolved against the current enumeration: give the backend one chance to force the
+    /// display stack to re-expose attachable targets (e.g. a topology extend on Windows).
+    /// Backends without such a mechanism treat this as a no-op.
+    fn prepare_attach_targets(&self, _desired: &Layout) -> Result<(), ManagerError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]

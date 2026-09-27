@@ -40,29 +40,13 @@ pub fn run_app() {
         .setup(|app| {
             let backend = SystemDisplayBackend::new().map_err(|err| err.to_string())?;
             let store = FileConfigStore::default();
-            let mut manager =
+            let manager =
                 MonarchDisplayManager::new(backend, store).map_err(|err| err.to_string())?;
             let should_start_hidden = startup::should_start_hidden();
+            // CLI argument wins over the saved startup profile setting.
             let requested_profile_name = startup::requested_profile_name();
-            let startup_profile_name = requested_profile_name
-                .or_else(|| manager.settings().startup_profile_name.clone());
-
-            if let Some(profile_name) = startup_profile_name {
-                match manager.apply_profile(&profile_name) {
-                    Ok(()) => {
-                        if manager.has_pending_confirmation() {
-                            if let Err(err) = manager.confirm_current_layout() {
-                                eprintln!(
-                                    "Monarch launch profile confirm failed for '{profile_name}': {err}"
-                                );
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("Monarch launch profile apply failed for '{profile_name}': {err}");
-                    }
-                }
-            }
+            let startup_profile_name =
+                requested_profile_name.or_else(|| manager.settings().startup_profile_name.clone());
 
             let startup_enabled = manager.settings().start_with_windows;
             let state = MonarchAppState(Mutex::new(MonarchRuntimeState { manager }));
@@ -79,7 +63,16 @@ pub fn run_app() {
             events::refresh_tray_menu(&app.handle());
             events::spawn_color_state_watchdog(app.handle().clone());
             events::spawn_topology_state_watchdog(app.handle().clone());
+            events::spawn_system_event_listener(app.handle().clone());
             crate::app::ipc::spawn_listener(app.handle().clone());
+
+            // Apply the startup profile on a worker thread AFTER tray/IPC exist: a wedged apply
+            // at login must never leave an invisible, unkillable app. The external-action helper
+            // keeps the auto-confirm semantics the old synchronous path had.
+            if let Some(profile_name) = startup_profile_name {
+                crate::diagnostics::log(format!("startup_profile:queued:{profile_name}"));
+                events::handle_profile_apply_external_action(&app.handle(), &profile_name);
+            }
 
             if let Some(window) = app.get_webview_window("main") {
                 if should_start_hidden {

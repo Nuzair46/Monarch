@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{Mutex, OnceLock};
 
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -21,7 +22,18 @@ struct ShortcutBinding {
     label: String,
 }
 
+fn sync_shortcuts_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn sync_global_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    // Serialize concurrent syncs: two racing callers can otherwise interleave
+    // unregister_all/on_shortcut and leave zero shortcuts registered until the next sync.
+    // Blocking lock (not try_lock) so the last caller always converges on the latest state.
+    let _sync_guard = sync_shortcuts_lock()
+        .lock()
+        .map_err(|_| "shortcut sync lock poisoned".to_string())?;
     let bindings = collect_bindings(app)?;
     validate_unique_shortcuts(&bindings)?;
 

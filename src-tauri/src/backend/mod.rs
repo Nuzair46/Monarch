@@ -66,6 +66,22 @@ impl DisplayBackend for SystemDisplayBackend {
             Self::Mock(backend) => backend.reapply_color_calibration(),
         }
     }
+
+    fn invalidate_cache(&self) -> Result<(), monarch::ManagerError> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Windows(backend) => backend.invalidate_cache(),
+            Self::Mock(backend) => DisplayBackend::invalidate_cache(backend),
+        }
+    }
+
+    fn prepare_attach_targets(&self, desired: &Layout) -> Result<(), monarch::ManagerError> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Windows(backend) => backend.prepare_attach_targets(desired),
+            Self::Mock(backend) => DisplayBackend::prepare_attach_targets(backend, desired),
+        }
+    }
 }
 
 fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
