@@ -39,6 +39,7 @@ export function changeAttachment(
   layout: Layout,
   key: string,
   mode: string,
+  capabilities: DisplayCapabilities[],
 ): Layout {
   const draft = structuredClone(layout);
   const output = draft.outputs.find((o) => o.display_key === key)!;
@@ -65,6 +66,7 @@ export function changeAttachment(
       (o) => o.display_key === mode && o.enabled && o !== output,
     );
     if (!target) throw new Error("Choose an active display to duplicate.");
+    if (sameSource(output, target)) return draft;
     const groups = new Set(draft.outputs.map((o) => o.clone_group));
     let group = target.clone_group;
     if (!group) {
@@ -77,11 +79,54 @@ export function changeAttachment(
       enabled: true,
       clone_group: group,
       position: { ...target.position },
-      resolution: { ...target.resolution },
-      scale_percent: target.scale_percent,
-      refresh_rate_mhz: target.refresh_rate_mhz,
       primary: target.primary,
     });
+    const members = sourceMembers(draft, output);
+    const resolutions = sharedResolutionChoices(draft, output, capabilities);
+    if (!resolutions.length)
+      throw new Error(
+        "Windows reports no shared resolution for these monitors. Extend and refresh them to enumerate their modes before duplicating.",
+      );
+    const preferred = nativeResolution({
+      ...output,
+      resolution: target.resolution,
+    });
+    const own = nativeResolution(output);
+    const resolution =
+      resolutions.find((r) => sameResolution(r, preferred)) ??
+      resolutions.find((r) => sameResolution(r, own)) ??
+      [...resolutions].sort(
+        (a, b) => b.width * b.height - a.width * a.height,
+      )[0];
+    const sharedResolution = orientedResolution(resolution, output.rotation);
+    const scales = sharedScaleChoices(draft, output, capabilities);
+    const targetScale =
+      target.scale_percent ??
+      capabilities.find((c) => capabilityMatches(target, c))?.scale_percent;
+    const ownScale =
+      output.scale_percent ??
+      capabilities.find((c) => capabilityMatches(output, c))?.scale_percent;
+    const scale =
+      [targetScale, ownScale, ...scales].find(
+        (value): value is number => value != null && scales.includes(value),
+      ) ?? null;
+    if (scale == null && !canPreserveScaling(draft, output, capabilities))
+      throw new Error(
+        "Windows cannot report a shared scaling value for these monitors. Extend and refresh them before duplicating.",
+      );
+    for (const member of members) {
+      member.resolution = { ...sharedResolution };
+      member.scale_percent = scale;
+      const cap = capabilities.find((c) => capabilityMatches(member, c));
+      const rates = refreshChoices(cap, member);
+      if (!rates.some((r) => Math.abs(r - member.refresh_rate_mhz) <= 2)) {
+        member.refresh_rate_mhz = [...rates].sort(
+          (a, b) =>
+            Math.abs(a - member.refresh_rate_mhz) -
+              Math.abs(b - member.refresh_rate_mhz) || b - a,
+        )[0];
+      }
+    }
   }
   return normalizeGroups(draft);
 }
@@ -128,10 +173,78 @@ export function capabilityMatches(
 }
 
 export function nativeResolution(output: OutputConfig): Resolution {
-  return output.rotation === "portrait" ||
-    output.rotation === "portrait_flipped"
-    ? { width: output.resolution.height, height: output.resolution.width }
-    : output.resolution;
+  return orientedResolution(output.resolution, output.rotation);
+}
+
+function orientedResolution(
+  resolution: Resolution,
+  rotation: OutputConfig["rotation"],
+): Resolution {
+  return rotation === "portrait" || rotation === "portrait_flipped"
+    ? { width: resolution.height, height: resolution.width }
+    : resolution;
+}
+
+const sameResolution = (a: Resolution, b: Resolution) =>
+  a.width === b.width && a.height === b.height;
+
+export function sourceMembers(
+  layout: Layout,
+  output: OutputConfig,
+): OutputConfig[] {
+  return layout.outputs.filter((o) => o === output || sameSource(output, o));
+}
+
+// Clone members share a desktop surface, while each target keeps its own
+// rotation, refresh and HDR. Compare capabilities in desktop orientation.
+export function sharedResolutionChoices(
+  layout: Layout,
+  output: OutputConfig,
+  capabilities: DisplayCapabilities[],
+): Resolution[] {
+  const cap = capabilities.find((c) => capabilityMatches(output, c));
+  const members = sourceMembers(layout, output);
+  return resolutionChoices(cap).filter((resolution) => {
+    const desktop = orientedResolution(resolution, output.rotation);
+    return members.every((member) => {
+      const native = orientedResolution(desktop, member.rotation);
+      return capabilities
+        .find((c) => capabilityMatches(member, c))
+        ?.modes.some(
+          (m) => sameResolution(m.resolution, native) && m.refresh_rate_mhz > 0,
+        );
+    });
+  });
+}
+
+export function sharedScaleChoices(
+  layout: Layout,
+  output: OutputConfig,
+  capabilities: DisplayCapabilities[],
+): number[] {
+  const members = sourceMembers(layout, output);
+  const cap = capabilities.find((c) => capabilityMatches(output, c));
+  return (cap?.scale_percentages ?? []).filter((scale) =>
+    members.every((member) => {
+      const other = capabilities.find((c) => capabilityMatches(member, c));
+      return (
+        other?.scale_percent != null && other.scale_percentages.includes(scale)
+      );
+    }),
+  );
+}
+
+export function canPreserveScaling(
+  layout: Layout,
+  output: OutputConfig,
+  capabilities: DisplayCapabilities[],
+): boolean {
+  const scales = sourceMembers(layout, output).map(
+    (member) =>
+      capabilities.find((c) => capabilityMatches(member, c))?.scale_percent ??
+      null,
+  );
+  return scales.every((scale) => scale === scales[0]);
 }
 
 export function resolutionChoices(
@@ -158,7 +271,8 @@ export function refreshChoices(
         .filter(
           (m) =>
             m.resolution.width === resolution.width &&
-            m.resolution.height === resolution.height,
+            m.resolution.height === resolution.height &&
+            m.refresh_rate_mhz > 0,
         )
         .map((m) => m.refresh_rate_mhz),
     ),

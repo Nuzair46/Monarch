@@ -73,8 +73,12 @@ confirmation timer and restore captured settings if you revert or time out.
 Mode lists come from Windows. Unsupported HDR or scaling controls explain why they
 are unavailable. Detached or duplicated monitors may expose only their preferred
 and observed modes; extend the monitor first to enumerate additional modes.
-**Duplicate of…** copies the selected display's source settings. If Windows rejects
-the combination, choose compatible settings explicitly. **Extend** places the member
+**Duplicate of…** mirrors the selected display's desktop. Monarch chooses a shared
+resolution and scaling supported by all monitors in the group. Each monitor keeps
+its own refresh rate when supported at that resolution; otherwise a supported rate
+is selected for that monitor. Orientation and HDR remain per monitor. Review the
+shared settings and each monitor's refresh rate in the dialog before saving.
+If Windows rejects the combination, choose compatible settings explicitly. **Extend** places the member
 beside the remaining desktop. **Detached** keeps the other group members active.
 Profiles save the current confirmed layout and can be applied or deleted; they have
 no separate editor.

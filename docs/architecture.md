@@ -91,6 +91,17 @@ Profiles capture the current layout; there is no saved-profile editing command.
 Missing optional preferences preserve observed state. Geometry history is never
 capability evidence.
 
+Selecting Duplicate creates an explicit clone group for a mirrored desktop. Shared
+resolution choices intersect every member's reported modes in desktop orientation;
+scaling choices intersect their readable ranges. The initial draft keeps the selected
+desktop's resolution if shared, otherwise the joining monitor's if shared, otherwise
+the largest reported common resolution. Refresh rates remain target-specific: keep a
+supported current rate or select the closest reported rate at the shared resolution.
+HDR and rotation are retained per target. The dialog exposes rates for every member,
+so a subsequent shared-resolution edit cannot leave an inaccessible invalid rate on
+another monitor. Missing/incompatible capabilities reject joining without mutation.
+Unrelated extended displays retain their modes.
+
 The Windows planner chooses one route per target, one common source per clone group,
 and distinct sources for extended surfaces. Position, primary and preference changes
 reuse active source formats and target timings, including the original refresh-rate

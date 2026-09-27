@@ -6,13 +6,21 @@ import {
   changeAttachment,
   editOutput,
   nativeResolution,
-  resolutionChoices,
+  sharedResolutionChoices,
+  sharedScaleChoices,
+  canPreserveScaling,
+  sourceMembers,
   refreshChoices,
   layoutError,
   rebaseLayout,
   fitDesktop,
 } from "@/app/display-editor";
-import type { AppSnapshot, Layout, OutputConfig } from "@/types";
+import type {
+  AppSnapshot,
+  DisplayCapabilities,
+  Layout,
+  OutputConfig,
+} from "@/types";
 
 const selectClass =
   "h-9 w-full rounded-md border bg-background px-2 text-sm disabled:opacity-50";
@@ -22,6 +30,46 @@ const rotations = [
   ["landscape_flipped", "Landscape (180°)"],
   ["portrait_flipped", "Portrait (270°)"],
 ] as const;
+
+function RefreshRateField({
+  output,
+  cap,
+  label = "Refresh rate",
+  onChange,
+}: {
+  output: OutputConfig;
+  cap: DisplayCapabilities | undefined;
+  label?: string;
+  onChange: (rate: number) => void;
+}) {
+  const rates = refreshChoices(cap, output);
+  return (
+    <label className="grid gap-1 text-sm">
+      {label}
+      <select
+        className={selectClass}
+        aria-label={label}
+        value={output.refresh_rate_mhz}
+        disabled={!rates.length}
+        onChange={(e) => onChange(Number(e.target.value))}
+      >
+        {!rates.includes(output.refresh_rate_mhz) && (
+          <option value={output.refresh_rate_mhz}>
+            {output.refresh_rate_mhz / 1000} Hz
+            {rates.some((r) => Math.abs(r - output.refresh_rate_mhz) <= 2)
+              ? " (current)"
+              : " (unavailable)"}
+          </option>
+        )}
+        {rates.map((rate) => (
+          <option key={rate} value={rate}>
+            {rate / 1000} Hz
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 export function DisplayProperties({
   snapshot,
@@ -47,15 +95,31 @@ export function DisplayProperties({
   const cap = snapshot.capabilities.find((c) => capabilityMatches(output, c));
   const dimensions = nativeResolution(output);
   const resolutionKey = `${dimensions.width}x${dimensions.height}`;
-  const resolutions = resolutionChoices(cap);
-  const rates = refreshChoices(cap, output);
+  const members = sourceMembers(draft, output);
+  const duplicated = members.length > 1;
+  const resolutions = sharedResolutionChoices(
+    draft,
+    output,
+    snapshot.capabilities,
+  );
+  const scales = sharedScaleChoices(draft, output, snapshot.capabilities);
+  const preserveScaling = canPreserveScaling(
+    draft,
+    output,
+    snapshot.capabilities,
+  );
   const validMode =
     !output.enabled ||
-    !cap?.modes.length ||
-    rates.some((r) => Math.abs(r - output.refresh_rate_mhz) <= 2);
-  const change = (patch: Partial<OutputConfig>) => {
-    const next = editOutput(draft, displayKey, patch);
+    members.every((member) =>
+      refreshChoices(
+        snapshot.capabilities.find((c) => capabilityMatches(member, c)),
+        member,
+      ).some((r) => Math.abs(r - member.refresh_rate_mhz) <= 2),
+    );
+  const change = (patch: Partial<OutputConfig>, key = displayKey) => {
+    const next = editOutput(draft, key, patch);
     setDraft(patch.resolution ? fitDesktop(next) : next);
+    setError(null);
   };
   const attachment = !output.enabled
     ? "detached"
@@ -115,7 +179,12 @@ export function DisplayProperties({
                   try {
                     setDraft(
                       fitDesktop(
-                        changeAttachment(draft, displayKey, e.target.value),
+                        changeAttachment(
+                          draft,
+                          displayKey,
+                          e.target.value,
+                          snapshot.capabilities,
+                        ),
                       ),
                     );
                     setError(null);
@@ -137,6 +206,22 @@ export function DisplayProperties({
                   ))}
               </select>
             </label>
+            {duplicated && (
+              <p className="text-sm text-muted-foreground sm:col-span-2">
+                These monitors mirror the same desktop:{" "}
+                {members
+                  .map(
+                    (member) =>
+                      snapshot.displays.find(
+                        (d) => d.id_key === member.display_key,
+                      )?.friendly_name ?? "Display",
+                  )
+                  .join(", ")}
+                . Resolution and scaling are shared, with choices supported by
+                every monitor. Refresh rate, orientation and HDR stay per
+                monitor.
+              </p>
+            )}
             <label className="grid gap-1 text-sm">
               Resolution
               <select
@@ -174,36 +259,35 @@ export function DisplayProperties({
                 ))}
               </select>
             </label>
-            <label className="grid gap-1 text-sm">
-              Refresh rate
-              <select
-                className={selectClass}
-                aria-label="Refresh rate"
-                value={output.refresh_rate_mhz}
-                disabled={!rates.length}
-                onChange={(e) =>
-                  change({ refresh_rate_mhz: Number(e.target.value) })
-                }
-              >
-                {!rates.includes(output.refresh_rate_mhz) && (
-                  <option value={output.refresh_rate_mhz}>
-                    {output.refresh_rate_mhz / 1000} Hz
-                    {validMode ? " (current)" : " (unavailable)"}
-                  </option>
-                )}
-                {rates.map((r) => (
-                  <option key={r} value={r}>
-                    {r / 1000} Hz
-                  </option>
-                ))}
-              </select>
-            </label>
+            <RefreshRateField
+              output={output}
+              cap={cap}
+              onChange={(rate) => change({ refresh_rate_mhz: rate })}
+            />
+            {members
+              .filter((member) => member !== output)
+              .map((member) => (
+                <div key={member.display_key} className="sm:col-span-2">
+                  <RefreshRateField
+                    output={member}
+                    cap={snapshot.capabilities.find((c) =>
+                      capabilityMatches(member, c),
+                    )}
+                    label={`Refresh rate — ${snapshot.displays.find((d) => d.id_key === member.display_key)?.friendly_name ?? "Display"}`}
+                    onChange={(rate) =>
+                      change({ refresh_rate_mhz: rate }, member.display_key)
+                    }
+                  />
+                </div>
+              ))}
             {!validMode && (
               <p
                 role="alert"
                 className="text-sm text-destructive sm:col-span-2"
               >
-                Select a refresh rate supported at this resolution.
+                {duplicated
+                  ? "Select a supported refresh rate for each monitor at the shared resolution."
+                  : "Select a refresh rate supported at this resolution."}
               </p>
             )}
             <label className="grid gap-1 text-sm">
@@ -236,7 +320,7 @@ export function DisplayProperties({
                 className={selectClass}
                 aria-label="Scaling"
                 value={output.scale_percent ?? "preserve"}
-                disabled={!cap?.scale_percentages.length}
+                disabled={!scales.length}
                 onChange={(e) =>
                   change({
                     scale_percent:
@@ -246,14 +330,16 @@ export function DisplayProperties({
                   })
                 }
               >
-                <option value="preserve">Preserve scaling</option>
+                {preserveScaling && (
+                  <option value="preserve">Preserve scaling</option>
+                )}
                 {output.scale_percent != null &&
-                  !cap?.scale_percentages.includes(output.scale_percent) && (
+                  !scales.includes(output.scale_percent) && (
                     <option value={output.scale_percent}>
                       {output.scale_percent}% (current)
                     </option>
                   )}
-                {cap?.scale_percentages.map((s) => (
+                {scales.map((s) => (
                   <option key={s} value={s}>
                     {s}%
                   </option>
