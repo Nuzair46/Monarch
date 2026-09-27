@@ -333,16 +333,8 @@ where
         }
 
         layout.normalize_clone_groups();
-        if !currently_enabled && layout.ensure_supported().is_err() {
-            let right = layout
-                .outputs
-                .iter()
-                .enumerate()
-                .filter(|(i, o)| *i != index && o.enabled)
-                .map(|(_, o)| o.position.x + o.resolution.width as i32)
-                .max()
-                .unwrap_or(0);
-            layout.outputs[index].position = crate::Position { x: right, y: 0 };
+        if !currently_enabled {
+            crate::placement::place_attached_output(&mut layout, index)?;
         }
         normalize_primary(&mut layout);
         self.apply_layout(layout)

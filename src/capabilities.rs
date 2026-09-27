@@ -21,6 +21,8 @@ pub struct DisplayCapabilities {
     pub scaling_unavailable_reason: Option<String>,
 }
 
+/// Preflight known capabilities. The backend must also validate the complete
+/// request with Windows: detached and cloned targets expose only partial mode lists.
 pub fn validate(layout: &Layout, capabilities: &[DisplayCapabilities]) -> Result<(), ManagerError> {
     layout.ensure_supported()?;
     for output in layout.outputs.iter().filter(|o| o.enabled) {
@@ -43,9 +45,11 @@ pub fn validate(layout: &Layout, capabilities: &[DisplayCapabilities]) -> Result
         ) {
             std::mem::swap(&mut resolution.width, &mut resolution.height);
         }
-        // Automatic attach can be resolved by the backend; remembered exact modes
-        // are never added to this list to make an unsupported request pass.
+        // A missing entry in a partial list is unknown, not unsupported. Leave
+        // the exact request intact for native validation; never invent a mode
+        // from history or silently substitute the target's preferred mode.
         if resolution.width > 0
+            && cap.modes_unavailable_reason.is_none()
             && !cap.modes.iter().any(|mode| {
                 mode.resolution == resolution
                     && mode.refresh_rate_mhz.abs_diff(output.refresh_rate_mhz) <= 2

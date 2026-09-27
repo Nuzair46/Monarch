@@ -14,6 +14,7 @@ pub fn discover(snapshot: &TopologySnapshot) -> Vec<DisplayCapabilities> {
     snapshot.layout.outputs.iter().map(|output| {
         let path = snapshot.raw.paths.iter().find(|p| p.targetInfo.id == output.display_id.target_id && super::win32_types::luid_to_u64(p.targetInfo.adapterId.HighPart,p.targetInfo.adapterId.LowPart) == output.display_id.adapter_luid && (p.flags & 1 != 0 || !output.enabled));
         let mut modes = Vec::new();
+        let mut complete_mode_list = false;
         let mut hdr = None;
         let mut scaling = None;
         if let Some(path) = path {
@@ -22,7 +23,10 @@ pub fn discover(snapshot: &TopologySnapshot) -> Vec<DisplayCapabilities> {
             // A detached route can point at a source currently driving a different
             // monitor. A clone source also cannot describe each target's modes.
             if output.enabled && output.clone_group.is_none() {
-                if let Some(name) = source_gdi_device_name(path) { modes = modes_by_source.get(&name).cloned().unwrap_or_default(); }
+                if let Some(name) = source_gdi_device_name(path) {
+                    modes = modes_by_source.get(&name).cloned().unwrap_or_default();
+                    complete_mode_list = !modes.is_empty();
+                }
             }
             if output.enabled {
                 let mut resolution = output.resolution.clone();
@@ -45,7 +49,7 @@ pub fn discover(snapshot: &TopologySnapshot) -> Vec<DisplayCapabilities> {
         let hdr_supported = hdr.as_ref().is_some_and(|h| h.supported);
         DisplayCapabilities {
             display_id: output.display_id.clone(),
-            modes_unavailable_reason: (modes.is_empty() || !output.enabled || output.clone_group.is_some()).then(|| "Additional modes require this monitor to be extended and active. Saved preferences are retained.".into()), modes,
+            modes_unavailable_reason: (!complete_mode_list).then(|| "Windows has not reported the full mode list. Extend and refresh this monitor to enumerate additional modes. Saved preferences are retained.".into()), modes,
             hdr_supported, hdr_enabled: hdr.as_ref().map(|h| h.enabled),
             hdr_unavailable_reason: (!hdr_supported).then(|| "HDR is unsupported or unavailable in the current Windows configuration.".into()),
             scale_percent: scaling.as_ref().map(|s|s.current),

@@ -56,6 +56,7 @@ function App() {
   const [pendingLayoutDecisionBusy, setPendingLayoutDecisionBusy] =
     useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [newProfileName, setNewProfileName] = useState("");
   const [newProfileAudio, setNewProfileAudio] = useState<string | null>(null);
   const [revertTimeoutInput, setRevertTimeoutInput] = useState("10");
@@ -103,10 +104,10 @@ function App() {
           next.settings.display_toggle_shortcut_base ?? "",
         );
       }
-      setError(null);
+      setRefreshError(null);
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setRefreshError(err instanceof Error ? err.message : String(err));
       return false;
     } finally {
       setLoading(false);
@@ -515,9 +516,9 @@ function App() {
       >
         <AppHeader />
 
-        {error ? (
+        {error || refreshError ? (
           <p role="alert" className="text-sm text-destructive">
-            {error}
+            {error ?? refreshError}
           </p>
         ) : null}
 
