@@ -1,52 +1,55 @@
-import { Github } from "lucide-react";
-
+import { Github, Layers, Monitor, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { openExternalUrl } from "@/tauri";
 import { REPO_URL, VIEW_OPTIONS } from "@/app/ui";
+import packageJson from "../../../package.json";
+
+const icons = { main: Monitor, profiles: Layers, settings: Settings2 };
 
 export function AppHeader() {
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-2">
-          <CardTitle className="tracking-widest text-primary">
-            MONARCH
-          </CardTitle>
-          <CardDescription className="max-w-3xl text-sm leading-relaxed sm:text-base">
-            Detach, restore, and switch monitor layouts without touching cables.
-          </CardDescription>
+    <header className="border-b bg-background">
+      <div className="mx-auto flex min-h-16 max-w-[1440px] flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 py-3 sm:px-5">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h1 className="text-lg font-semibold">Monarch</h1>
+            <span className="shortcut">v{packageJson.version}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Display &amp; audio profiles
+          </p>
         </div>
-
-        <div className="flex w-full flex-col gap-2 lg:w-auto lg:items-end">
-          <TabsList className="h-auto w-full justify-start p-1 lg:w-auto">
-            {VIEW_OPTIONS.map(({ id, label }) => (
-              <TabsTrigger key={id} value={id} className="min-w-[96px]">
-                {label}
-              </TabsTrigger>
-            ))}
+        <div className="order-3 w-full sm:order-none sm:w-auto">
+          <TabsList aria-label="Main navigation" className="w-full sm:w-auto">
+            {VIEW_OPTIONS.map(({ id, label }) => {
+              const Icon = icons[id];
+              return (
+                <TabsTrigger
+                  key={id}
+                  value={id}
+                  className="flex-1 sm:flex-none"
+                >
+                  <Icon className="size-4" aria-hidden="true" />
+                  {label}
+                </TabsTrigger>
+              );
+            })}
           </TabsList>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="justify-start lg:justify-end"
-            aria-label="Open Monarch GitHub repository"
-            onClick={() => {
-              void openExternalUrl(REPO_URL);
-            }}
-          >
-            <Github />
-            GitHub
-          </Button>
         </div>
-      </CardHeader>
-    </Card>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          title="Open Monarch on GitHub"
+          aria-label="Open Monarch GitHub repository"
+          onClick={() => {
+            void openExternalUrl(REPO_URL);
+          }}
+        >
+          <Github aria-hidden="true" />
+        </Button>
+      </div>
+    </header>
   );
 }

@@ -1,4 +1,5 @@
 import type { FormEvent, KeyboardEvent } from "react";
+import { Download, ExternalLink, Keyboard, Settings2 } from "lucide-react";
 
 import {
   DEFAULT_MONITOR_SHORTCUT_BASE,
@@ -6,13 +7,7 @@ import {
 } from "@/app/ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
@@ -23,7 +18,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TabsContent } from "@/components/ui/tabs";
-import { cn } from "@/lib/utils";
 import { openExternalUrl, type ReleaseUpdateCheckResult } from "@/tauri";
 import type { AppSnapshot } from "@/types";
 
@@ -89,20 +83,25 @@ function ShortcutBaseField({
   };
 
   return (
-    <label className="grid gap-2 text-sm">
-      <span className="font-medium text-foreground">{label}</span>
+    <div className="grid min-w-0 gap-1.5 text-sm">
+      <label htmlFor={id} className="field-label">
+        {label}
+      </label>
       <Input
         id={id}
+        aria-describedby={`${id}-hint`}
         type="text"
         readOnly
         autoComplete="off"
         value={displayValue}
         onKeyDown={handleKeyDown}
         onPaste={(event) => event.preventDefault()}
-        className="sm:max-w-sm font-mono"
+        className="font-mono"
       />
-      <p className="text-xs text-muted-foreground">{description}</p>
-    </label>
+      <p id={`${id}-hint`} className="text-xs text-muted-foreground">
+        {description}
+      </p>
+    </div>
   );
 }
 
@@ -110,6 +109,8 @@ type SettingsTabProps = {
   loading: boolean;
   snapshot: AppSnapshot | null;
   settingsDirty: boolean;
+  disabled: boolean;
+  onDiscardSettings: () => void;
   revertTimeoutInput: string;
   startWithWindows: boolean;
   startupProfileName: string | null;
@@ -136,6 +137,8 @@ export function SettingsTab({
   loading,
   snapshot,
   settingsDirty,
+  disabled,
+  onDiscardSettings,
   revertTimeoutInput,
   startWithWindows,
   startupProfileName,
@@ -166,204 +169,213 @@ export function SettingsTab({
   return (
     <TabsContent value="settings" className="mt-0">
       {!loading && snapshot ? (
-        <main className="grid gap-4">
+        <main className="grid items-start gap-4 min-[900px]:grid-cols-[minmax(0,1fr)_340px]">
           <Card>
-            <CardHeader className="space-y-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <CardTitle className="text-base">Settings</CardTitle>
-                {settingsDirty ? (
-                  <Badge variant="outline">Unsaved changes</Badge>
-                ) : null}
-              </div>
-              <CardDescription>Configure Monarch.</CardDescription>
+            <CardHeader className="min-h-12 flex-row items-center justify-between py-2">
+              <CardTitle className="flex items-center gap-2">
+                <Settings2
+                  className="size-4 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                Preferences
+              </CardTitle>
+              {settingsDirty && (
+                <Badge variant="outline">Unsaved changes</Badge>
+              )}
             </CardHeader>
-            <CardContent>
-              <form className="grid max-w-xl gap-4" onSubmit={onSettingsSubmit}>
-                <label className="grid gap-2 text-sm text-muted-foreground">
-                  <span className="font-medium text-foreground">
-                    Revert timeout (seconds)
-                  </span>
-                  <Input
-                    type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    autoComplete="off"
-                    value={revertTimeoutInput}
-                    onChange={(event) =>
-                      onRevertTimeoutInputChange(event.target.value)
-                    }
-                    className="w-32"
-                  />
-                </label>
-
-                <div className="flex items-start gap-3">
-                  <Checkbox
-                    id="start-with-windows"
-                    checked={startWithWindows}
-                    onCheckedChange={(checked) =>
-                      onStartWithWindowsChange(checked === true)
-                    }
-                    className="mt-0.5"
-                  />
-                  <label
-                    htmlFor="start-with-windows"
-                    className="grid gap-1 text-sm leading-snug"
-                  >
-                    <span className="font-medium text-foreground">
-                      Start with Windows (delayed and minimized)
-                    </span>
-                    <span className="text-muted-foreground">
-                      Launch Monarch about 10 seconds after sign-in, hidden to
-                      the tray.
-                    </span>
-                  </label>
-                </div>
-
-                <div className="grid gap-2 text-sm">
-                  <span className="font-medium text-foreground">
-                    Launch profile (optional)
-                  </span>
-                  <Select
-                    value={startupProfileSelectValue}
-                    onValueChange={(value) =>
-                      onStartupProfileNameChange(
-                        value === NO_STARTUP_PROFILE_VALUE ? null : value,
-                      )
-                    }
-                  >
-                    <SelectTrigger className="w-full sm:w-80">
-                      <SelectValue placeholder="Do not apply a profile" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={NO_STARTUP_PROFILE_VALUE}>
-                        Do not apply a profile
-                      </SelectItem>
-                      {!selectedProfileExists && startupProfileName ? (
-                        <SelectItem value={startupProfileName}>
-                          {startupProfileName} (missing)
+            <form onSubmit={onSettingsSubmit}>
+              <fieldset disabled={disabled} className="divide-y">
+                <section className="grid gap-5 p-4 sm:p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <label htmlFor="revert-timeout" className="grid gap-1">
+                      <span className="text-sm font-medium">
+                        Confirmation timeout
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        Revert unconfirmed display changes after 1–60 seconds.
+                      </span>
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="revert-timeout"
+                        aria-label="Revert timeout (seconds)"
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        autoComplete="off"
+                        value={revertTimeoutInput}
+                        onChange={(event) =>
+                          onRevertTimeoutInputChange(event.target.value)
+                        }
+                        className="w-20 font-mono"
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        seconds
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Checkbox
+                      id="start-with-windows"
+                      aria-labelledby="start-with-windows-label"
+                      aria-describedby="start-with-windows-hint"
+                      checked={startWithWindows}
+                      onCheckedChange={(checked) =>
+                        onStartWithWindowsChange(checked === true)
+                      }
+                      className="mt-0.5"
+                    />
+                    <label
+                      htmlFor="start-with-windows"
+                      className="grid gap-1 text-sm"
+                    >
+                      <span
+                        id="start-with-windows-label"
+                        className="font-medium"
+                      >
+                        Start with Windows
+                      </span>
+                      <span
+                        id="start-with-windows-hint"
+                        className="text-xs text-muted-foreground"
+                      >
+                        Launch in the tray about 10 seconds after sign-in.
+                      </span>
+                    </label>
+                  </div>
+                  <div className="grid gap-1.5">
+                    <label htmlFor="startup-profile" className="field-label">
+                      Launch profile (optional)
+                    </label>
+                    <Select
+                      value={startupProfileSelectValue}
+                      disabled={disabled}
+                      onValueChange={(value) =>
+                        onStartupProfileNameChange(
+                          value === NO_STARTUP_PROFILE_VALUE ? null : value,
+                        )
+                      }
+                    >
+                      <SelectTrigger id="startup-profile">
+                        <SelectValue placeholder="Do not apply a profile" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NO_STARTUP_PROFILE_VALUE}>
+                          Do not apply a profile
                         </SelectItem>
-                      ) : null}
-                      {snapshot.profiles.map((profile) => (
-                        <SelectItem key={profile.name} value={profile.name}>
-                          {profile.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    Applied automatically whenever Monarch launches.
-                  </p>
-                </div>
-
-                <div className="grid gap-3 rounded-xl border p-4">
-                  <div className="grid gap-1">
-                    <span className="font-medium text-foreground">
-                      Global Shortcuts
-                    </span>
+                        {!selectedProfileExists && startupProfileName && (
+                          <SelectItem value={startupProfileName}>
+                            {startupProfileName} (missing)
+                          </SelectItem>
+                        )}
+                        {snapshot.profiles.map((profile) => (
+                          <SelectItem key={profile.name} value={profile.name}>
+                            {profile.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     <p className="text-xs text-muted-foreground">
-                      Works even when Monarch is not focused. Set a modifier
-                      base (for example{" "}
-                      <span className="font-medium text-foreground">
-                        Ctrl+Alt
-                      </span>
-                      ) and Monarch will append each item&apos;s shortcut ID (
-                      <span className="font-medium text-foreground">1-9</span>,
-                      then{" "}
-                      <span className="font-medium text-foreground">0</span> for
-                      the 10th item). Use modifier-style bases only (for example{" "}
-                      <span className="font-medium text-foreground">
-                        Ctrl+Alt
-                      </span>
-                      ), not multi-key chords like{" "}
-                      <span className="font-medium text-foreground">
-                        Ctrl+M
-                      </span>
-                      .
+                      Applied whenever Monarch launches.
                     </p>
                   </div>
-
-                  <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
+                </section>
+                <section className="grid gap-4 p-4 sm:p-5">
+                  <h3 className="flex items-center gap-2 text-sm font-medium">
+                    <Keyboard
+                      className="size-4 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                    Keyboard shortcuts
+                  </h3>
+                  <div className="flex items-center gap-3">
                     <Checkbox
                       id="enable-global-shortcuts"
                       checked={globalShortcutsEnabled}
                       onCheckedChange={(checked) =>
                         onGlobalShortcutsEnabledChange(checked === true)
                       }
-                      className="mt-0.5"
                     />
                     <label
                       htmlFor="enable-global-shortcuts"
-                      className="grid gap-1 text-sm leading-snug"
+                      className="text-sm"
                     >
-                      <span className="font-medium text-foreground">
-                        Enable global shortcuts
-                      </span>
-                      <span className="text-muted-foreground">
-                        When disabled, Monarch will not register any global
-                        hotkeys.
-                      </span>
+                      Enable global shortcuts
                     </label>
                   </div>
-
-                  <div className="grid gap-2">
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Click a field and press your modifier keys. Monarch adds
+                    each profile or monitor number (1–9, then 0). Backspace
+                    restores the default. Existing custom shortcuts stay until
+                    you record a new base.
+                  </p>
+                  <div className="grid gap-4 sm:grid-cols-2">
                     <ShortcutBaseField
                       id="profile-shortcut-base"
-                      label="Profile Shortcut Base"
+                      label="Profile shortcut base"
                       value={profileShortcutBase}
                       defaultValue={DEFAULT_PROFILE_SHORTCUT_BASE}
                       onChange={onProfileShortcutBaseChange}
-                      description="Existing custom shortcuts are preserved until you record a base. Click and press your preferred modifier combo (e.g. press Ctrl+Shift+1 to record Ctrl+Shift). Profiles use IDs shown in the Profiles tab."
+                      description="Example: Ctrl + Shift + 1 applies the first profile."
                     />
-                  </div>
-
-                  <div className="grid gap-2">
                     <ShortcutBaseField
                       id="monitor-shortcut-base"
-                      label="Monitor Toggle Shortcut Base"
+                      label="Monitor shortcut base"
                       value={displayShortcutBase}
                       defaultValue={DEFAULT_MONITOR_SHORTCUT_BASE}
                       onChange={onDisplayShortcutBaseChange}
-                      description="Existing custom shortcuts are preserved until you record a base. Click and press your preferred modifier combo (e.g. press Ctrl+Alt+1 to record Ctrl+Alt). Monitor IDs and full shortcuts are shown on the Main tab."
+                      description="Example: Ctrl + Alt + 1 toggles monitor 1."
                     />
                   </div>
-                </div>
-
-                <p
-                  className={cn(
-                    "text-xs",
-                    settingsValidationMessage
-                      ? "text-destructive"
-                      : "text-muted-foreground",
-                  )}
-                >
-                  {settingsValidationMessage ??
-                    "Used for automatic rollback after applying a layout change."}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <Button type="submit" disabled={!canSubmitSettings}>
+                </section>
+              </fieldset>
+              <div className="grid gap-3 border-t bg-muted/10 px-4 py-4 sm:px-5">
+                {settingsValidationMessage && (
+                  <p role="alert" className="text-xs text-danger-text">
+                    {settingsValidationMessage}
+                  </p>
+                )}
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={!settingsDirty || disabled}
+                    onClick={onDiscardSettings}
+                  >
+                    Discard changes
+                  </Button>
+                  <Button
+                    type="submit"
+                    disabled={!canSubmitSettings || disabled}
+                  >
                     Save Settings
                   </Button>
                 </div>
-              </form>
-            </CardContent>
+              </div>
+            </form>
           </Card>
-
           <Card>
-            <CardHeader className="space-y-1">
-              <CardTitle className="text-base">Updates</CardTitle>
-              <CardDescription>
-                Check GitHub Releases for a newer Monarch version.
-              </CardDescription>
+            <CardHeader className="min-h-12 flex-row items-center py-2">
+              <CardTitle className="flex items-center gap-2">
+                <Download
+                  className="size-4 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                Updates
+              </CardTitle>
             </CardHeader>
-            <CardContent className="grid gap-3">
-              <div className="flex flex-wrap items-center gap-2">
+            <CardContent className="grid gap-4">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Check GitHub Releases for a newer version of Monarch.
+              </p>
+              <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
                   variant="outline"
                   disabled={checkingUpdates}
                   onClick={onCheckForUpdates}
                 >
-                  {checkingUpdates ? "Checking..." : "Check for Updates"}
+                  {checkingUpdates ? "Checking…" : "Check for Updates"}
                 </Button>
                 <Button
                   type="button"
@@ -372,54 +384,38 @@ export function SettingsTab({
                     void openExternalUrl(releasesUrl);
                   }}
                 >
-                  Open Releases
+                  Releases
+                  <ExternalLink aria-hidden="true" />
                 </Button>
               </div>
-
-              {updateCheckResult ? (
-                <div className="rounded-xl border p-3 text-sm">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-muted-foreground">Current:</span>
-                    <span className="font-medium text-foreground">
+              {updateCheckResult && (
+                <div className="space-y-2 border-t pt-4 text-xs">
+                  <div className="flex justify-between gap-2">
+                    <span className="text-muted-foreground">Installed</span>
+                    <span className="font-mono">
                       v{updateCheckResult.currentVersion}
                     </span>
-                    <span className="text-muted-foreground">Latest:</span>
-                    <span className="font-medium text-foreground">
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <span className="text-muted-foreground">
+                      Latest release
+                    </span>
+                    <span className="font-mono">
                       {updateCheckResult.latestTag}
                     </span>
-                    <Badge
-                      variant={
-                        updateCheckResult.updateAvailable
-                          ? "default"
-                          : "secondary"
-                      }
-                    >
-                      {updateCheckResult.updateAvailable
-                        ? "Update available"
-                        : "Up to date"}
-                    </Badge>
                   </div>
-                  {updateCheckResult.updateAvailable ? (
-                    <p className="mt-2 text-muted-foreground">
-                      A newer version is available on GitHub Releases.
-                    </p>
-                  ) : (
-                    <p className="mt-2 text-muted-foreground">
-                      You are using the latest published release.
-                    </p>
-                  )}
+                  <p>
+                    {updateCheckResult.updateAvailable
+                      ? "A newer version is available on GitHub."
+                      : "You’re up to date."}
+                  </p>
                 </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  No update check yet.
-                </p>
               )}
-
-              {updateCheckError ? (
-                <p className="text-sm text-destructive">
+              {updateCheckError && (
+                <p role="alert" className="text-xs text-danger-text">
                   Could not check for updates: {updateCheckError}
                 </p>
-              ) : null}
+              )}
             </CardContent>
           </Card>
         </main>

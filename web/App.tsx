@@ -512,139 +512,162 @@ function App() {
             setView(value);
           }
         }}
-        className="mx-auto flex w-full max-w-7xl flex-col gap-4 p-4 pb-8 sm:p-6"
+        className="flex min-h-screen flex-col"
       >
         <AppHeader />
+        <div className="mx-auto grid w-full max-w-[1440px] gap-4 p-4 pb-8 sm:p-5">
+          {error || refreshError ? (
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-danger-text"
+            >
+              {error ?? refreshError}
+            </p>
+          ) : null}
 
-        {error || refreshError ? (
-          <p role="alert" className="text-sm text-destructive">
-            {error ?? refreshError}
-          </p>
-        ) : null}
+          {loading ? (
+            <Card>
+              <CardContent className="p-6 text-sm text-muted-foreground">
+                Loading display topology...
+              </CardContent>
+            </Card>
+          ) : null}
 
-        {loading ? (
-          <Card>
-            <CardContent className="p-6 text-sm text-muted-foreground">
-              Loading display topology...
-            </CardContent>
-          </Card>
-        ) : null}
-
-        <MainTab
-          loading={loading}
-          snapshot={snapshot}
-          activeDisplayCount={activeDisplays.length}
-          actionBusy={actionBusy}
-          hasPendingConfirmation={hasPendingConfirmation}
-          shortcutsEnabled={
-            snapshot?.settings.global_shortcuts_enabled ??
-            DEFAULT_GLOBAL_SHORTCUTS_ENABLED
-          }
-          displayShortcutBase={
-            snapshot?.settings.display_toggle_shortcut_base ?? null
-          }
-          onApplyLayout={(layout) => runAction(() => applyLayout(layout))}
-          onRestoreLastLayout={() => {
-            void runAction(restoreLastLayout, "Restored last layout");
-          }}
-          onToggleRequest={(selected) =>
-            setPendingDisplayToggle({
-              idKey: selected.id_key,
-              friendlyName: selected.friendly_name,
-              currentlyActive: selected.is_active,
-            })
-          }
-        />
-
-        <ProfilesTab
-          loading={loading}
-          snapshot={snapshot}
-          actionBusy={actionBusy}
-          hasPendingConfirmation={hasPendingConfirmation}
-          shortcutsEnabled={
-            snapshot?.settings.global_shortcuts_enabled ??
-            DEFAULT_GLOBAL_SHORTCUTS_ENABLED
-          }
-          profileShortcutBase={snapshot?.settings.profile_shortcut_base ?? null}
-          newProfileName={newProfileName}
-          newProfileAudio={newProfileAudio}
-          onNewProfileAudioChange={setNewProfileAudio}
-          onSaveProfileAudio={(name, id) => {
-            void runAction(
-              () => setProfileAudio(name, id),
-              "Profile audio saved",
-            );
-          }}
-          onNewProfileNameChange={setNewProfileName}
-          onSaveCurrentLayout={() => {
-            void handleSaveCurrentLayout();
-          }}
-          onApplyProfile={(name) => {
-            void runAction(() => applyProfile(name), "Profile applied");
-          }}
-          onDeleteProfileRequest={setPendingProfileDelete}
-        />
-
-        <SettingsTab
-          loading={loading}
-          snapshot={snapshot}
-          settingsDirty={settingsDirty}
-          revertTimeoutInput={revertTimeoutInput}
-          startWithWindows={startWithWindowsEnabled}
-          startupProfileName={startupProfileName}
-          globalShortcutsEnabled={globalShortcutsEnabled}
-          settingsValidationMessage={settingsValidationMessage}
-          canSubmitSettings={canSubmitSettings}
-          onSettingsSubmit={handleSettingsSubmit}
-          onRevertTimeoutInputChange={handleRevertTimeoutInputChange}
-          onStartWithWindowsChange={handleStartWithWindowsChange}
-          onStartupProfileNameChange={handleStartupProfileNameChange}
-          onGlobalShortcutsEnabledChange={handleGlobalShortcutsEnabledChange}
-          profileShortcutBase={profileShortcutBaseInput}
-          displayShortcutBase={displayShortcutBaseInput}
-          onProfileShortcutBaseChange={handleProfileShortcutBaseChange}
-          onDisplayShortcutBaseChange={handleDisplayShortcutBaseChange}
-          checkingUpdates={checkingUpdates}
-          updateCheckResult={updateCheckResult}
-          updateCheckError={updateCheckError}
-          onCheckForUpdates={() => {
-            void handleCheckForUpdates();
-          }}
-          releasesUrl={`${REPO_URL}/releases`}
-        />
-
-        <PendingConfirmationDialog
-          pendingConfirmation={snapshot?.pending_confirmation ?? null}
-          busy={pendingLayoutDecisionBusy}
-          onRevert={handleRevertPendingLayout}
-          onConfirm={handleConfirmPendingLayout}
-        />
-
-        <DisplayToggleDialog
-          pendingDisplayToggle={pendingDisplayToggle}
-          busy={actionBusy}
-          onOpenChange={(open) => {
-            if (!open) {
-              setPendingDisplayToggle(null);
+          <MainTab
+            loading={loading}
+            snapshot={snapshot}
+            activeDisplayCount={activeDisplays.length}
+            actionBusy={actionBusy}
+            hasPendingConfirmation={hasPendingConfirmation}
+            shortcutsEnabled={
+              snapshot?.settings.global_shortcuts_enabled ??
+              DEFAULT_GLOBAL_SHORTCUTS_ENABLED
             }
-          }}
-          onConfirm={() => {
-            void handleConfirmDisplayToggle();
-          }}
-        />
-
-        <DeleteProfileDialog
-          pendingProfileDelete={pendingProfileDelete}
-          busy={actionBusy}
-          onOpenChange={(open) => {
-            if (!open) {
-              setPendingProfileDelete(null);
+            displayShortcutBase={
+              snapshot?.settings.display_toggle_shortcut_base ?? null
             }
-          }}
-          onConfirm={() => {
-            void handleConfirmProfileDelete();
-          }}
-        />
+            onApplyLayout={(layout) => runAction(() => applyLayout(layout))}
+            onRestoreLastLayout={() => {
+              void runAction(restoreLastLayout, "Restored last layout");
+            }}
+            onToggleRequest={(selected) =>
+              setPendingDisplayToggle({
+                idKey: selected.id_key,
+                friendlyName: selected.friendly_name,
+                currentlyActive: selected.is_active,
+              })
+            }
+          />
+
+          <ProfilesTab
+            loading={loading}
+            snapshot={snapshot}
+            actionBusy={actionBusy}
+            hasPendingConfirmation={hasPendingConfirmation}
+            shortcutsEnabled={
+              snapshot?.settings.global_shortcuts_enabled ??
+              DEFAULT_GLOBAL_SHORTCUTS_ENABLED
+            }
+            profileShortcutBase={
+              snapshot?.settings.profile_shortcut_base ?? null
+            }
+            newProfileName={newProfileName}
+            newProfileAudio={newProfileAudio}
+            onNewProfileAudioChange={setNewProfileAudio}
+            onSaveProfileAudio={(name, id) => {
+              void runAction(
+                () => setProfileAudio(name, id),
+                "Profile audio saved",
+              );
+            }}
+            onNewProfileNameChange={setNewProfileName}
+            onSaveCurrentLayout={() => {
+              void handleSaveCurrentLayout();
+            }}
+            onApplyProfile={(name) => {
+              void runAction(() => applyProfile(name), "Profile applied");
+            }}
+            onDeleteProfileRequest={setPendingProfileDelete}
+          />
+
+          <SettingsTab
+            loading={loading}
+            snapshot={snapshot}
+            settingsDirty={settingsDirty}
+            disabled={actionBusy || hasPendingConfirmation}
+            onDiscardSettings={() => {
+              if (!snapshot) return;
+              const settings = snapshot.settings;
+              setRevertTimeoutInput(String(settings.revert_timeout_secs));
+              setStartWithWindowsEnabled(settings.start_with_windows);
+              setStartupProfileName(settings.startup_profile_name);
+              setGlobalShortcutsEnabled(
+                settings.global_shortcuts_enabled ??
+                  DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
+              );
+              setProfileShortcutBaseInput(settings.profile_shortcut_base ?? "");
+              setDisplayShortcutBaseInput(
+                settings.display_toggle_shortcut_base ?? "",
+              );
+              settingsDirtyRef.current = false;
+            }}
+            revertTimeoutInput={revertTimeoutInput}
+            startWithWindows={startWithWindowsEnabled}
+            startupProfileName={startupProfileName}
+            globalShortcutsEnabled={globalShortcutsEnabled}
+            settingsValidationMessage={settingsValidationMessage}
+            canSubmitSettings={canSubmitSettings}
+            onSettingsSubmit={handleSettingsSubmit}
+            onRevertTimeoutInputChange={handleRevertTimeoutInputChange}
+            onStartWithWindowsChange={handleStartWithWindowsChange}
+            onStartupProfileNameChange={handleStartupProfileNameChange}
+            onGlobalShortcutsEnabledChange={handleGlobalShortcutsEnabledChange}
+            profileShortcutBase={profileShortcutBaseInput}
+            displayShortcutBase={displayShortcutBaseInput}
+            onProfileShortcutBaseChange={handleProfileShortcutBaseChange}
+            onDisplayShortcutBaseChange={handleDisplayShortcutBaseChange}
+            checkingUpdates={checkingUpdates}
+            updateCheckResult={updateCheckResult}
+            updateCheckError={updateCheckError}
+            onCheckForUpdates={() => {
+              void handleCheckForUpdates();
+            }}
+            releasesUrl={`${REPO_URL}/releases`}
+          />
+
+          <PendingConfirmationDialog
+            pendingConfirmation={snapshot?.pending_confirmation ?? null}
+            busy={pendingLayoutDecisionBusy}
+            onRevert={handleRevertPendingLayout}
+            onConfirm={handleConfirmPendingLayout}
+          />
+
+          <DisplayToggleDialog
+            pendingDisplayToggle={pendingDisplayToggle}
+            busy={actionBusy}
+            onOpenChange={(open) => {
+              if (!open) {
+                setPendingDisplayToggle(null);
+              }
+            }}
+            onConfirm={() => {
+              void handleConfirmDisplayToggle();
+            }}
+          />
+
+          <DeleteProfileDialog
+            pendingProfileDelete={pendingProfileDelete}
+            busy={actionBusy}
+            onOpenChange={(open) => {
+              if (!open) {
+                setPendingProfileDelete(null);
+              }
+            }}
+            onConfirm={() => {
+              void handleConfirmProfileDelete();
+            }}
+          />
+        </div>
       </Tabs>
     </div>
   );

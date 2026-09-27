@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Monitor, RotateCcw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -64,21 +65,24 @@ export function MainTab({
   return (
     <TabsContent value="main" className="mt-0">
       <main className="grid gap-4">
-        <div className="w-full gap-4 lg:flex">
-          <Card className="min-w-0 lg:w-2/3">
-            <CardHeader className="gap-3 md:flex-row md:items-start md:justify-between">
-              <div className="min-w-0 flex-1 space-y-2">
-                <CardTitle className="text-base">Layout Preview</CardTitle>
-                <CurrentAudioOutput audio={snapshot.audio} />
-              </div>
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <Badge variant="outline">
-                  {layout.outputs.filter((o) => o.enabled).length} active
-                </Badge>
-                <Badge variant="secondary">
-                  {snapshot.displays.length} detected
-                </Badge>
-              </div>
+        <div className="grid items-start gap-4 min-[900px]:grid-cols-[minmax(0,1fr)_360px] xl:grid-cols-[minmax(0,1fr)_400px]">
+          <Card className="min-w-0">
+            <CardHeader className="min-h-12 flex-row flex-wrap items-center justify-between gap-2 py-2">
+              <CardTitle className="flex items-center gap-2">
+                <Monitor
+                  className="size-4 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                Display layout
+              </CardTitle>
+              {draft ? (
+                <Badge variant="outline">Unsaved layout</Badge>
+              ) : (
+                <span className="text-xs text-muted-foreground">
+                  {activeDisplayCount} active · {snapshot.displays.length}{" "}
+                  detected
+                </span>
+              )}
             </CardHeader>
             <CardContent>
               <LayoutPreview
@@ -106,51 +110,56 @@ export function MainTab({
                   setNotice(null);
                 }}
               />
-              <p className="mt-3 text-sm text-muted-foreground">
-                Drag monitors to match your desk. Use arrow keys for small
-                adjustments. Save layout applies positions. Use Settings beside
-                a monitor to change its properties.
-              </p>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs text-muted-foreground">
+                  Drag to arrange. Use arrow keys for fine adjustments.
+                </p>
+              </div>
               {notice && (
                 <p role="status" className="mt-2 text-sm text-muted-foreground">
                   {notice}
                 </p>
               )}
               {error && (
-                <p role="alert" className="mt-2 text-sm text-destructive">
+                <p role="alert" className="mt-2 text-sm text-danger-text">
                   {error}
                 </p>
               )}
-              <div className="mt-4 flex justify-end gap-2">
-                <Button
-                  variant="outline"
-                  disabled={!draft || locked}
-                  onClick={() => {
-                    setOffsets({});
-                    setNotice(null);
-                  }}
-                >
-                  Discard changes
-                </Button>
-                <Button
-                  disabled={!draft || locked || Boolean(error)}
-                  onClick={() => {
-                    setOffsets({});
-                    setNotice(null);
-                    void onApplyLayout(rebaseLayout(layout)).then((ok) => {
-                      if (!ok) setOffsets(offsets);
-                    });
-                  }}
-                >
-                  Save layout
-                </Button>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+                <div className="min-w-0 max-w-full basis-full sm:basis-auto sm:flex-1">
+                  <CurrentAudioOutput audio={snapshot.audio} />
+                </div>
+                <div className="ml-auto flex gap-2">
+                  <Button
+                    variant="outline"
+                    disabled={!draft || locked}
+                    onClick={() => {
+                      setOffsets({});
+                      setNotice(null);
+                    }}
+                  >
+                    Discard changes
+                  </Button>
+                  <Button
+                    disabled={!draft || locked || Boolean(error)}
+                    onClick={() => {
+                      setOffsets({});
+                      setNotice(null);
+                      void onApplyLayout(rebaseLayout(layout)).then((ok) => {
+                        if (!ok) setOffsets(offsets);
+                      });
+                    }}
+                  >
+                    Save layout
+                  </Button>
+                </div>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="mt-4 lg:mt-0 lg:w-1/3">
-            <CardHeader className="gap-3 md:flex-row md:items-start md:justify-between">
-              <CardTitle className="text-base">Monitors</CardTitle>
+          <Card className="min-w-0">
+            <CardHeader className="min-h-12 flex-row items-center justify-between gap-2 py-2">
+              <CardTitle>Monitors</CardTitle>
               <Button
                 type="button"
                 variant="outline"
@@ -158,10 +167,11 @@ export function MainTab({
                 disabled={actionBusy}
                 onClick={onRestoreLastLayout}
               >
+                <RotateCcw aria-hidden="true" />
                 Restore Last Layout
               </Button>
             </CardHeader>
-            <CardContent className="grid max-h-[38rem] gap-3 overflow-auto pr-1">
+            <CardContent className="max-h-[36rem] divide-y overflow-auto p-0">
               {snapshot.displays.map((display, index) => {
                 const shortcutLabel = displayShortcutBase
                   ? indexedShortcutLabel(displayShortcutBase, index)
@@ -201,25 +211,18 @@ export function MainTab({
           />
         )}
 
-        <Card className="border-dashed">
-          <CardContent className="space-y-2 p-4">
-            <p className="text-sm font-medium text-foreground">
-              Troubleshooting
-            </p>
-            <p className="text-sm text-muted-foreground">
-              If something goes wrong or monitors are missing or not showing up
-              as expected, press{" "}
-              <span className="font-medium text-foreground">Win + P</span> and
-              choose
-              <span className="font-medium text-foreground"> Extend</span> or
-              <span className="font-medium text-foreground">
-                {" "}
-                PC screen only
-              </span>{" "}
-              to reset the display mode.
-            </p>
-          </CardContent>
-        </Card>
+        <details className="rounded-md border text-xs text-muted-foreground">
+          <summary className="cursor-pointer px-4 py-3 font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Troubleshooting display connections
+          </summary>
+          <p className="px-4 pb-4 leading-relaxed">
+            If a monitor is missing, press{" "}
+            <kbd className="shortcut">Win + P</kbd> and choose{" "}
+            <span className="text-foreground">Extend</span> or{" "}
+            <span className="text-foreground">PC screen only</span> to reset the
+            display mode.
+          </p>
+        </details>
       </main>
     </TabsContent>
   );
