@@ -28,8 +28,8 @@ test('release bump keeps manifests and both lockfiles synchronized without chang
       assert.equal(dependencies(fs.readFileSync(path.join(fixture, file), 'utf8')), dependencies(original[i]));
     });
     fs.cpSync(path.join(root, 'src'), path.join(fixture, 'src'), { recursive: true });
-    // A stale root package lock used to make this fail immediately after a release bump.
-    execFileSync('cargo', ['check', '--locked', '--offline'], {
+    // Check the bumped lockfile while allowing fresh runners to fetch dependencies.
+    execFileSync('cargo', ['check', '--locked'], {
       cwd: fixture, encoding: 'utf8', stdio: 'pipe',
       env: { ...process.env, CARGO_TARGET_DIR: path.join(root, 'target'), ASDF_RUST_VERSION: process.env.ASDF_RUST_VERSION ?? '1.93.1' },
     });
