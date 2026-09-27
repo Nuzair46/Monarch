@@ -32,7 +32,8 @@ Monarch lets you:
 - Reattach it later
 - Edit resolution, fractional refresh, orientation, HDR and supported scaling
 - Extend, duplicate or detach displays, including a duplicated pair beside an extended monitor
-- Save display layouts as profiles
+- Save display layouts with an optional audio output per profile
+- Switch the Windows playback output from the main page
 - Restore the previous layout quickly
 - Recover automatically with a confirmation timeout if a layout change goes wrong
 - Easy apply with hotkeys
@@ -80,10 +81,38 @@ is selected for that monitor. Orientation and HDR remain per monitor. Review the
 shared settings and each monitor's refresh rate in the dialog before saving.
 If Windows rejects the combination, choose compatible settings explicitly. **Extend** places the member
 beside the remaining desktop. **Detached** keeps the other group members active.
-Profiles save the current confirmed layout and can be applied or deleted; they have
-no separate editor.
+Profiles save the current confirmed layout and can be applied or deleted. Their
+audio output can be changed independently without recapturing the display layout.
 
 Real-device verification scenarios are listed in the [Windows hardware checklist](docs/windows-hardware-checklist.md).
+
+## Audio output and profiles
+
+Use **Audio output → Playback device → Switch output** on the main page to change
+Windows' default system/media playback output immediately.
+
+In **Profiles**, choose an **Audio output** when saving a layout, or change the
+output beneath an existing profile and choose **Save audio**. Saving does not change
+active displays or audio. **Leave unchanged** lets Windows manage audio when that
+profile is applied. Microphones, communications preferences, volume, and per-app
+routing are not changed by the output selector. Apps configured to use a specific
+device may keep using it.
+
+For a desk/TV setup, save a desk profile with your speakers and a TV profile with
+its HDMI output. Apply either profile from the app, tray, shortcut, or CLI. Monarch
+changes displays first, waits up to five seconds for the selected audio endpoint,
+and verifies the default output before starting confirmation. Revert, timeout, and
+restart recovery restore the captured display settings and previous playback roles.
+The manual output switch and tray/shortcut/CLI profile actions confirm automatically.
+
+Currently unavailable outputs are selectable for profiles, so a detached TV can
+be configured in advance. If an output does not become available, the profile
+change is rolled back with an error; it is never substituted by another similarly
+named device. Turn on/reconnect or enable the device in Windows Sound settings and
+retry. If a driver reinstall changes its endpoint ID, select the output again in
+Monarch. Removing the profile's audio choice remains possible when audio support
+is unavailable. Display-only operations remain available if the audio service fails;
+audio cannot be captured for recovery in that case.
 
 ## Command-Line Profile Switch (Automation)
 

@@ -48,6 +48,20 @@ export type Layout = {
 export type Profile = {
   name: string;
   layout: Layout;
+  audio_output: AudioOutput | null;
+};
+
+export type AudioOutput = { id: string; name: string };
+export type AudioDevice = AudioOutput & { available: boolean };
+export type AudioDefaults = {
+  console: string | null;
+  multimedia: string | null;
+  communications: string | null;
+};
+export type AudioSnapshot = {
+  devices: AudioDevice[];
+  defaults: AudioDefaults;
+  unavailable_reason: string | null;
 };
 
 export type AppSettings = {
@@ -70,6 +84,7 @@ export type AppSnapshot = {
   displays: DisplayInfo[];
   layout: Layout;
   profiles: Profile[];
+  audio: AudioSnapshot;
   capabilities: DisplayCapabilities[];
   settings: AppSettings;
   pending_confirmation: PendingConfirmation | null;

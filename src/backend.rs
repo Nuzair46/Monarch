@@ -3,6 +3,18 @@ use std::sync::{Arc, Mutex};
 use crate::{DisplayInfo, DisplaySnapshot, Layout, ManagerError};
 
 pub trait DisplayBackend {
+    fn audio_snapshot(&self) -> Result<crate::AudioSnapshot, ManagerError> {
+        Ok(crate::AudioSnapshot::unavailable(
+            "Audio output switching is unavailable on this backend",
+        ))
+    }
+    /// Wait for requested endpoints to become active after a topology change,
+    /// set the specified roles, and verify them. Never match endpoints by name.
+    fn set_audio_defaults(&self, _defaults: &crate::AudioDefaults) -> Result<(), ManagerError> {
+        Err(ManagerError::Backend(
+            "Audio output switching is unavailable on this backend".into(),
+        ))
+    }
     fn get_display_capabilities(
         &self,
     ) -> Result<Vec<crate::capabilities::DisplayCapabilities>, ManagerError> {

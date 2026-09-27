@@ -87,7 +87,7 @@ drafts and Save settings applies directly. They contain primary, orientation, HD
 scaling, duplication and independent resolution/refresh choices. Resolution changes
 keep neighbouring source rectangles joined. Saving properties leaves unsaved position
 offsets in the preview, which always uses the latest observed modes and preferences.
-Profiles capture the current layout; there is no saved-profile editing command.
+Profiles capture the current layout; only their audio preference can be edited independently.
 Missing optional preferences preserve observed state. Geometry history is never
 capability evidence.
 
@@ -132,3 +132,48 @@ only for readable standard ranges, with no custom/global or registry scaling.
 
 
 Hardware acceptance for these paths is tracked in [the Windows checklist](windows-hardware-checklist.md).
+
+## Audio endpoints and profile transactions
+
+`src/audio.rs` describes playback endpoints, optional profile preferences, and
+per-role recovery defaults. The optional `audio_output` stores an opaque Windows
+endpoint ID plus a friendly label. Existing schema-3 display-only profiles mean
+Leave unchanged; this additive field does not import or migrate 1.x data.
+Endpoint IDs are never parsed or matched by name. Device installation/driver updates
+can replace IDs; users must then reselect the endpoint ([Windows endpoint identity](https://learn.microsoft.com/en-us/windows/win32/coreaudio/endpoint-id-strings)).
+
+The Windows audio module enumerates render endpoints, including inactive devices,
+using `IMMDeviceEnumerator`. Microphones are excluded. Enumeration, changes, and
+bounded waits run on the existing coordinator worker; published snapshot reads stay
+independent. The worker's two-second refresh also observes device/default changes.
+Audio enumeration failures produce an unavailable reason without breaking display
+snapshots. Each native operation owns its COM apartment/interfaces and frees returned
+strings and property variants on success and error paths.
+
+The default-endpoint setter is isolated in `audio_policy.rs`, using the
+[IPolicyConfig ABI](https://github.com/amate/SetDefaultAudioDevice/blob/master/PolicyConfig.h).
+This is an undocumented Windows interface: activation probes support, and every
+write is verified through the documented Core Audio default-endpoint queries.
+The selector sets console and multimedia roles; it does not set communications or
+capture defaults. Recovery captures/restores all observable playback roles separately.
+A role with no previous endpoint is left to Windows; Monarch cannot force an absent
+default. Per-application device assignments, mute, and volume remain outside scope.
+
+`save_profile`, `set_profile_audio`, and `set_audio_output` IPC operations go through
+the same manager as UI/tray/shortcut/startup/CLI profile application. Saving an audio
+preference never applies a layout or recaptures an existing profile. Manual switching
+uses the durable transaction and auto-confirms after verification. Audio-only profile
+application skips topology mutation and still uses confirmation.
+
+Before display/audio mutation, the manager saves the layout and each observed audio
+role in `pending_recovery` / `pending_recovery_audio`. It applies displays, waits up
+to five seconds for all requested render endpoints to be active, sets requested roles,
+then waits up to two seconds to observe them. Only then does confirmation begin.
+An audio-stage failure immediately attempts complete rollback; a failed recovery
+retains both journals for the watchdog, manual retry, or restart. Recovery restores
+topology before audio, allowing HDMI endpoints to return. Native display rollback
+also restores captured audio before its journal can clear. Last-layout restore
+includes the associated `last_restorable_audio`. Display-only apply remains usable
+when audio cannot be captured; explicit audio selection fails before mutation in
+that case. Leave unchanged does not issue audio setters during successful apply,
+although Windows itself may reroute audio when HDMI displays disappear.

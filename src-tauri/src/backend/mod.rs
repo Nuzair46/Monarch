@@ -27,6 +27,24 @@ impl SystemDisplayBackend {
 }
 
 impl DisplayBackend for SystemDisplayBackend {
+    fn audio_snapshot(&self) -> Result<monarch::AudioSnapshot, monarch::ManagerError> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Windows(_) => windows::audio::snapshot(),
+            Self::Mock(backend) => backend.audio_snapshot(),
+        }
+    }
+    fn set_audio_defaults(
+        &self,
+        defaults: &monarch::AudioDefaults,
+    ) -> Result<(), monarch::ManagerError> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Windows(_) => windows::audio::set_defaults(defaults),
+            Self::Mock(backend) => backend.set_audio_defaults(defaults),
+        }
+    }
+
     fn get_display_capabilities(
         &self,
     ) -> Result<Vec<monarch::capabilities::DisplayCapabilities>, monarch::ManagerError> {

@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod backend;
 pub mod capabilities;
 pub mod error;
@@ -10,6 +11,7 @@ pub mod transaction;
 pub mod verification;
 pub mod watchdog;
 
+pub use audio::{AudioDefaults, AudioDevice, AudioOutput, AudioSnapshot};
 pub use backend::{DisplayBackend, MockBackend};
 pub use error::ManagerError;
 pub use manager::MonarchDisplayManager;

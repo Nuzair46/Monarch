@@ -268,6 +268,7 @@ fn assert_startup_resets(invalid: serde_json::Value) {
 fn saved_config() -> AppConfig {
     let mut config = AppConfig {
         profiles: vec![Profile {
+            audio_output: None,
             name: "work".into(),
             layout: layout(),
         }],

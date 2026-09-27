@@ -264,6 +264,8 @@ impl Layout {
 pub struct Profile {
     pub name: String,
     pub layout: Layout,
+    #[serde(default)]
+    pub audio_output: Option<crate::AudioOutput>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -318,6 +320,10 @@ pub struct AppConfig {
     /// Written before mutation; removed only after confirmation or verified recovery.
     #[serde(deserialize_with = "Option::deserialize")]
     pub pending_recovery: Option<Layout>,
+    #[serde(default)]
+    pub pending_recovery_audio: Option<crate::AudioDefaults>,
+    #[serde(default)]
+    pub last_restorable_audio: Option<crate::AudioDefaults>,
 }
 
 impl Default for AppConfig {
@@ -330,6 +336,8 @@ impl Default for AppConfig {
             last_restorable_layout: None,
             settings: AppSettings::default(),
             pending_recovery: None,
+            pending_recovery_audio: None,
+            last_restorable_audio: None,
         }
     }
 }
@@ -345,6 +353,10 @@ impl AppConfig {
                 !profile.name.trim().is_empty()
                     && names.insert(&profile.name)
                     && profile.layout.ensure_supported().is_ok()
+                    && profile
+                        .audio_output
+                        .as_ref()
+                        .is_none_or(crate::AudioOutput::is_valid)
             })
             && self
                 .last_known_good_layout
@@ -352,6 +364,12 @@ impl AppConfig {
                 .chain(&self.last_restorable_layout)
                 .chain(&self.pending_recovery)
                 .all(|layout| layout.ensure_supported().is_ok())
+            && self
+                .pending_recovery_audio
+                .iter()
+                .chain(&self.last_restorable_audio)
+                .all(crate::AudioDefaults::is_valid)
+            && (self.pending_recovery_audio.is_none() || self.pending_recovery.is_some())
             && self
                 .settings
                 .display_toggle_shortcuts

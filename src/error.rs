@@ -17,8 +17,8 @@ impl Display for ManagerError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Backend(msg) => write!(f, "backend error: {msg}"),
-            Self::ApplyRestored(msg) => write!(f, "{msg}. The previous layout was restored."),
-            Self::RecoveryRequired(msg) => write!(f, "{msg}. Display recovery is pending."),
+            Self::ApplyRestored(msg) => write!(f, "{msg}. The previous settings were restored."),
+            Self::RecoveryRequired(msg) => write!(f, "{msg}. Recovery is pending."),
             Self::Validation(msg) => write!(f, "validation error: {msg}"),
             Self::NotFound(msg) => write!(f, "not found: {msg}"),
             Self::ConfirmationPending => {

@@ -65,6 +65,7 @@ pub struct LayoutDto {
 pub struct ProfileDto {
     pub name: String,
     pub layout: LayoutDto,
+    pub audio_output: Option<monarch::AudioOutput>,
 }
 
 #[derive(Clone, Serialize)]
@@ -78,6 +79,7 @@ pub struct AppSnapshotDto {
     pub displays: Vec<DisplayInfoDto>,
     pub layout: LayoutDto,
     pub profiles: Vec<ProfileDto>,
+    pub audio: monarch::AudioSnapshot,
     pub capabilities: Vec<DisplayCapabilitiesDto>,
     pub settings: AppSettings,
     pub pending_confirmation: Option<PendingConfirmationDto>,
@@ -132,8 +134,26 @@ pub async fn apply_profile<R: Runtime>(app: AppHandle<R>, name: String) -> Comma
 }
 
 #[tauri::command]
-pub async fn save_profile<R: Runtime>(app: AppHandle<R>, name: String) -> CommandResult<()> {
-    execute(&app, Operation::SaveProfile(name)).await
+pub async fn save_profile<R: Runtime>(
+    app: AppHandle<R>,
+    name: String,
+    audio_output_id: Option<String>,
+) -> CommandResult<()> {
+    execute(&app, Operation::SaveProfile(name, audio_output_id)).await
+}
+
+#[tauri::command]
+pub async fn set_profile_audio<R: Runtime>(
+    app: AppHandle<R>,
+    name: String,
+    audio_output_id: Option<String>,
+) -> CommandResult<()> {
+    execute(&app, Operation::ProfileAudio(name, audio_output_id)).await
+}
+
+#[tauri::command]
+pub async fn set_audio_output<R: Runtime>(app: AppHandle<R>, id: String) -> CommandResult<()> {
+    execute(&app, Operation::AudioOutput(id)).await
 }
 
 #[tauri::command]
@@ -197,6 +217,9 @@ where
         displays,
         layout,
         profiles: Vec::new(),
+        audio: manager
+            .audio_snapshot()
+            .unwrap_or_else(|error| monarch::AudioSnapshot::unavailable(error.to_string())),
         capabilities: manager
             .get_display_capabilities()?
             .into_iter()
@@ -320,6 +343,7 @@ fn profile_to_dto(profile: Profile) -> ProfileDto {
     ProfileDto {
         name: profile.name,
         layout: layout_to_dto(&profile.layout),
+        audio_output: profile.audio_output,
     }
 }
 

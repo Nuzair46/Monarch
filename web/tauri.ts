@@ -208,11 +208,27 @@ export async function deleteProfile(name: string): Promise<void> {
   return invoke("delete_profile", { name });
 }
 
-export async function saveProfile(name: string): Promise<void> {
+export async function saveProfile(
+  name: string,
+  audioOutputId: string | null = null,
+): Promise<void> {
   if (useWebMock) {
-    return mock.saveProfile(name);
+    return mock.saveProfile(name, audioOutputId);
   }
-  return invoke("save_profile", { name });
+  return invoke("save_profile", { name, audioOutputId });
+}
+
+export async function setProfileAudio(
+  name: string,
+  audioOutputId: string | null,
+): Promise<void> {
+  if (useWebMock) return mock.setProfileAudio(name, audioOutputId);
+  return invoke("set_profile_audio", { name, audioOutputId });
+}
+
+export async function setAudioOutput(id: string): Promise<void> {
+  if (useWebMock) return mock.setAudioOutput(id);
+  return invoke("set_audio_output", { id });
 }
 
 export async function restoreLastLayout(): Promise<void> {

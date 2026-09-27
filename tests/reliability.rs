@@ -307,6 +307,7 @@ fn startup_preserves_saved_profile_when_current_query_temporarily_loses_identity
     current.outputs[0].display_id.identity.edid_serial = None;
     let config = AppConfig {
         profiles: vec![Profile {
+            audio_output: None,
             name: "work".into(),
             layout: saved.clone(),
         }],

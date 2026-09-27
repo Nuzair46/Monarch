@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TabsContent } from "@/components/ui/tabs";
 import { LayoutPreview } from "@/app/components/layout-preview";
 import { MonitorCard } from "@/app/components/monitor-card";
+import { AudioOutputCard } from "./audio-output";
 import { DisplayProperties } from "./display-properties";
 import {
   arrangementDraft,
@@ -23,6 +24,7 @@ type MainTabProps = {
   hasPendingConfirmation: boolean;
   shortcutsEnabled: boolean;
   displayShortcutBase: string | null;
+  onSetAudioOutput: (id: string) => void;
   onApplyLayout: (layout: Layout) => Promise<boolean>;
   onRestoreLastLayout: () => void;
   onToggleRequest: (display: DisplayInfo) => void;
@@ -36,6 +38,7 @@ export function MainTab({
   hasPendingConfirmation,
   shortcutsEnabled,
   displayShortcutBase,
+  onSetAudioOutput,
   onApplyLayout,
   onRestoreLastLayout,
   onToggleRequest,
@@ -196,6 +199,13 @@ export function MainTab({
             onSave={onApplyLayout}
           />
         )}
+
+        <AudioOutputCard
+          key={`${snapshot.audio.defaults.console}:${snapshot.audio.defaults.multimedia}`}
+          audio={snapshot.audio}
+          disabled={locked}
+          onApply={onSetAudioOutput}
+        />
 
         <Card className="border-dashed">
           <CardContent className="space-y-2 p-4">

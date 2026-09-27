@@ -1,3 +1,4 @@
+import { AudioOutputSelect, ProfileAudio } from "./audio-output";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -19,6 +20,9 @@ type ProfilesTabProps = {
   shortcutsEnabled: boolean;
   profileShortcutBase: string | null;
   newProfileName: string;
+  newProfileAudio: string | null;
+  onNewProfileAudioChange: (id: string | null) => void;
+  onSaveProfileAudio: (name: string, id: string | null) => void;
   onNewProfileNameChange: (value: string) => void;
   onSaveCurrentLayout: () => void;
   onApplyProfile: (name: string) => void;
@@ -33,6 +37,9 @@ export function ProfilesTab({
   shortcutsEnabled,
   profileShortcutBase,
   newProfileName,
+  newProfileAudio,
+  onNewProfileAudioChange,
+  onSaveProfileAudio,
   onNewProfileNameChange,
   onSaveCurrentLayout,
   onApplyProfile,
@@ -47,20 +54,33 @@ export function ProfilesTab({
               <div className="space-y-1">
                 <CardTitle className="text-base">Profiles</CardTitle>
                 <CardDescription>
-                  Save named layouts and apply them later in one action.
+                  Save a layout with an optional audio output. Saving changes a
+                  profile; Apply switches your displays and audio.
                 </CardDescription>
               </div>
 
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <Input
-                  type="text"
-                  placeholder="Profile name"
-                  value={newProfileName}
-                  onChange={(event) =>
-                    onNewProfileNameChange(event.target.value)
-                  }
-                  className="sm:max-w-sm"
-                />
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                <label className="grid gap-1 text-sm">
+                  Profile name
+                  <Input
+                    type="text"
+                    placeholder="Profile name"
+                    value={newProfileName}
+                    onChange={(event) =>
+                      onNewProfileNameChange(event.target.value)
+                    }
+                    className="sm:max-w-sm"
+                  />
+                </label>
+                <div className="min-w-0 sm:w-80">
+                  <AudioOutputSelect
+                    label="Audio output for new profile"
+                    audio={snapshot.audio}
+                    value={newProfileAudio}
+                    onChange={onNewProfileAudioChange}
+                    disabled={actionBusy || hasPendingConfirmation}
+                  />
+                </div>
                 <Button
                   type="button"
                   disabled={
@@ -76,6 +96,16 @@ export function ProfilesTab({
             </CardHeader>
 
             <CardContent className="grid gap-3">
+              {snapshot.audio.unavailable_reason && (
+                <p className="text-sm text-muted-foreground">
+                  {snapshot.audio.unavailable_reason}
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                A currently unavailable TV output can be saved; Monarch will
+                wait for it after enabling the display. Communications devices
+                keep their Windows preference.
+              </p>
               {snapshot.profiles.length === 0 ? (
                 <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
                   No profiles saved yet.
@@ -89,7 +119,7 @@ export function ProfilesTab({
 
                   return (
                     <div
-                      key={profile.name}
+                      key={`${profile.name}:${profile.audio_output?.id ?? ""}`}
                       className="grid gap-3 rounded-xl border p-4 sm:grid-cols-[1fr_auto] sm:items-center"
                     >
                       <div className="space-y-1">
@@ -133,6 +163,12 @@ export function ProfilesTab({
                           Delete
                         </Button>
                       </div>
+                      <ProfileAudio
+                        profile={profile}
+                        audio={snapshot.audio}
+                        disabled={actionBusy || hasPendingConfirmation}
+                        onSave={onSaveProfileAudio}
+                      />
                     </div>
                   );
                 })

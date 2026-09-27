@@ -18,7 +18,9 @@ pub enum Operation {
     Toggle(String, bool),
     ApplyLayout(Layout),
     ApplyProfile(String, bool),
-    SaveProfile(String),
+    SaveProfile(String, Option<String>),
+    ProfileAudio(String, Option<String>),
+    AudioOutput(String),
     DeleteProfile(String),
     Restore,
     Confirm,
@@ -230,7 +232,14 @@ impl Controller {
                 auto_confirm = confirm;
                 manager.apply_profile(&name)
             }
-            Operation::SaveProfile(name) => manager.save_profile(name),
+            Operation::SaveProfile(name, id) => manager
+                .resolve_audio_output(id.as_deref())
+                .and_then(|audio| manager.save_profile_with_audio(name, audio)),
+            Operation::ProfileAudio(name, id) => manager.set_profile_audio(&name, id.as_deref()),
+            Operation::AudioOutput(id) => {
+                auto_confirm = true;
+                manager.set_audio_output(&id)
+            }
             Operation::DeleteProfile(name) => manager.delete_profile(&name),
             Operation::Restore => {
                 if manager.has_pending_confirmation() {
@@ -324,6 +333,7 @@ mod tests {
                 outputs: Vec::new(),
             },
             profiles: Vec::new(),
+            audio: monarch::AudioSnapshot::default(),
             capabilities: Vec::new(),
             settings: AppSettings::default(),
             pending_confirmation: None,
