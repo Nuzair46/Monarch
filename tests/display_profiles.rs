@@ -50,7 +50,6 @@ fn caps(layout: &Layout) -> Vec<DisplayCapabilities> {
             scale_percent: Some(125),
             scale_percentages: vec![100, 125, 150],
             scaling_unavailable_reason: None,
-            physical_size_mm: None,
         })
         .collect()
 }

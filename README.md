@@ -33,7 +33,6 @@ Monarch lets you:
 - Edit resolution, fractional refresh, orientation, HDR and supported scaling
 - Extend, duplicate or detach displays, including a duplicated pair beside an extended monitor
 - Save display layouts as profiles
-- Optionally align cursor crossings using physical monitor measurements
 - Restore the previous layout quickly
 - Recover automatically with a confirmation timeout if a layout change goes wrong
 - Easy apply with hotkeys
@@ -79,24 +78,6 @@ the combination, choose compatible settings explicitly. **Extend** places the me
 beside the remaining desktop. **Detached** keeps the other group members active.
 Profiles save the current confirmed layout and can be applied or deleted; they have
 no separate editor.
-
-In **Settings → Cursor alignment**, confirm the panel dimensions and drag the
-physical monitors to match your desk. Valid EDID dimensions prefill active monitors;
-unknown dimensions can be entered under **Adjust size and position**.
-**Match Windows arrangement** places adjoining edges using each panel's physical
-size. To match real placement, choose which monitor to move, its position relative
-to another monitor, and **Align centres** or the appropriate edges, then click
-**Align monitors**. These controls work with horizontal, stacked, rotated and
-multi-monitor setups. Close any gaps and overlaps, then
-enable **Align cursor across monitors** and save. Calibration is global, and cloned
-desktops have one selectable physical representative. Hold **Ctrl** to bypass
-correction. The tray also has an alignment toggle. Alignment starts off.
-
-The status shows whether correction is active, why it is paused, and how many
-crossings have been corrected this session. Move across an edge to check the counter.
-The crossing point uses physical panel dimensions and placement, independently of
-Windows scaling. Interior pointer speed stays unchanged. Physical centring is
-preserved when the panels have different sizes and pixel densities.
 
 Real-device verification scenarios are listed in the [Windows hardware checklist](docs/windows-hardware-checklist.md).
 

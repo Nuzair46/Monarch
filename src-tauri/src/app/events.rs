@@ -205,7 +205,6 @@ struct TrayMenuDisplay {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TrayMenuSnapshot {
-    cursor_enabled: bool,
     profiles: Vec<String>,
     displays: Vec<TrayMenuDisplay>,
 }
@@ -217,7 +216,6 @@ struct TrayMenuState {
 impl From<super::commands::AppSnapshotDto> for TrayMenuSnapshot {
     fn from(snapshot: super::commands::AppSnapshotDto) -> Self {
         Self {
-            cursor_enabled: snapshot.settings.cursor_correction_enabled,
             profiles: snapshot.profiles.into_iter().map(|p| p.name).collect(),
             displays: snapshot
                 .displays
@@ -278,19 +276,10 @@ fn build_tray_menu<R: Runtime>(
         }
     }
 
-    let cursor_toggle = tauri::menu::CheckMenuItem::with_id(
-        app,
-        "cursor_align",
-        "Align cursor across monitors",
-        true,
-        snapshot.as_ref().is_some_and(|s| s.cursor_enabled),
-        None::<&str>,
-    )?;
     let menu = MenuBuilder::new(app)
         .item(&profiles_menu.build()?)
         .item(&toggles_menu.build()?)
         .separator()
-        .item(&cursor_toggle)
         .text("restore_last_layout", "Restore Displays")
         .text("open_main", "Open App")
         .separator()
@@ -310,7 +299,6 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 
 fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
-        "cursor_align" => submit(app, super::coordinator::Operation::ToggleCursor),
         "open_main" => {
             show_main_window(app);
         }
@@ -373,7 +361,6 @@ mod tests {
             ],
             settings: monarch::AppSettings::default(),
             capabilities: vec![],
-            cursor_status: monarch::cursor::CursorStatus::default(),
             pending_confirmation: Some(PendingConfirmationDto { remaining_ms: 5000 }),
         }
     }
@@ -398,9 +385,6 @@ mod tests {
         next.generation += 1;
         next.pending_confirmation.as_mut().unwrap().remaining_ms = 3000;
         next.settings.start_with_windows = !next.settings.start_with_windows;
-        next.cursor_status.input_events = 300;
-        next.cursor_status.corrected_crossings = 12;
-        next.cursor_status.pause_reason = Some("Ctrl is held".into());
         next.displays[0].resolution.width = 2560;
         next.displays[0].refresh_rate_mhz = 144_000;
         next.displays[0].is_primary = false;
@@ -414,7 +398,6 @@ mod tests {
     fn changed_labels_actions_and_order_replace_the_menu_once() {
         let original = TrayMenuSnapshot::from(snapshot());
         let changes: &[fn(&mut TrayMenuSnapshot)] = &[
-            |s| s.cursor_enabled = !s.cursor_enabled,
             |s| s.profiles.push("Game".into()),
             |s| s.profiles.clear(),
             |s| s.profiles[0] = "Work".into(),

@@ -1,6 +1,5 @@
 pub mod backend;
 pub mod capabilities;
-pub mod cursor;
 pub mod error;
 pub mod history;
 pub mod identity;

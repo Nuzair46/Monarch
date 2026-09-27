@@ -473,23 +473,11 @@ where
         &self.config.settings
     }
 
-    pub fn update_settings(&mut self, mut settings: AppSettings) -> Result<(), ManagerError> {
+    pub fn update_settings(&mut self, settings: AppSettings) -> Result<(), ManagerError> {
         if !(1..=60).contains(&settings.revert_timeout_secs) {
             return Err(ManagerError::Validation(
                 "revert timeout must be between 1 and 60 seconds".into(),
             ));
-        }
-        let observed = self.backend.get_layout().ok();
-        for calibration in &mut settings.cursor_calibrations {
-            let id = calibration.display_id()?;
-            if let Some(IdentityResolution::Resolved(mut current)) =
-                observed.as_ref().map(|layout| resolve(&id, layout))
-            {
-                crate::identity::preserve_evidence(&id, &mut current);
-                // Frontend keys do not carry EDID serials; enrich from the fresh inventory.
-                calibration.display_key = crate::identity::display_key(&current);
-                calibration.identity = current.identity;
-            }
         }
         let revert_timeout_secs = settings.revert_timeout_secs;
         let startup_profile_name = settings
@@ -565,8 +553,6 @@ where
             display_toggle_shortcut_base,
             profile_shortcuts,
             display_toggle_shortcuts,
-            cursor_correction_enabled: settings.cursor_correction_enabled,
-            cursor_calibrations: settings.cursor_calibrations,
         };
         self.commit_config(next)?;
         self.confirmation_timeout = Duration::from_secs(revert_timeout_secs);

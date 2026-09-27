@@ -101,11 +101,7 @@ pub fn run_app() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                super::cursor::shutdown();
-            }
-        });
+        .run(|_, _| {});
 }
 
 pub use monarch::identity::{display_key as format_display_key, parse_display_key};

@@ -83,17 +83,3 @@ fn monitor_edid(device_path: &str) -> Option<[u8; 128]> {
 pub fn monitor_serial(path: &str) -> Option<String> {
     monarch::identity::edid_serial(&monitor_edid(path)?)
 }
-pub fn monitor_dimensions(path: &str) -> Option<monarch::Resolution> {
-    let bytes = monitor_edid(path)?;
-    if bytes[..8] != [0, 255, 255, 255, 255, 255, 255, 0]
-        || bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)) != 0
-        || bytes[21] == 0
-        || bytes[22] == 0
-    {
-        return None;
-    }
-    Some(monarch::Resolution {
-        width: u32::from(bytes[21]) * 10,
-        height: u32::from(bytes[22]) * 10,
-    })
-}

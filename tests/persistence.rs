@@ -100,13 +100,7 @@ fn a_valid_one_x_configuration_starts_fresh_without_importing_profiles() {
     fn remove_new_fields(value: &mut serde_json::Value) {
         match value {
             serde_json::Value::Object(fields) => {
-                for key in [
-                    "hdr_enabled",
-                    "scale_percent",
-                    "clone_group",
-                    "cursor_correction_enabled",
-                    "cursor_calibrations",
-                ] {
+                for key in ["hdr_enabled", "scale_percent", "clone_group"] {
                     fields.remove(key);
                 }
                 fields.values_mut().for_each(remove_new_fields);

@@ -51,7 +51,6 @@ pub fn discover(snapshot: &TopologySnapshot) -> Vec<DisplayCapabilities> {
             scale_percent: scaling.as_ref().map(|s|s.current),
             scale_percentages: scaling.as_ref().map(|s|s.supported.clone()).unwrap_or_default(),
             scaling_unavailable_reason: scaling.is_none().then(|| "Windows cannot read this source's standard scaling range. Attach the display and turn off custom scaling in Windows.".into()),
-            physical_size_mm: output.display_id.identity.device_path.as_deref().and_then(super::identity::monitor_dimensions),
         }
     }).collect()
 }

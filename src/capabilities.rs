@@ -19,7 +19,6 @@ pub struct DisplayCapabilities {
     pub scale_percent: Option<u32>,
     pub scale_percentages: Vec<u32>,
     pub scaling_unavailable_reason: Option<String>,
-    pub physical_size_mm: Option<Resolution>,
 }
 
 pub fn validate(layout: &Layout, capabilities: &[DisplayCapabilities]) -> Result<(), ManagerError> {

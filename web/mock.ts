@@ -226,17 +226,6 @@ function buildMockSnapshot(): AppSnapshot {
   normalizeGroups(layout);
   return {
     generation: 0,
-    cursor_status: {
-      enabled: false,
-      running: false,
-      platform_supported: false,
-      calibrated_monitors: 0,
-      boundaries: 0,
-      corrected_crossings: 0,
-      input_events: 0,
-      pause_reason: null,
-      issues: [],
-    },
     displays,
     layout,
     capabilities: displays.map((display, index) => ({
@@ -272,10 +261,6 @@ function buildMockSnapshot(): AppSnapshot {
         index < 2
           ? null
           : "Scaling is unavailable while this monitor is detached.",
-      physical_size_mm: {
-        width: index === 0 ? 600 : 520,
-        height: index === 0 ? 340 : 290,
-      },
     })),
     profiles: [
       { name: "Desk", layout: cloneLayout(layout) },
@@ -299,8 +284,6 @@ function buildMockSnapshot(): AppSnapshot {
       display_toggle_shortcut_base: DEFAULT_MONITOR_SHORTCUT_BASE,
       profile_shortcuts: {},
       display_toggle_shortcuts: {},
-      cursor_correction_enabled: false,
-      cursor_calibrations: [],
     },
     pending_confirmation: null,
   };
@@ -417,18 +400,6 @@ export async function rollbackPending(): Promise<void> {
 }
 
 export async function updateSettings(settings: AppSettings): Promise<void> {
-  if (
-    settings.cursor_calibrations.some(
-      (c) =>
-        ![c.width_mm, c.height_mm].every(
-          (n) => Number.isInteger(n) && n >= 10 && n <= 10000,
-        ) ||
-        ![c.position_mm.x, c.position_mm.y].every(
-          (n) => Number.isInteger(n) && Math.abs(n) <= 1000000,
-        ),
-    )
-  )
-    throw new Error("Invalid cursor calibration dimensions or position.");
   if (
     !Number.isInteger(settings.revert_timeout_secs) ||
     settings.revert_timeout_secs < 1 ||

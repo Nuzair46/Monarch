@@ -574,10 +574,6 @@ function App() {
         />
 
         <SettingsTab
-          busy={actionBusy}
-          onCursorSettingsSave={(settings) =>
-            runAction(() => updateSettings(settings), "Cursor settings saved")
-          }
           loading={loading}
           snapshot={snapshot}
           settingsDirty={settingsDirty}

@@ -74,7 +74,6 @@ pub struct PendingConfirmationDto {
 
 #[derive(Clone, Serialize)]
 pub struct AppSnapshotDto {
-    pub cursor_status: monarch::cursor::CursorStatus,
     pub generation: u64,
     pub displays: Vec<DisplayInfoDto>,
     pub layout: LayoutDto,
@@ -185,17 +184,7 @@ where
     B: monarch::DisplayBackend,
     S: monarch::ConfigStore,
 {
-    let cursor_epoch = super::cursor::epoch();
     let observed = manager.snapshot()?;
-    if manager
-        .pending_confirmation_remaining()
-        .is_some_and(|t| t.is_zero())
-    {
-        super::cursor::suspend();
-    } else {
-        super::cursor::sync(manager.settings(), &observed.layout, cursor_epoch)
-            .map_err(monarch::ManagerError::Backend)?;
-    }
     let generation = observed.generation;
     let displays = observed
         .displays
@@ -204,7 +193,6 @@ where
         .collect::<Vec<_>>();
     let layout = layout_to_dto(&observed.layout);
     let mut snapshot = AppSnapshotDto {
-        cursor_status: super::cursor::status(),
         generation,
         displays,
         layout,
@@ -222,15 +210,6 @@ where
         pending_confirmation: None,
     };
     update_snapshot_metadata(&mut snapshot, manager);
-    for calibration in &mut snapshot.settings.cursor_calibrations {
-        if let Ok(id) = calibration.display_id() {
-            if let monarch::identity::Resolution::Resolved(current) =
-                monarch::identity::resolve(&id, &observed.layout)
-            {
-                calibration.display_key = monarch::identity::display_key(&current);
-            }
-        }
-    }
     snapshot.profiles = manager
         .list_profiles()
         .into_iter()

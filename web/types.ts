@@ -59,8 +59,6 @@ export type AppSettings = {
   display_toggle_shortcut_base: string | null;
   profile_shortcuts: Record<string, string>;
   display_toggle_shortcuts: Record<string, string>;
-  cursor_correction_enabled: boolean;
-  cursor_calibrations: CursorCalibration[];
 };
 
 export type PendingConfirmation = {
@@ -68,7 +66,6 @@ export type PendingConfirmation = {
 };
 
 export type AppSnapshot = {
-  cursor_status: CursorStatus;
   generation: number;
   displays: DisplayInfo[];
   layout: Layout;
@@ -95,26 +92,4 @@ export type DisplayCapabilities = {
   scale_percent: number | null;
   scale_percentages: number[];
   scaling_unavailable_reason: string | null;
-  physical_size_mm: Resolution | null;
-};
-
-export type CursorCalibration = {
-  display_key: string;
-  identity?: { device_path: string | null; edid_serial: string | null };
-  width_mm: number;
-  height_mm: number;
-  position_mm: Position;
-  clone_representative: boolean;
-};
-
-export type CursorStatus = {
-  enabled: boolean;
-  running: boolean;
-  platform_supported: boolean;
-  calibrated_monitors: number;
-  boundaries: number;
-  corrected_crossings: number;
-  input_events: number;
-  pause_reason: string | null;
-  issues: { display_key: string | null; message: string }[];
 };

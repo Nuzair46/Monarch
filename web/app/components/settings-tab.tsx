@@ -25,8 +25,7 @@ import {
 import { TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { openExternalUrl, type ReleaseUpdateCheckResult } from "@/tauri";
-import { CursorSetup } from "./cursor-setup";
-import type { AppSettings, AppSnapshot } from "@/types";
+import type { AppSnapshot } from "@/types";
 
 const NO_STARTUP_PROFILE_VALUE = "__none__";
 
@@ -108,8 +107,6 @@ function ShortcutBaseField({
 }
 
 type SettingsTabProps = {
-  busy: boolean;
-  onCursorSettingsSave: (settings: AppSettings) => Promise<boolean>;
   loading: boolean;
   snapshot: AppSnapshot | null;
   settingsDirty: boolean;
@@ -136,8 +133,6 @@ type SettingsTabProps = {
 };
 
 export function SettingsTab({
-  busy,
-  onCursorSettingsSave,
   loading,
   snapshot,
   settingsDirty,
@@ -172,11 +167,6 @@ export function SettingsTab({
     <TabsContent value="settings" className="mt-0">
       {!loading && snapshot ? (
         <main className="grid gap-4">
-          <CursorSetup
-            snapshot={snapshot}
-            busy={busy}
-            onSave={onCursorSettingsSave}
-          />
           <Card>
             <CardHeader className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">

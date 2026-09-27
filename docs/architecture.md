@@ -50,8 +50,8 @@ Raw `DISPLAYCONFIG_PATH_INFO` and `DISPLAYCONFIG_MODE_INFO` arrays exist only du
 
 Startup reconstructs an unfinished journal as an immediately expired transaction. The worker attempts recovery before ordinary queued actions. Automation from profiles, hotkeys and the tray can auto-confirm only a successful operation. A persistence failure keeps recovery available.
 
-Monarch 2.0 uses schema 3 for optional HDR/scaling preferences, clone groups and global
-cursor calibration. Configurations and profiles from earlier schemas are reset;
+Monarch 2.0 uses schema 3 for optional HDR/scaling preferences and clone groups.
+Configurations and profiles from earlier schemas are reset;
 there is no migration path. Geometry history has its own version 2 and rejects the
 old format. Malformed data and unsupported schemas reset; filesystem failures remain
 errors. Missing primary configuration never resurrects a backup. Valid current-format
@@ -114,47 +114,5 @@ falling back to the older advanced-color request. Scaling is isolated in
 `backend/windows/scaling.rs`: the undocumented -3/-4 device-info requests are used
 only for readable standard ranges, with no custom/global or registry scaling.
 
-
-## Cursor alignment
-
-Cursor calibration lives in global settings against the same serial/path/connection
-identity policy as profiles. EDID dimensions are offered only after checksum/header
-validation; active monitors with valid dimensions are preselected during setup.
-Initial placement follows Windows adjacency using each panel's own physical width
-and height, including left/above-primary displays. Users can drag physical positions
-or enter dimensions and X/Y coordinates. Gaps, overlaps and missing calibration are
-reported; the UI prevents enabling an arrangement with no usable boundary.
-Rotations swap panel dimensions. Clones form one cursor surface, with an explicit
-physical representative (or the first member in stable display order).
-
-Initial physical placement detects aligned centres as well as aligned edges; pixel
-offsets cannot be scaled uniformly between monitors with different pixel densities.
-Relative-position controls let users select any two calibrated surfaces and align
-centres or edges. Manual dimensions and coordinates are under an expandable control.
-
-`src/cursor.rs` builds physical boundary mappings outside input callbacks. It maps
-crossing points into physical millimeters and then the neighbor's pixels, retaining
-remaining native displacement. Interior movement is untouched. Ambiguous, overlapping,
-missing or invalid calibration produces no correction and an explicit status issue. DPI percentages do not enter
-the mapping because the desktop coordinates are physical pixels.
-
-The Windows low-level hook runs on a dedicated thread with a message loop and a
-per-monitor-aware DPI context. Its callback does no enumeration, persistence, locking
-or allocation. Injected input is ignored. Cursor corrections use synchronous
-[`SetCursorPos`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setcursorpos)
-in physical pixels; expected warp positions and nonblocking callback state prevent
-feedback loops. Ctrl, cursor confinement or an unavailable input desktop bypass
-correction. Confinement is compared with Windows' actual virtual-screen bounds.
-Input-desktop availability is refreshed on the hook thread outside its callback.
-Epoch checks suspend stale maps immediately on display changes, hot-plug and resume;
-the display worker publishes replacements after apply/rollback. Disable and exit
-unregister the hook. See Microsoft's [LowLevelMouseProc requirements](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc).
-
-The published cursor status includes usable boundaries, calibration issues, input
-events, successful corrections and the current bypass reason. Only a successful
-native warp increments the correction counter. `MotionTracker` is the shared pure
-event-sequence component tested with accepted/refused warps and bypass transitions.
-The calibration and crossing behavior targets the physical crossover model described
-by [LittleBigMouse](https://littlebigmouse.mgth.fr/docs/); no upstream source is vendored.
 
 Hardware acceptance for these paths is tracked in [the Windows checklist](windows-hardware-checklist.md).
