@@ -140,6 +140,12 @@ where
         self.pending_confirmation.is_some()
     }
 
+    pub fn pending_confirmation_started_at(&self) -> Option<Instant> {
+        self.pending_confirmation
+            .as_ref()
+            .map(|pending| pending.applied_at)
+    }
+
     pub fn pending_confirmation_remaining(&self) -> Option<Duration> {
         self.pending_confirmation
             .as_ref()
@@ -171,25 +177,31 @@ where
         }
 
         let current_layout = self.backend.get_layout()?;
+        let mut confirmed_config = self.config.clone();
+        confirmed_config.last_known_good_layout = Some(current_layout);
+        self.store.save(&confirmed_config)?;
+        self.config = confirmed_config;
         self.pending_confirmation = None;
-        self.config.last_known_good_layout = Some(current_layout);
-        self.persist_config()
+        Ok(())
     }
 
     pub fn rollback_pending(&mut self) -> Result<(), ManagerError> {
-        let pending = self
+        let previous_layout = self
             .pending_confirmation
-            .take()
-            .ok_or(ManagerError::NoPendingConfirmation)?;
+            .as_ref()
+            .ok_or(ManagerError::NoPendingConfirmation)?
+            .previous_layout
+            .clone();
 
-        if let Err(error) = self.backend.apply_layout(pending.previous_layout.clone()) {
-            // Keep the pending confirmation when the rollback apply fails, so the state is not
-            // silently dropped: the caller can retry the rollback or confirm the current layout.
-            self.pending_confirmation = Some(pending);
-            return Err(error);
-        }
-        self.config.last_known_good_layout = Some(pending.previous_layout);
-        self.persist_config()
+        // Keep the recovery target and its deadline until the rollback has fully
+        // succeeded so the watchdog (or a manual retry) can recover from failures.
+        self.backend.apply_layout(previous_layout.clone())?;
+        let mut restored_config = self.config.clone();
+        restored_config.last_known_good_layout = Some(previous_layout);
+        self.store.save(&restored_config)?;
+        self.config = restored_config;
+        self.pending_confirmation = None;
+        Ok(())
     }
 
     pub fn rollback_if_confirmation_expired(&mut self) -> Result<bool, ManagerError> {
@@ -877,6 +889,7 @@ mod tests {
         model::{OutputConfig, Position, Resolution},
         MemoryConfigStore, MockBackend,
     };
+    use std::cell::Cell;
 
     fn sample_display_id(target_id: u32) -> DisplayId {
         sample_display_id_on_adapter(1, target_id)
@@ -1024,6 +1037,51 @@ mod tests {
         }
     }
 
+    struct FailOnceBackend {
+        inner: MockBackend,
+        fail_next_apply: Cell<bool>,
+    }
+
+    impl DisplayBackend for FailOnceBackend {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, ManagerError> {
+            self.inner.list_displays()
+        }
+
+        fn get_layout(&self) -> Result<Layout, ManagerError> {
+            self.inner.get_layout()
+        }
+
+        fn apply_layout(&self, layout: Layout) -> Result<(), ManagerError> {
+            if self.fail_next_apply.replace(false) {
+                return Err(ManagerError::Backend(
+                    "simulated display failure".to_string(),
+                ));
+            }
+            self.inner.apply_layout(layout)
+        }
+    }
+
+    struct FailOnceStore {
+        inner: MemoryConfigStore,
+        fail_next_save: Cell<bool>,
+    }
+
+    impl ConfigStore for FailOnceStore {
+        fn load(&self) -> Result<AppConfig, ManagerError> {
+            self.inner.load()
+        }
+
+        fn save(&self, config: &AppConfig) -> Result<(), ManagerError> {
+            if self.fail_next_save.replace(false) {
+                return Err(ManagerError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "simulated config save failure",
+                )));
+            }
+            self.inner.save(config)
+        }
+    }
+
     #[test]
     fn toggle_display_creates_pending_confirmation() {
         let (mut manager, backend, _) = build_manager();
@@ -1057,6 +1115,190 @@ mod tests {
         assert_eq!(backend.current_layout().unwrap(), original);
         assert_eq!(
             store.snapshot().unwrap().last_known_good_layout,
+            Some(original)
+        );
+    }
+
+    #[test]
+    fn watchdog_retries_backend_failure_and_restores_the_original_layout() {
+        let original = sample_layout();
+        let backend = FailOnceBackend {
+            inner: MockBackend::new(sample_displays(), original.clone()).unwrap(),
+            fail_next_apply: Cell::new(false),
+        };
+        let mut manager =
+            MonarchDisplayManager::new(backend, MemoryConfigStore::default()).unwrap();
+        manager.set_confirmation_timeout(Duration::ZERO);
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        manager.backend.fail_next_apply.set(true);
+        let token = manager.pending_confirmation_started_at().unwrap();
+        let mut retries = Vec::new();
+        let reverted = crate::watchdog::run_confirmation_watchdog(
+            || crate::watchdog::poll_confirmation(&mut manager, token),
+            |delay| retries.push(delay),
+        )
+        .unwrap();
+        assert!(reverted);
+        assert_eq!(retries, vec![Duration::from_millis(250)]);
+        assert_eq!(manager.get_layout().unwrap(), original);
+        assert!(!manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn watchdog_retries_persistence_and_does_not_claim_a_failed_rollback() {
+        let original = sample_layout();
+        let store = FailOnceStore {
+            inner: MemoryConfigStore::default(),
+            fail_next_save: Cell::new(false),
+        };
+        let backend = MockBackend::new(sample_displays(), original.clone()).unwrap();
+        let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
+        manager.set_confirmation_timeout(Duration::ZERO);
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        manager.store.fail_next_save.set(true);
+        let token = manager.pending_confirmation_started_at().unwrap();
+        assert!(crate::watchdog::run_confirmation_watchdog(
+            || crate::watchdog::poll_confirmation(&mut manager, token),
+            |_| {},
+        )
+        .unwrap());
+        assert_eq!(
+            manager.store.load().unwrap().last_known_good_layout,
+            Some(original)
+        );
+
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        let token = manager.pending_confirmation_started_at().unwrap();
+        let mut attempts = 0;
+        let result = crate::watchdog::run_confirmation_watchdog(
+            || {
+                attempts += 1;
+                manager.store.fail_next_save.set(true);
+                crate::watchdog::poll_confirmation(&mut manager, token)
+            },
+            |_| {},
+        );
+        assert!(result.is_err());
+        assert_eq!(attempts, 4);
+        assert!(manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn old_watchdog_does_not_revert_a_new_pending_change() {
+        let (mut manager, backend, _) = build_manager();
+        manager.set_confirmation_timeout(Duration::ZERO);
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        let old_token = manager.pending_confirmation_started_at().unwrap();
+        manager.confirm_current_layout().unwrap();
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        // Set a distinct time explicitly so the test does not depend on clock resolution.
+        manager.pending_confirmation.as_mut().unwrap().applied_at =
+            old_token + Duration::from_secs(1);
+        let current = backend.current_layout().unwrap();
+        assert!(!crate::watchdog::run_confirmation_watchdog(
+            || crate::watchdog::poll_confirmation(&mut manager, old_token),
+            |_| {},
+        )
+        .unwrap());
+        assert_eq!(backend.current_layout().unwrap(), current);
+        assert!(manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn failed_rollback_keeps_recovery_target_for_watchdog_retry() {
+        let original = sample_layout();
+        let backend = FailOnceBackend {
+            inner: MockBackend::new(sample_displays(), original.clone()).unwrap(),
+            fail_next_apply: Cell::new(false),
+        };
+        let store = MemoryConfigStore::default();
+        let mut manager = MonarchDisplayManager::new(backend, store.clone()).unwrap();
+        manager.set_confirmation_timeout(Duration::ZERO);
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        manager.backend.fail_next_apply.set(true);
+
+        let err = manager.rollback_pending().unwrap_err();
+
+        assert!(matches!(err, ManagerError::Backend(_)));
+        assert!(manager.has_pending_confirmation());
+        assert_eq!(
+            manager.pending_confirmation_remaining(),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(manager.get_layout().unwrap().enabled_output_count(), 1);
+        assert_eq!(
+            manager.config().last_known_good_layout,
+            Some(original.clone())
+        );
+        assert_eq!(
+            store.snapshot().unwrap().last_known_good_layout,
+            Some(original.clone())
+        );
+        assert!(matches!(
+            manager.toggle_display(&sample_display_id(2)),
+            Err(ManagerError::ConfirmationPending)
+        ));
+
+        assert!(manager.rollback_if_confirmation_expired().unwrap());
+        assert_eq!(manager.get_layout().unwrap(), original);
+        assert!(!manager.has_pending_confirmation());
+        assert!(!manager.rollback_if_confirmation_expired().unwrap());
+    }
+
+    #[test]
+    fn failed_confirmation_save_keeps_original_good_layout_and_rollback() {
+        let original = sample_layout();
+        let backend = MockBackend::new(sample_displays(), original.clone()).unwrap();
+        let store = FailOnceStore {
+            inner: MemoryConfigStore::default(),
+            fail_next_save: Cell::new(false),
+        };
+        let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        manager.store.fail_next_save.set(true);
+
+        assert!(matches!(
+            manager.confirm_current_layout(),
+            Err(ManagerError::Io(_))
+        ));
+        assert!(manager.has_pending_confirmation());
+        assert_eq!(
+            manager.config().last_known_good_layout,
+            Some(original.clone())
+        );
+        assert_eq!(
+            manager.store.load().unwrap().last_known_good_layout,
+            Some(original.clone())
+        );
+
+        manager.rollback_pending().unwrap();
+        assert_eq!(manager.get_layout().unwrap(), original);
+        assert!(!manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn failed_rollback_save_preserves_pending_recovery_until_retry() {
+        let original = sample_layout();
+        let backend = MockBackend::new(sample_displays(), original.clone()).unwrap();
+        let store = FailOnceStore {
+            inner: MemoryConfigStore::default(),
+            fail_next_save: Cell::new(false),
+        };
+        let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        manager.store.fail_next_save.set(true);
+
+        assert!(matches!(
+            manager.rollback_pending(),
+            Err(ManagerError::Io(_))
+        ));
+        assert!(manager.has_pending_confirmation());
+        assert_eq!(manager.get_layout().unwrap(), original);
+
+        manager.rollback_pending().unwrap();
+        assert!(!manager.has_pending_confirmation());
+        assert_eq!(
+            manager.store.load().unwrap().last_known_good_layout,
             Some(original)
         );
     }

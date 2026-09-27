@@ -21,6 +21,7 @@ pub enum ConfirmationEvent {
     Applied { timeout_ms: u64 },
     Confirmed,
     Reverted { reason: ConfirmationRevertReason },
+    RollbackFailed { message: String },
 }
 
 #[derive(Clone, Serialize)]
@@ -28,7 +29,6 @@ pub enum ConfirmationEvent {
 pub enum ConfirmationRevertReason {
     Manual,
     Timeout,
-    Error,
 }
 
 pub fn emit_state_changed<R: Runtime>(app: &AppHandle<R>) {
@@ -40,17 +40,27 @@ pub fn emit_confirmation<R: Runtime>(app: &AppHandle<R>, payload: ConfirmationEv
 }
 
 pub fn spawn_confirmation_watchdog<R: Runtime>(app: AppHandle<R>, timeout: Duration) {
+    let started_at = {
+        let state = app.state::<MonarchAppState>();
+        let Ok(guard) = state.0.lock() else { return };
+        guard.manager.pending_confirmation_started_at()
+    };
+    let Some(started_at) = started_at else { return };
     std::thread::spawn(move || {
         std::thread::sleep(timeout);
-        let state = app.state::<MonarchAppState>();
-        let mut guard = match state.0.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
-
-        match guard.manager.rollback_if_confirmation_expired() {
+        let result = monarch::watchdog::run_confirmation_watchdog(
+            || {
+                let state = app.state::<MonarchAppState>();
+                let mut guard = state
+                    .0
+                    .lock()
+                    .map_err(|_| "state mutex poisoned".to_string())?;
+                monarch::watchdog::poll_confirmation(&mut guard.manager, started_at)
+            },
+            std::thread::sleep,
+        );
+        match result {
             Ok(true) => {
-                drop(guard);
                 diagnostics::log("confirm_watchdog:rolled_back:timeout");
                 refresh_tray_menu(&app);
                 emit_state_changed(&app);
@@ -62,15 +72,10 @@ pub fn spawn_confirmation_watchdog<R: Runtime>(app: AppHandle<R>, timeout: Durat
                 );
             }
             Ok(false) => {}
-            Err(err) => {
-                drop(guard);
-                diagnostics::log(format!("confirm_watchdog:rollback_error:{err}"));
-                emit_confirmation(
-                    &app,
-                    ConfirmationEvent::Reverted {
-                        reason: ConfirmationRevertReason::Error,
-                    },
-                );
+            Err(message) => {
+                diagnostics::log(format!("confirm_watchdog:rollback_failed:{message}"));
+                emit_state_changed(&app);
+                emit_confirmation(&app, ConfirmationEvent::RollbackFailed { message });
             }
         }
     });

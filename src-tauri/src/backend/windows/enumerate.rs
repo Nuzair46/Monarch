@@ -49,6 +49,13 @@ pub fn query_active_topology() -> Result<TopologySnapshot, ManagerError> {
     Ok(snapshot)
 }
 
+pub(super) fn query_connected_topology() -> Result<TopologySnapshot, ManagerError> {
+    let mut snapshot = query_active_topology()?;
+    let (paths, modes) = query_raw_with_flags(QDC_ALL_PATHS, false)?;
+    snapshot.raw = RawTopologySnapshot { paths, modes };
+    Ok(snapshot)
+}
+
 fn log_enumeration_if_changed(stats: &EnumerationStats) {
     let line = format!(
         "enum:active={}:db={}:enriched=[{}]:seeded=[{}]:discarded=[{}]",

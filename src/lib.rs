@@ -4,6 +4,7 @@ pub mod manager;
 pub mod model;
 pub mod store;
 pub mod verification;
+pub mod watchdog;
 
 pub use backend::{DisplayBackend, MockBackend, Win32DisplayBackend};
 pub use error::ManagerError;

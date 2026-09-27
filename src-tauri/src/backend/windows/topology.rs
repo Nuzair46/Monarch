@@ -11,12 +11,13 @@ use monarch::{DisplayBackend, DisplayId, DisplayInfo, Layout, ManagerError};
 use serde::{Deserialize, Serialize};
 
 use super::apply::{
-    active_color_state_signature, apply_attach_paths, apply_layout_against_snapshot,
-    build_attach_paths, capture_sdr_gamma_ramps, gamma_ramp_looks_identity,
-    reapply_color_calibration_for_active_with_cached_sdr, run_display_switch_extend,
-    try_topology_extend, validate_attach_paths, GammaRampKey, GammaRampWords,
+    active_color_state_signature, apply_layout_against_snapshot, capture_sdr_gamma_ramps,
+    gamma_ramp_looks_identity, reapply_color_calibration_for_active_with_cached_sdr,
+    run_display_switch_extend, try_topology_extend, GammaRampKey, GammaRampWords,
 };
+use super::enumerate::query_connected_topology;
 use super::enumerate::{query_active_only_topology, query_active_topology, snapshot_from_raw};
+use super::recovery::recover_layout;
 use super::win32_types::{luid_to_u64, AttachablePath, RawTopologySnapshot, TopologySnapshot};
 
 const PERSISTED_RAW_SNAPSHOT_VERSION: u32 = 1;
@@ -638,21 +639,19 @@ impl WindowsDisplayBackend {
                     describe_output_for_error(output, &base_snapshot)
                 ));
             }
-            recover_apply_with_topology_extend(
-                &working_layout,
-                &missing_attach_outputs,
-                &active_snapshot,
-            )?
+            recover_apply_with_topology_extend(&working_layout)?
         } else {
             match apply_layout_against_snapshot(&working_layout, &base_snapshot) {
                 Ok(snapshot) => (snapshot, working_layout),
-                Err(error) if is_set_display_invalid_parameter(&error) => {
-                    diagnostics::log("topology_apply:retry:reason=setdisplayconfig_87");
-                    recover_apply_with_topology_extend(&working_layout, &[], &active_snapshot)?
-                }
                 Err(error) => {
-                    diagnostics::log(format!("topology_apply:error:{error}"));
-                    return Err(error);
+                    diagnostics::log(format!("topology_apply:retry:{error}"));
+                    recover_apply_with_topology_extend(&working_layout).map_err(
+                        |recovery_error| {
+                            ManagerError::Backend(format!(
+                                "{error}; recovery failed: {recovery_error}"
+                            ))
+                        },
+                    )?
                 }
             }
         };
@@ -916,11 +915,6 @@ fn describe_output_for_error(
 
 const RECOVER_SETTLE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(3500);
 const RECOVER_SETTLE_STEP: std::time::Duration = std::time::Duration::from_millis(250);
-/// Grace window after an explicit attach Windows already accepted: it only has to cover the
-/// display's handshake, so it is much shorter than the deadline for an extend that may have to
-/// wake a target from scratch.
-const ATTACH_SETTLE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1500);
-
 /// Fill in geometry for enabled outputs that still carry the 0x0 sentinel (a display seeded from
 /// ALL_PATHS and never active on this boot) using the post-extend snapshot, where Windows has
 /// just assigned it a real source mode.
@@ -991,85 +985,26 @@ fn select_attach_candidates<'a>(
         .collect()
 }
 
-/// Activate every still-missing enabled output in ONE SetDisplayConfig call.
-///
-/// The supplied path array is the complete topology, so a per-display call would deactivate
-/// whatever the previous call activated. Instead the batch grows one candidate at a time, each
-/// step confirmed with a free SDC_VALIDATE dry-run (alternate sources are tried when a candidate
-/// is refused), and a single apply lands at the end — one topology flip, not N.
-///
-/// Returns true only when the final apply returned 0. That still does NOT prove any display came
-/// back (SetDisplayConfig returns 0 for a no-op), so the caller must confirm against a fresh
-/// enumeration before deciding to skip the extend.
-fn try_batch_explicit_attach(
-    missing: &[&monarch::OutputConfig],
-    active_snapshot: &TopologySnapshot,
-) -> bool {
-    // Guard: the error-87 recovery path calls in with nothing missing. Without this, an empty
-    // batch would report "everything attached" and silently kill the extend fallback.
-    if missing.is_empty() {
-        return false;
-    }
-
-    let mut used_source_keys = active_source_keys(active_snapshot);
-    let mut batch: Vec<&AttachablePath> = Vec::new();
-
-    for output in missing {
-        let description = describe_output_for_error(output, active_snapshot);
-        let candidates = select_attach_candidates(
-            &active_snapshot.attachable,
-            &output.display_id,
-            &used_source_keys,
-        );
-        if candidates.is_empty() {
-            diagnostics::log(format!("recover:no_attachable_candidate:{description}"));
-            continue;
-        }
-
-        let mut accepted = false;
-        for candidate in candidates {
-            batch.push(candidate);
-            let paths = build_attach_paths(&batch, active_snapshot);
-            let status = validate_attach_paths(&paths, active_snapshot);
-            diagnostics::log(format!(
-                "recover:explicit_attach:{description}:source={}:validate={status}",
-                attachable_source_key(candidate).1
-            ));
-            if status == 0 {
-                // Claim the source so a later output in this batch cannot reuse it.
-                used_source_keys.insert(attachable_source_key(candidate));
-                accepted = true;
-                break;
-            }
-            batch.pop();
-        }
-        if !accepted {
-            diagnostics::log(format!(
-                "recover:explicit_attach:{description}:no_candidate_validated"
-            ));
-        }
-    }
-
-    if batch.is_empty() {
-        return false;
-    }
-
-    let paths = build_attach_paths(&batch, active_snapshot);
-    let status = apply_attach_paths(&paths, active_snapshot);
-    diagnostics::log(format!(
-        "recover:explicit_attach:batch={}:apply={status}",
-        batch.len()
-    ));
-    status == 0
-}
-
 /// Best-effort undo of a recovery that did not pan out. Both the explicit attach and the extend
 /// change (and persist) the topology, so leaving them in place would silently rewrite the user's
 /// setup on a failed attach. Re-applying the pre-recovery layout works because its enabled set
 /// only covers the previously active outputs, and apply's `unwrap_or(false)` disables everything
 /// the recovery added.
 fn restore_pre_extend_topology(previous: &TopologySnapshot) -> Result<(), ManagerError> {
-    apply_layout_against_snapshot(&previous.layout, previous).map(|_| ())
+    apply_layout_against_snapshot(&previous.layout, previous)
+        .or_else(|initial| {
+            let connected = query_connected_topology()?;
+            let desired = remap_layout_display_ids_for_snapshot(
+                &previous.layout,
+                &connected.layout,
+                &raw_path_connectors(&connected.raw),
+            );
+            let recovered = recover_layout(&desired, &connected).map_err(|error| {
+                ManagerError::Backend(format!("{initial}; rollback reconnect failed: {error}"))
+            })?;
+            apply_layout_against_snapshot(&desired, &recovered)
+        })
+        .map(|_| ())
 }
 
 /// The pre-recovery topology is the ONLY rollback net on a machine with no internal panel, so it
@@ -1144,32 +1079,25 @@ fn finish_recovery(
 
 fn recover_apply_with_topology_extend(
     working_layout: &Layout,
-    missing: &[&monarch::OutputConfig],
-    active_snapshot: &TopologySnapshot,
 ) -> Result<(TopologySnapshot, Layout), ManagerError> {
     // Every recovery step actually attempted, so the final error can name them honestly.
     let mut attempted: Vec<&str> = Vec::new();
 
-    // (a) Explicit attach: activates these exact targets from their own enumerated paths, the
-    // way Windows Display settings does. SDC_TOPOLOGY_EXTEND cannot substitute for it — it
-    // replays the last extended configuration from the persistence database, and a Monarch
-    // detach (saved with SDC_SAVE_TO_DATABASE) already removed this display from that entry.
-    if try_batch_explicit_attach(missing, active_snapshot) {
-        attempted.push("an explicit attach");
-        // A 0 from SetDisplayConfig only means "accepted", never "the display is back": confirm
-        // against a fresh enumeration, and keep escalating if it did not actually return.
-        match settle_poll(working_layout, ATTACH_SETTLE_DEADLINE, "attach") {
-            Ok(SettleOutcome::Settled(snapshot, layout)) => {
-                diagnostics::log("recover:resolved:explicit_attach");
-                return finish_recovery(snapshot, layout);
-            }
-            Ok(SettleOutcome::StillMissing(_)) => {
-                diagnostics::log("recover:attach_not_observed:escalating");
-            }
-            Err(error) => {
-                return Err(error);
-            }
-        }
+    // Select a complete one-source-per-target assignment from fresh alternatives.
+    // Do not splice QDC_ALL_PATHS routes directly into the cached topology.
+    attempted.push("an explicit topology assignment");
+    let explicit = query_connected_topology().and_then(|connected| {
+        let desired = remap_layout_display_ids_for_snapshot(
+            working_layout,
+            &connected.layout,
+            &raw_path_connectors(&connected.raw),
+        );
+        let recovered = recover_layout(&desired, &connected)?;
+        finish_recovery(recovered, desired)
+    });
+    match explicit {
+        Ok(result) => return Ok(result),
+        Err(error) => diagnostics::log(format!("recover:explicit_assignment_failed:{error}")),
     }
 
     // (b) CCD topology extend. Its status cannot judge success (0 is also returned for a no-op),
@@ -1235,13 +1163,6 @@ fn unique_unused_candidates_by_target_id<'a>(
         .filter(|candidate| candidate.display_id.target_id == target_id)
         .filter(|candidate| !used.contains(&candidate.display_id))
         .collect()
-}
-
-fn is_set_display_invalid_parameter(error: &ManagerError) -> bool {
-    matches!(
-        error,
-        ManagerError::Backend(message) if message.contains("SetDisplayConfig failed: 87")
-    )
 }
 
 fn best_effort_persist_raw_snapshot(raw: &RawTopologySnapshot) {
@@ -1366,5 +1287,258 @@ mod recovery_verification_tests {
         assert_eq!(enabled_outputs_missing_from_raw(&desired, &raw).len(), 1);
         raw.paths[0].flags = DISPLAYCONFIG_PATH_ACTIVE_FLAG;
         assert!(enabled_outputs_missing_from_raw(&desired, &raw).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monarch::{OutputConfig, Position, Resolution};
+    use windows::Win32::Devices::Display::{DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO};
+
+    fn output(adapter: u64, target: u32, enabled: bool) -> OutputConfig {
+        OutputConfig {
+            display_id: DisplayId {
+                adapter_luid: adapter,
+                target_id: target,
+                edid_hash: Some(10_000 + target as u64),
+            },
+            enabled,
+            position: Position {
+                x: (target as i32 - 1) * 1920,
+                y: 0,
+            },
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            refresh_rate_mhz: 60_000,
+            primary: target == 1 && enabled,
+        }
+    }
+
+    fn snapshot(adapter: u64, targets: &[u32]) -> TopologySnapshot {
+        let mut paths = Vec::new();
+        let mut modes = Vec::new();
+        for (source, target) in targets.iter().copied().enumerate() {
+            let mut path = DISPLAYCONFIG_PATH_INFO::default();
+            path.sourceInfo.adapterId.HighPart = (adapter >> 32) as i32;
+            path.sourceInfo.adapterId.LowPart = adapter as u32;
+            path.sourceInfo.id = source as u32;
+            path.sourceInfo.Anonymous.modeInfoIdx = modes.len() as u32;
+            path.targetInfo.adapterId = path.sourceInfo.adapterId;
+            path.targetInfo.id = target;
+            path.targetInfo.Anonymous.modeInfoIdx = modes.len() as u32 + 1;
+            path.flags = 1;
+            paths.push(path);
+            for id in [source as u32, target] {
+                let mut mode = DISPLAYCONFIG_MODE_INFO::default();
+                mode.id = id;
+                mode.adapterId = path.targetInfo.adapterId;
+                modes.push(mode);
+            }
+        }
+        TopologySnapshot {
+            raw: RawTopologySnapshot { paths, modes },
+            layout: Layout {
+                outputs: targets
+                    .iter()
+                    .map(|target| output(adapter, *target, true))
+                    .collect(),
+            },
+            displays: Vec::new(),
+            attachable: Vec::new(),
+        }
+    }
+
+    fn raw_targets(snapshot: &TopologySnapshot) -> Vec<u32> {
+        snapshot
+            .raw
+            .paths
+            .iter()
+            .map(|path| path.targetInfo.id)
+            .collect()
+    }
+
+    #[test]
+    fn cached_four_monitor_paths_survive_two_sequential_detaches() {
+        let original = snapshot(1, &[1, 2, 3, 4]);
+        let after_first_detach = merge_snapshot_for_cache(Some(&original), snapshot(1, &[1, 2, 3]));
+        let after_second_detach =
+            merge_snapshot_for_cache(Some(&after_first_detach), snapshot(1, &[1, 2]));
+
+        assert_eq!(after_first_detach.layout.enabled_output_count(), 3);
+        assert_eq!(after_second_detach.layout.enabled_output_count(), 2);
+        assert_eq!(raw_targets(&after_second_detach), vec![1, 2, 3, 4]);
+        assert_eq!(
+            after_second_detach.raw.modes.len(),
+            original.raw.modes.len()
+        );
+        for (previous, retained) in original
+            .raw
+            .paths
+            .iter()
+            .zip(&after_second_detach.raw.paths)
+        {
+            assert_eq!(previous.sourceInfo.id, retained.sourceInfo.id);
+            assert_eq!(
+                unsafe { previous.sourceInfo.Anonymous.modeInfoIdx },
+                unsafe { retained.sourceInfo.Anonymous.modeInfoIdx },
+            );
+            assert_eq!(
+                unsafe { previous.targetInfo.Anonymous.modeInfoIdx },
+                unsafe { retained.targetInfo.Anonymous.modeInfoIdx },
+            );
+        }
+        assert!(raw_covers_active_outputs_raw(
+            &after_second_detach.raw,
+            &original.layout
+        ));
+    }
+
+    #[test]
+    fn cached_paths_are_replaced_when_the_active_adapter_changes() {
+        let original = snapshot(1, &[1, 2, 3, 4]);
+        let fresh = snapshot(0xfedc_ba98_0000_0009, &[1, 2]);
+        let expected_layout = fresh.layout.clone();
+
+        let merged = merge_snapshot_for_cache(Some(&original), fresh);
+
+        assert_eq!(raw_targets(&merged), vec![1, 2]);
+        assert!(raw_covers_active_outputs_raw(&merged.raw, &expected_layout));
+        assert!(!raw_covers_active_outputs_raw(
+            &merged.raw,
+            &original.layout
+        ));
+    }
+
+    #[test]
+    fn persisted_paths_restore_attach_routes_without_enabling_inactive_inventory() {
+        let persisted = snapshot(1, &[1, 2, 3, 4]);
+        let mut fresh = snapshot(1, &[1, 2]);
+        fresh
+            .layout
+            .outputs
+            .extend([output(1, 3, false), output(1, 4, false)]);
+
+        let merged = merge_persisted_raw_for_fresh(&fresh, &persisted.raw).unwrap();
+
+        assert_eq!(merged.layout.outputs.len(), 4);
+        assert_eq!(merged.layout.enabled_output_count(), 2);
+        assert_eq!(raw_targets(&merged), vec![1, 2, 3, 4]);
+        assert!(raw_covers_active_outputs_raw(
+            &merged.raw,
+            &persisted.layout
+        ));
+    }
+
+    #[test]
+    fn saved_profile_remaps_connected_inactive_targets_after_adapter_change() {
+        let desired = Layout {
+            outputs: (1..=4).map(|target| output(1, target, true)).collect(),
+        };
+        let mut connected = desired.clone();
+        for output in &mut connected.outputs {
+            output.display_id.adapter_luid = 0xfedc_ba98_0000_0009;
+            output.display_id.target_id += 100;
+            output.enabled = output.display_id.target_id <= 102;
+        }
+
+        let remapped = remap_layout_display_ids_for_snapshot(
+            &desired,
+            &connected,
+            &connected
+                .outputs
+                .iter()
+                .map(|o| (o.display_id.adapter_luid, o.display_id.target_id))
+                .collect(),
+        );
+
+        assert_eq!(remapped.enabled_output_count(), 4);
+        assert!(desired_enables_inactive_output(&remapped, &connected));
+        for ((saved, fresh), actual) in desired
+            .outputs
+            .iter()
+            .zip(&connected.outputs)
+            .zip(&remapped.outputs)
+        {
+            assert_eq!(actual.display_id, fresh.display_id);
+            let mut expected = saved.clone();
+            expected.display_id = fresh.display_id.clone();
+            assert_eq!(actual, &expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod hardware_tests {
+    use super::*;
+
+    struct RestoreOnDrop(TopologySnapshot);
+
+    impl Drop for RestoreOnDrop {
+        fn drop(&mut self) {
+            if let Err(error) = restore_pre_extend_topology(&self.0) {
+                eprintln!("Hardware test cleanup failed: {error}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "Changes real displays. Run explicitly on a local console with at least three active monitors."]
+    fn restores_two_detached_monitors_after_cold_start_with_incomplete_cache() {
+        let original = query_active_only_topology().expect("local console display inventory");
+        assert!(original.layout.enabled_output_count() >= 3);
+        let _restore = RestoreOnDrop(original.clone());
+        let backend = WindowsDisplayBackend::new().unwrap();
+        let targets: Vec<_> = original
+            .layout
+            .outputs
+            .iter()
+            .filter(|o| o.enabled && !o.primary)
+            .take(2)
+            .map(|o| o.display_id.clone())
+            .collect();
+        let mut reduced = original.layout.clone();
+        // Two consecutive detaches used to discard paths from the richer cache.
+        for target in targets {
+            reduced
+                .outputs
+                .iter_mut()
+                .find(|o| o.display_id == target)
+                .unwrap()
+                .enabled = false;
+            backend.apply_layout(reduced.clone()).unwrap();
+        }
+        drop(backend);
+
+        // Start a new backend and then replace its cached routes with only the active set.
+        // Discovery must still enumerate physically connected but inactive displays.
+        let backend = WindowsDisplayBackend::new().unwrap();
+        let inventory = backend.list_displays().unwrap();
+        assert!(original
+            .layout
+            .outputs
+            .iter()
+            .all(|o| inventory.iter().any(|d| d.id == o.display_id)));
+        backend.cache.lock().unwrap().last_snapshot = Some(query_active_only_topology().unwrap());
+        backend.apply_layout(original.layout.clone()).unwrap();
+        let restored = query_active_only_topology().unwrap();
+        monarch::verification::verify_applied_layout(&original.layout, &restored.layout).unwrap();
+        for expected in &original.layout.outputs {
+            let actual = restored
+                .layout
+                .outputs
+                .iter()
+                .find(|o| o.display_id == expected.display_id)
+                .unwrap();
+            assert_eq!(actual.position, expected.position);
+            assert_eq!(actual.resolution, expected.resolution);
+            assert_eq!(actual.primary, expected.primary);
+        }
+        println!(
+            "Restored all {} active monitors after sequential detaches and a cold cache.",
+            restored.layout.enabled_output_count()
+        );
     }
 }

@@ -1,6 +1,6 @@
 #![cfg(target_os = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -33,21 +33,89 @@ use windows::Win32::UI::ColorSystem::{
 };
 use windows::Win32::UI::Shell::{DesktopWallpaper, IDesktopWallpaper, DESKTOP_WALLPAPER_POSITION};
 
-use super::win32_types::{luid_to_u64, AttachablePath, TopologySnapshot};
+use super::win32_types::{luid_to_u64, TopologySnapshot};
 
 const DISPLAYCONFIG_PATH_ACTIVE_FLAG: u32 = 0x0000_0001;
-/// `DISPLAYCONFIG_PATH_MODE_IDX_INVALID`: "no mode supplied, let Windows pick one".
-const DISPLAYCONFIG_PATH_MODE_IDX_INVALID: u32 = 0xffff_ffff;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const GAMMA_RAMP_WORDS: usize = 3 * 256;
 pub(super) type GammaRampKey = (u64, u32);
 pub(super) type GammaRampWords = [u16; GAMMA_RAMP_WORDS];
+
+fn enabled_targets(layout: &Layout) -> HashSet<(u64, u32)> {
+    layout
+        .outputs
+        .iter()
+        .filter(|o| o.enabled)
+        .map(|o| (o.display_id.adapter_luid, o.display_id.target_id))
+        .collect()
+}
+
+fn ensure_requested_paths(
+    desired: &Layout,
+    snapshot: &TopologySnapshot,
+) -> Result<(), ManagerError> {
+    for target in enabled_targets(desired) {
+        let count = snapshot
+            .raw
+            .paths
+            .iter()
+            .filter(|p| path_target_key(p) == target)
+            .count();
+        if count != 1 {
+            return Err(ManagerError::Backend(format!(
+                "display {} has {count} cached paths; fresh connection discovery is required",
+                target.1
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn verify_requested_outputs(
+    desired: &Layout,
+    actual: &Layout,
+) -> Result<(), ManagerError> {
+    let expected = enabled_targets(desired);
+    let observed = enabled_targets(actual);
+    if expected != observed {
+        let mut missing: Vec<_> = expected
+            .difference(&observed)
+            .map(|(_, target)| *target)
+            .collect();
+        let mut unexpected: Vec<_> = observed
+            .difference(&expected)
+            .map(|(_, target)| *target)
+            .collect();
+        missing.sort_unstable();
+        unexpected.sort_unstable();
+        return Err(ManagerError::Backend(format!(
+            "Windows did not apply the complete display layout (missing: {missing:?}, unexpected: {unexpected:?})"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn wait_for_requested_outputs(
+    desired: &Layout,
+) -> Result<TopologySnapshot, ManagerError> {
+    // Some drivers publish their new topology a little after SetDisplayConfig succeeds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let snapshot = super::enumerate::query_active_only_topology()?;
+        match verify_requested_outputs(desired, &snapshot.layout) {
+            Ok(()) => return Ok(snapshot),
+            Err(error) if std::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+}
 
 pub fn apply_layout_against_snapshot(
     desired: &Layout,
     snapshot: &TopologySnapshot,
 ) -> Result<TopologySnapshot, ManagerError> {
     desired.ensure_valid()?;
+    ensure_requested_paths(desired, snapshot)?;
     let saved_gamma_ramps = capture_active_gamma_ramps(snapshot);
     let saved_wallpapers = capture_active_wallpapers(snapshot);
     let saved_wallpaper_position = capture_wallpaper_position();
@@ -123,77 +191,6 @@ pub fn apply_layout_against_snapshot(
     best_effort_restore_wallpapers(&next_snapshot, &saved_wallpapers);
     best_effort_restore_wallpaper_position(saved_wallpaper_position);
     Ok(next_snapshot)
-}
-
-/// Add the candidate targets to the active topology, keeping known modes intact.
-/// All candidates are submitted together because each apply replaces the topology.
-pub(super) fn build_attach_paths(
-    candidates: &[&AttachablePath],
-    active_snapshot: &TopologySnapshot,
-) -> Vec<DISPLAYCONFIG_PATH_INFO> {
-    let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = active_snapshot
-        .raw
-        .paths
-        .iter()
-        .filter(|path| path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG != 0)
-        .copied()
-        .collect();
-    if paths.is_empty() {
-        return Vec::new();
-    }
-
-    for candidate in candidates {
-        let mut next = candidate.path;
-        next.flags |= DISPLAYCONFIG_PATH_ACTIVE_FLAG;
-        next.sourceInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
-        next.targetInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
-        paths.push(next);
-    }
-    paths
-}
-
-/// Permit Windows to compute modes for newly attached targets.
-fn attach_flags() -> windows::Win32::Devices::Display::SET_DISPLAY_CONFIG_FLAGS {
-    SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES
-}
-
-/// Dry-run: SDC_VALIDATE changes nothing, so it is free to call and mandatory before applying —
-/// this runs on desktops with no internal panel, where a bad apply leaves no rescue screen.
-/// Returns the raw SetDisplayConfig status (0 = the configuration is accepted).
-pub(super) fn validate_attach_paths(
-    paths: &[DISPLAYCONFIG_PATH_INFO],
-    active_snapshot: &TopologySnapshot,
-) -> i32 {
-    if paths.is_empty() {
-        return -1;
-    }
-    unsafe {
-        SetDisplayConfig(
-            Some(paths),
-            Some(active_snapshot.raw.modes.as_slice()),
-            SDC_VALIDATE | attach_flags(),
-        )
-    }
-}
-
-/// Apply a path array previously accepted by `validate_attach_paths`. Returns the raw status.
-/// NOTE: a 0 here does NOT prove any display came back — SetDisplayConfig returns 0 for a no-op
-/// on an unchanged active set. The caller must confirm against a fresh enumeration.
-pub(super) fn apply_attach_paths(
-    paths: &[DISPLAYCONFIG_PATH_INFO],
-    active_snapshot: &TopologySnapshot,
-) -> i32 {
-    let validation = validate_attach_paths(paths, active_snapshot);
-    if validation != 0 {
-        return validation;
-    }
-    unsafe {
-        SetDisplayConfig(
-            Some(paths),
-            Some(active_snapshot.raw.modes.as_slice()),
-            SDC_APPLY | attach_flags(),
-        )
-    }
 }
 
 /// Replay the saved extended topology. Validate first; the caller must still observe
@@ -806,5 +803,120 @@ fn set_wallpaper_for_monitor(
                 PCWSTR(wallpaper_wide.as_ptr()),
             )
             .is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::win32_types::RawTopologySnapshot;
+    use super::*;
+    use monarch::{DisplayId, OutputConfig, Position, Resolution};
+
+    fn layout(targets: &[u32]) -> Layout {
+        Layout {
+            outputs: targets
+                .iter()
+                .enumerate()
+                .map(|(index, target)| OutputConfig {
+                    display_id: DisplayId {
+                        adapter_luid: 1,
+                        target_id: *target,
+                        edid_hash: Some(*target as u64),
+                    },
+                    enabled: true,
+                    position: Position {
+                        x: index as i32 * 1920,
+                        y: 0,
+                    },
+                    resolution: Resolution {
+                        width: 1920,
+                        height: 1080,
+                    },
+                    refresh_rate_mhz: 60_000,
+                    primary: index == 0,
+                })
+                .collect(),
+        }
+    }
+
+    fn snapshot(targets: &[u32]) -> TopologySnapshot {
+        TopologySnapshot {
+            raw: RawTopologySnapshot {
+                paths: targets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, target)| {
+                        let mut path = DISPLAYCONFIG_PATH_INFO::default();
+                        path.sourceInfo.adapterId.LowPart = 1;
+                        path.sourceInfo.id = index as u32;
+                        path.targetInfo.adapterId.LowPart = 1;
+                        path.targetInfo.id = *target;
+                        path.flags = DISPLAYCONFIG_PATH_ACTIVE_FLAG;
+                        path
+                    })
+                    .collect(),
+                modes: Vec::new(),
+            },
+            layout: layout(targets),
+            displays: Vec::new(),
+            attachable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn verification_rejects_two_active_displays_when_four_were_requested() {
+        let error = verify_requested_outputs(&layout(&[1, 2, 3, 4]), &layout(&[1, 2])).unwrap_err();
+        assert!(error.to_string().contains("missing: [3, 4]"));
+    }
+
+    #[test]
+    fn verification_rejects_wrong_targets_even_when_active_count_matches() {
+        let error =
+            verify_requested_outputs(&layout(&[1, 2, 3, 4]), &layout(&[1, 2, 3, 5])).unwrap_err();
+        assert!(error.to_string().contains("missing: [4]"));
+        assert!(error.to_string().contains("unexpected: [5]"));
+    }
+
+    #[test]
+    fn verification_rejects_a_display_that_remained_active_despite_disable() {
+        let mut desired = layout(&[1, 2, 3, 4]);
+        desired.outputs[3].enabled = false;
+        let error = verify_requested_outputs(&desired, &layout(&[1, 2, 3, 4])).unwrap_err();
+        assert!(error.to_string().contains("unexpected: [4]"));
+    }
+
+    #[test]
+    fn verification_accepts_all_four_requested_displays_in_any_order() {
+        assert!(verify_requested_outputs(&layout(&[1, 2, 3, 4]), &layout(&[4, 3, 2, 1])).is_ok());
+    }
+
+    #[test]
+    fn verification_does_not_confuse_matching_target_ids_on_different_adapters() {
+        let desired = layout(&[1, 2]);
+        let mut actual = desired.clone();
+        actual.outputs[1].display_id.adapter_luid = 2;
+        assert!(verify_requested_outputs(&desired, &actual).is_err());
+    }
+
+    #[test]
+    fn preflight_rejects_missing_requested_raw_paths() {
+        assert!(ensure_requested_paths(&layout(&[1, 2, 3, 4]), &snapshot(&[1, 2])).is_err());
+    }
+
+    #[test]
+    fn preflight_rejects_duplicate_alternative_paths_for_requested_targets() {
+        assert!(ensure_requested_paths(&layout(&[1, 2]), &snapshot(&[1, 2, 2])).is_err());
+    }
+
+    #[test]
+    fn preflight_accepts_exactly_one_path_for_every_requested_target() {
+        assert!(ensure_requested_paths(&layout(&[1, 2, 3, 4]), &snapshot(&[1, 2, 3, 4])).is_ok());
+    }
+
+    #[test]
+    fn preflight_does_not_require_raw_paths_for_disabled_targets() {
+        let mut desired = layout(&[1, 2]);
+        desired.outputs[1].enabled = false;
+        assert!(ensure_requested_paths(&desired, &snapshot(&[1])).is_ok());
     }
 }
