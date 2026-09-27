@@ -159,11 +159,13 @@ capture defaults. Recovery captures/restores all observable playback roles separ
 A role with no previous endpoint is left to Windows; Monarch cannot force an absent
 default. Per-application device assignments, mute, and volume remain outside scope.
 
-`save_profile`, `set_profile_audio`, and `set_audio_output` IPC operations go through
+`save_profile` and `set_profile_audio` IPC operations go through
 the same manager as UI/tray/shortcut/startup/CLI profile application. Saving an audio
-preference never applies a layout or recaptures an existing profile. Manual switching
-uses the durable transaction and auto-confirms after verification. Audio-only profile
-application skips topology mutation and still uses confirmation.
+preference never applies a layout or recaptures an existing profile. Audio-only
+profile application skips topology mutation and still uses confirmation. The main
+page displays the observed console playback endpoint in the Layout Preview header;
+audio selection is confined to Profiles. Available and unavailable devices appear
+in separate alphabetical groups, including a retained unavailable saved endpoint.
 
 Before display/audio mutation, the manager saves the layout and each observed audio
 role in `pending_recovery` / `pending_recovery_audio`. It applies displays, waits up

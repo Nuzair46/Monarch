@@ -33,7 +33,7 @@ Monarch lets you:
 - Edit resolution, fractional refresh, orientation, HDR and supported scaling
 - Extend, duplicate or detach displays, including a duplicated pair beside an extended monitor
 - Save display layouts with an optional audio output per profile
-- Switch the Windows playback output from the main page
+- See the current audio output beside the layout preview
 - Restore the previous layout quickly
 - Recover automatically with a confirmation timeout if a layout change goes wrong
 - Easy apply with hotkeys
@@ -88,10 +88,11 @@ Real-device verification scenarios are listed in the [Windows hardware checklist
 
 ## Audio output and profiles
 
-Use **Audio output → Playback device → Switch output** on the main page to change
-Windows' default system/media playback output immediately.
+The **Layout Preview** header shows the current Windows playback device. Change
+it manually through Windows Sound settings.
 
-In **Profiles**, choose an **Audio output** when saving a layout, or change the
+In **Profiles**, outputs are grouped into **Available** and **Unavailable**,
+alphabetically within each group. Choose an **Audio output** when saving a layout, or change the
 output beneath an existing profile and choose **Save audio**. Saving does not change
 active displays or audio. **Leave unchanged** lets Windows manage audio when that
 profile is applied. Microphones, communications preferences, volume, and per-app
@@ -103,7 +104,7 @@ its HDMI output. Apply either profile from the app, tray, shortcut, or CLI. Mona
 changes displays first, waits up to five seconds for the selected audio endpoint,
 and verifies the default output before starting confirmation. Revert, timeout, and
 restart recovery restore the captured display settings and previous playback roles.
-The manual output switch and tray/shortcut/CLI profile actions confirm automatically.
+Tray/shortcut/CLI profile actions confirm automatically.
 
 Currently unavailable outputs are selectable for profiles, so a detached TV can
 be configured in advance. If an output does not become available, the profile

@@ -279,7 +279,6 @@ fn hdmi_selection_follows_topology_and_confirmation_restores_each_original_role(
         store.load().unwrap().pending_recovery_audio,
         Some(original_audio())
     );
-    assert!(manager.set_audio_output("music").is_err());
     assert!(manager.set_profile_audio("TV", None).is_err());
     manager.rollback_pending().unwrap();
     assert_eq!(backend.state.borrow().layout, desk());
@@ -299,7 +298,7 @@ fn confirmed_profile_can_restore_previous_layout_and_audio_later() {
 }
 
 #[test]
-fn audio_only_profile_and_manual_switch_do_not_reapply_the_topology() {
+fn audio_only_profile_does_not_reapply_the_topology() {
     let (mut manager, backend, _) = fixture();
     manager
         .save_profile_with_audio("Music", Some(output("music")))
@@ -307,7 +306,10 @@ fn audio_only_profile_and_manual_switch_do_not_reapply_the_topology() {
     manager.apply_profile("Music").unwrap();
     assert_eq!(backend.state.borrow().events, ["audio"]);
     manager.confirm_current_layout().unwrap();
-    manager.set_audio_output("headset").unwrap();
+    manager
+        .save_profile_with_audio("Headset", Some(output("headset")))
+        .unwrap();
+    manager.apply_profile("Headset").unwrap();
     manager.confirm_current_layout().unwrap();
     assert_eq!(backend.state.borrow().events, ["audio", "audio"]);
     assert_eq!(

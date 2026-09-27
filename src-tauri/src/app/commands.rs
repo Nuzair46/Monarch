@@ -152,11 +152,6 @@ pub async fn set_profile_audio<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn set_audio_output<R: Runtime>(app: AppHandle<R>, id: String) -> CommandResult<()> {
-    execute(&app, Operation::AudioOutput(id)).await
-}
-
-#[tauri::command]
 pub async fn delete_profile<R: Runtime>(app: AppHandle<R>, name: String) -> CommandResult<()> {
     execute(&app, Operation::DeleteProfile(name)).await
 }

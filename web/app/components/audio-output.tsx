@@ -1,12 +1,6 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Volume2 } from "lucide-react";
 import type { AudioOutput, AudioSnapshot, Profile } from "@/types";
 
 export function AudioOutputSelect({
@@ -15,7 +9,6 @@ export function AudioOutputSelect({
   saved,
   onChange,
   disabled,
-  activeOnly = false,
   label = "Audio output",
 }: {
   audio: AudioSnapshot;
@@ -23,7 +16,6 @@ export function AudioOutputSelect({
   saved?: AudioOutput | null;
   onChange: (id: string | null) => void;
   disabled: boolean;
-  activeOnly?: boolean;
   label?: string;
 }) {
   const devices = [...audio.devices].sort(
@@ -42,9 +34,7 @@ export function AudioOutputSelect({
         disabled={disabled}
         onChange={(event) => onChange(event.target.value || null)}
       >
-        <option value="">
-          {activeOnly ? "Select audio output" : "Leave unchanged"}
-        </option>
+        <option value="">Leave unchanged</option>
         {available.length > 0 && (
           <optgroup label="Available">
             {available.map((device) => (
@@ -62,7 +52,7 @@ export function AudioOutputSelect({
               </option>
             )}
             {unavailable.map((device) => (
-              <option key={device.id} value={device.id} disabled={activeOnly}>
+              <option key={device.id} value={device.id}>
                 {device.name} (unavailable)
               </option>
             ))}
@@ -73,70 +63,23 @@ export function AudioOutputSelect({
   );
 }
 
-export function AudioOutputCard({
-  audio,
-  disabled,
-  onApply,
-}: {
-  audio: AudioSnapshot;
-  disabled: boolean;
-  onApply: (id: string) => void;
-}) {
-  const [selected, setSelected] = useState(audio.defaults.console);
-  const available = audio.devices.some(
-    (device) => device.id === selected && device.available,
+export function CurrentAudioOutput({ audio }: { audio: AudioSnapshot }) {
+  const current = audio.devices.find(
+    (device) => device.id === audio.defaults.console,
   );
-  const changed =
-    selected !== audio.defaults.console ||
-    selected !== audio.defaults.multimedia;
+  const name = audio.unavailable_reason
+    ? "Unavailable"
+    : (current?.name ??
+      (audio.defaults.console ? "Device unavailable" : "No output device"));
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">Audio output</CardTitle>
-        <CardDescription>
-          Choose the Windows playback output for system sounds and media.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-2">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-          <div className="w-full sm:max-w-md">
-            <AudioOutputSelect
-              audio={audio}
-              value={selected}
-              onChange={setSelected}
-              activeOnly
-              disabled={disabled || Boolean(audio.unavailable_reason)}
-              label="Playback device"
-            />
-          </div>
-          <Button
-            disabled={
-              disabled ||
-              !available ||
-              !changed ||
-              Boolean(audio.unavailable_reason)
-            }
-            onClick={() => selected && onApply(selected)}
-          >
-            Switch output
-          </Button>
-        </div>
-        {audio.unavailable_reason ? (
-          <p className="text-sm text-muted-foreground">
-            {audio.unavailable_reason}
-          </p>
-        ) : !audio.devices.some((device) => device.available) ? (
-          <p className="text-sm text-muted-foreground">
-            No audio outputs are available. Connect or enable a device in
-            Windows Sound settings.
-          </p>
-        ) : null}
-        <p className="text-xs text-muted-foreground">
-          You can also choose an output for each profile. Apps with their own
-          device selection may keep using that device.
-        </p>
-      </CardContent>
-    </Card>
+    <p
+      role="status"
+      className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+      title={audio.unavailable_reason ?? name}
+    >
+      <Volume2 className="size-3.5 shrink-0" aria-hidden="true" />
+      <span className="truncate">Audio: {name}</span>
+    </p>
   );
 }
 

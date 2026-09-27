@@ -54,7 +54,6 @@ test("profile audio is saved independently, applied with displays, and reverted 
     (await mock.getSnapshot()).audio.defaults.communications,
     before.audio.defaults.communications,
   );
-  await assert.rejects(mock.setAudioOutput("speakers"));
   await assert.rejects(mock.setProfileAudio("Focus", null));
   await mock.rollbackPending();
   assert.deepEqual(
@@ -69,8 +68,9 @@ test("profile audio is saved independently, applied with displays, and reverted 
     (await mock.getSnapshot()).audio.defaults,
     before.audio.defaults,
   );
+  await mock.applyProfile("Focus");
+  await mock.confirmCurrentLayout();
   await mock.setProfileAudio("Focus", null);
-  await mock.setAudioOutput("headphones");
   assert.equal((await mock.getSnapshot()).pending_confirmation, null);
   await mock.applyProfile("Focus");
   assert.equal((await mock.getSnapshot()).audio.defaults.console, "headphones");
@@ -98,7 +98,6 @@ test("unavailable HDMI output may be saved and resolves after enabling its displ
     before.audio.defaults,
   );
   assert.equal((await mock.getSnapshot()).pending_confirmation, null);
-  await assert.rejects(mock.setAudioOutput("display-hdmi"));
   await assert.rejects(mock.setProfileAudio("Desk", "Speakers"));
   await mock.toggleDisplay(before.displays[2].id_key);
   await mock.confirmCurrentLayout();

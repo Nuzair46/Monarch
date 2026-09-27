@@ -493,25 +493,6 @@ where
         self.commit_config(next)
     }
 
-    pub fn set_audio_output(&mut self, id: &str) -> Result<(), ManagerError> {
-        self.ensure_no_pending_confirmation()?;
-        let snapshot = self.audio_snapshot()?;
-        if !snapshot
-            .devices
-            .iter()
-            .any(|device| device.output.id == id && device.available)
-        {
-            return Err(ManagerError::Validation(
-                "audio output is unavailable; connect or enable it in Windows Sound settings"
-                    .into(),
-            ));
-        }
-        self.apply_configuration(
-            self.backend.get_layout()?,
-            Some(AudioDefaults::playback(id)),
-        )
-    }
-
     /// Remap the desired layout onto the current enumeration and strictly validate it. An enabled
     /// output that does not resolve names a display the backend is not enumerating at all, so
     /// there is nothing to apply: the backend gets a chance to record why (it must not change the

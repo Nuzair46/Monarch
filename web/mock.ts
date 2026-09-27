@@ -520,12 +520,3 @@ export async function setProfileAudio(
   profile.audio_output = resolveAudio(id);
   emitMockStateChanged();
 }
-
-export async function setAudioOutput(id: string): Promise<void> {
-  ensureNoPending();
-  const previous = deepClone(mockState.audio.defaults);
-  selectAudio(id);
-  mockRestorableAudio = previous;
-  mockRestorableLayout = cloneLayout(mockState.layout);
-  emitMockStateChanged();
-}

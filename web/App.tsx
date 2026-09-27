@@ -36,7 +36,6 @@ import {
   rollbackPending,
   saveProfile,
   setProfileAudio,
-  setAudioOutput,
   toggleDisplay,
   updateSettings,
   type ReleaseUpdateCheckResult,
@@ -543,9 +542,6 @@ function App() {
           displayShortcutBase={
             snapshot?.settings.display_toggle_shortcut_base ?? null
           }
-          onSetAudioOutput={(id) => {
-            void runAction(() => setAudioOutput(id), "Audio output changed");
-          }}
           onApplyLayout={(layout) => runAction(() => applyLayout(layout))}
           onRestoreLastLayout={() => {
             void runAction(restoreLastLayout, "Restored last layout");

@@ -226,11 +226,6 @@ export async function setProfileAudio(
   return invoke("set_profile_audio", { name, audioOutputId });
 }
 
-export async function setAudioOutput(id: string): Promise<void> {
-  if (useWebMock) return mock.setAudioOutput(id);
-  return invoke("set_audio_output", { id });
-}
-
 export async function restoreLastLayout(): Promise<void> {
   if (useWebMock) {
     return mock.restoreLastLayout();
