@@ -60,7 +60,7 @@ It uses Windows display topology APIs (`DisplayConfig`) to change which outputs 
 Monarch 2.0 starts with a fresh configuration. Settings and profiles from 1.x are
 not supported or migrated; recreate profiles from your current desktop.
 
-Drag monitors in **Display layout** to arrange them. Dropped monitors snap to an
+Drag monitors in **Layout Preview** to arrange them. Dropped monitors snap to an
 adjoining edge; gaps and overlaps must be resolved before **Save layout**. This
 button applies positions only. **Discard changes** restores the preview without
 changing Windows. Arrow keys move a focused monitor; Shift makes larger adjustments.
@@ -86,11 +86,9 @@ audio output can be changed independently without recapturing the display layout
 
 Real-device verification scenarios are listed in the [Windows hardware checklist](docs/windows-hardware-checklist.md).
 
-The interface follows [PipeMic’s](https://github.com/Nuzair46/PipeMic) dark theme and compact controls. See the [UI preview](docs/ui-preview.md) for the Displays, Profiles and Settings pages.
-
 ## Audio output and profiles
 
-The **Display layout** footer shows the current Windows playback device. Change
+The **Layout Preview** header shows the current Windows playback device. Change
 it manually through Windows Sound settings.
 
 In **Profiles**, outputs are grouped into **Available** and **Unavailable**,

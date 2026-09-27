@@ -2,7 +2,6 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Shared with PipeMic: zinc surfaces, neutral controls and Windows typography. */
 :root {
   color-scheme: dark;
   --background: hsl(240 10% 3.9%);

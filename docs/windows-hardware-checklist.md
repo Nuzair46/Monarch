@@ -49,7 +49,7 @@ verify audible output. All scenarios below remain **unverified on real hardware*
 
 | Scenario | Procedure and expected result | Status |
 | --- | --- | --- |
-| Current output readout | Change playback devices in Windows Sound settings. The Display layout footer updates to the observed device. Apply, confirm, and revert profiles and verify that this label follows the resulting output. No output selector appears on the main page. | Unverified |
+| Current output readout | Change playback devices in Windows Sound settings. The Layout Preview header updates to the observed device. Apply, confirm, and revert profiles and verify that this label follows the resulting output. No output selector appears on the main page. | Unverified |
 | Profile save | Choose audio for a new profile. Change only an existing profile's audio and Save audio; verify its saved display layout and the active system remain unchanged. Cancel a draft. Available and unavailable outputs appear in separate alphabetical groups; inactive HDMI outputs remain selectable for profiles. | Unverified |
 | Desk ↔ TV | Start with the TV detached. Save/select its inactive HDMI endpoint and apply a TV profile. Verify the screen activates before audio switches and the full confirmation countdown starts afterward. Switch back to speakers. | Unverified |
 | Confirmation and timeout | Apply a combined display/audio profile, then Revert; repeat and let confirmation expire. All original playback roles and display properties return, including a separate communications device. | Unverified |

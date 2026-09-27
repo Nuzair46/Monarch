@@ -163,7 +163,7 @@ default. Per-application device assignments, mute, and volume remain outside sco
 the same manager as UI/tray/shortcut/startup/CLI profile application. Saving an audio
 preference never applies a layout or recaptures an existing profile. Audio-only
 profile application skips topology mutation and still uses confirmation. The main
-page displays the observed console playback endpoint in the Display layout footer;
+page displays the observed console playback endpoint in the Layout Preview header;
 audio selection is confined to Profiles. Available and unavailable devices appear
 in separate alphabetical groups, including a retained unavailable saved endpoint.
 
