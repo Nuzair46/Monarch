@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "build:msi": "tauri build --bundles msi -- --locked",
+    "build:msi:ci": "tauri build --config src-tauri/tauri.ci.conf.json --bundles msi -- --locked",
     "preview": "vite preview",
     "tauri": "tauri",
     "version:bump": "node tools/version-bump.mjs",
