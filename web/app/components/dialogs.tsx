@@ -31,7 +31,7 @@ export function PendingConfirmationDialog({
     <AlertDialog open={Boolean(pendingConfirmation)} onOpenChange={noop}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Confirm layout change</AlertDialogTitle>
+          <AlertDialogTitle>Confirm changes</AlertDialogTitle>
           <AlertDialogDescription>
             {pendingConfirmation ? (
               <>
@@ -39,7 +39,8 @@ export function PendingConfirmationDialog({
                 <span className="font-medium text-foreground">
                   {formatMs(pendingConfirmation.remaining_ms)}
                 </span>
-                . Confirm to keep this layout or revert now.
+                . Confirm to keep these display and audio settings or revert
+                now.
               </>
             ) : null}
           </AlertDialogDescription>
@@ -78,7 +79,10 @@ export function DisplayToggleDialog({
     : "will be added back to the active layout.";
 
   return (
-    <AlertDialog open={Boolean(pendingDisplayToggle)} onOpenChange={onOpenChange}>
+    <AlertDialog
+      open={Boolean(pendingDisplayToggle)}
+      onOpenChange={onOpenChange}
+    >
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>{title}</AlertDialogTitle>
@@ -122,7 +126,10 @@ export function DeleteProfileDialog({
   onConfirm,
 }: DeleteProfileDialogProps) {
   return (
-    <AlertDialog open={Boolean(pendingProfileDelete)} onOpenChange={onOpenChange}>
+    <AlertDialog
+      open={Boolean(pendingProfileDelete)}
+      onOpenChange={onOpenChange}
+    >
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Delete profile?</AlertDialogTitle>
@@ -130,8 +137,10 @@ export function DeleteProfileDialog({
             {pendingProfileDelete ? (
               <>
                 This will permanently delete the profile{" "}
-                <span className="font-medium text-foreground">{pendingProfileDelete}</span>.
-                This action cannot be undone.
+                <span className="font-medium text-foreground">
+                  {pendingProfileDelete}
+                </span>
+                . This action cannot be undone.
               </>
             ) : null}
           </AlertDialogDescription>

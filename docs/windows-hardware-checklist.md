@@ -1,10 +1,10 @@
-# Windows hardware acceptance: display profiles and settings
+# Windows hardware acceptance: displays and audio
 
 Status: **not exercised on physical Windows displays in this implementation environment**.
 Hosted Windows CI compiles and tests the EXE/MSI and pure/native planning code; it is
 not evidence that these hardware scenarios passed. Record Windows version, GPU/driver,
 monitor models/ports, observed results and logs alongside each completed scenario.
-Issue #8 is deferred. This PR prepares version 2.0.0; it does not publish a release.
+Issue #8 is deferred. These checks do not publish a release.
 
 Before testing, save the baseline as a profile and record its placement, resolution,
 refresh, rotation, HDR, scaling, primary source, wallpaper and color calibration.
@@ -37,3 +37,26 @@ monitors on a local console with at least three active monitors:
 ```powershell
 cargo test --locked --manifest-path src-tauri/Cargo.toml restores_two_detached_monitors_after_cold_start_with_incomplete_cache -- --ignored --nocapture
 ```
+
+## Audio acceptance — issues #28 and #34
+
+Record the initial console, multimedia, and communications playback devices
+separately, plus microphone defaults, volume, and any per-app device assignments.
+Use Windows Sound settings and a player following the Windows default output to
+verify audible output. All scenarios below remain **unverified on real hardware**.
+
+| Scenario | Procedure and expected result | Status |
+| --- | --- | --- |
+| Current output readout | Change playback devices in Windows Sound settings. The Layout Preview header updates to the observed device. Apply, confirm, and revert profiles and verify that this label follows the resulting output. No output selector appears on the main page. | Unverified |
+| Profile save | Choose audio for a new profile. Change only an existing profile's audio and Save audio; verify its saved display layout and the active system remain unchanged. Cancel a draft. Available and unavailable outputs appear in separate alphabetical groups; inactive HDMI outputs remain selectable for profiles. | Unverified |
+| Desk ↔ TV | Start with the TV detached. Save/select its inactive HDMI endpoint and apply a TV profile. Verify the screen activates before audio switches and the full confirmation countdown starts afterward. Switch back to speakers. | Unverified |
+| Confirmation and timeout | Apply a combined display/audio profile, then Revert; repeat and let confirmation expire. All original playback roles and display properties return, including a separate communications device. | Unverified |
+| Disconnected device | Unplug/disable the selected USB/HDMI output before Apply. After the bounded wait, verify an actionable error, prior display/audio recovery, and no silent fallback to a similarly named endpoint. Saved preference remains. | Unverified |
+| HDMI timing and hot-plug | Enable a cold HDMI TV/AV receiver, unplug during apply and confirmation, and reconnect. If its endpoint does not appear within five seconds, recovery is explicit; repeat after the device is ready. | Unverified |
+| Recovery failure and restart | Unplug the original audio device before rollback. The recovery journal remains. Restart Monarch, reconnect the device, and retry Revert; the original playback roles return and journals clear only on success. | Unverified |
+| Crash after apply | Terminate Monarch after a combined profile succeeds but before confirming, then restart. Original display and audio preferences are restored. | Unverified |
+| Confirmed restore | Confirm a profile, then Restore Last Layout. Both the previous display layout and associated audio defaults return. | Unverified |
+| Identity | Connect two same-name endpoints. Profiles continue to use the selected ID across restart and ordinary reconnect. After a driver reinstall replaces an ID, require reselection rather than guessing by name. | Unverified |
+| Audio service/support unavailable | Stop the audio service or use an environment without the PolicyConfig interface. Audio reports unavailable; display-only actions and clearing a profile audio choice remain usable. Audio-dependent apply must not mutate displays. | Unverified |
+| Other entry points | Apply audio profiles using tray, hotkey, startup profile, and `--profile`. Each switches audio after displays and confirms only after verification. Existing instance CLI routing behaves the same. | Unverified |
+| App routing | Compare an app following system defaults with one assigned a specific device. Only apps following the Windows default are expected to switch. | Unverified |

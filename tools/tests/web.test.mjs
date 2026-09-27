@@ -32,6 +32,98 @@ const { subscriptions } = await import(
   compiledModule("web/app/subscriptions.ts")
 );
 
+test("profile audio is saved independently, applied with displays, and reverted on timeout", async () => {
+  const mock = await import(
+    compiledModule("web/mock.ts", {
+      "@/app/ui": compiledModule("web/app/ui.ts"),
+      "@/app/display-editor": compiledModule("web/app/display-editor.ts"),
+    }) + "#audio"
+  );
+  const before = await mock.getSnapshot();
+  await mock.setProfileAudio("Focus", "headphones");
+  const saved = await mock.getSnapshot();
+  assert.deepEqual(saved.audio, before.audio);
+  assert.deepEqual(saved.layout, before.layout);
+  assert.deepEqual(
+    saved.profiles.find((p) => p.name === "Focus").layout,
+    before.profiles.find((p) => p.name === "Focus").layout,
+  );
+  await mock.applyProfile("Focus");
+  assert.equal((await mock.getSnapshot()).audio.defaults.console, "headphones");
+  assert.equal(
+    (await mock.getSnapshot()).audio.defaults.communications,
+    before.audio.defaults.communications,
+  );
+  await assert.rejects(mock.setProfileAudio("Focus", null));
+  await mock.rollbackPending();
+  assert.deepEqual(
+    (await mock.getSnapshot()).audio.defaults,
+    before.audio.defaults,
+  );
+  assert.deepEqual((await mock.getSnapshot()).layout, before.layout);
+  await mock.updateSettings({ ...before.settings, revert_timeout_secs: 1 });
+  await mock.applyProfile("Focus");
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  assert.deepEqual(
+    (await mock.getSnapshot()).audio.defaults,
+    before.audio.defaults,
+  );
+  await mock.applyProfile("Focus");
+  await mock.confirmCurrentLayout();
+  await mock.setProfileAudio("Focus", null);
+  assert.equal((await mock.getSnapshot()).pending_confirmation, null);
+  await mock.applyProfile("Focus");
+  assert.equal((await mock.getSnapshot()).audio.defaults.console, "headphones");
+  await mock.confirmCurrentLayout();
+});
+
+test("unavailable HDMI output may be saved and resolves after enabling its display", async () => {
+  const mock = await import(
+    compiledModule("web/mock.ts", {
+      "@/app/ui": compiledModule("web/app/ui.ts"),
+      "@/app/display-editor": compiledModule("web/app/display-editor.ts"),
+    }) + "#hdmi-audio"
+  );
+  const before = await mock.getSnapshot();
+  await mock.setProfileAudio("Desk", "display-hdmi");
+  assert.equal(
+    (await mock.getSnapshot()).profiles.find((p) => p.name === "Desk")
+      .audio_output.id,
+    "display-hdmi",
+  );
+  await assert.rejects(mock.applyProfile("Desk"), /unavailable/);
+  assert.deepEqual((await mock.getSnapshot()).layout, before.layout);
+  assert.deepEqual(
+    (await mock.getSnapshot()).audio.defaults,
+    before.audio.defaults,
+  );
+  assert.equal((await mock.getSnapshot()).pending_confirmation, null);
+  await assert.rejects(mock.setProfileAudio("Desk", "Speakers"));
+  await mock.toggleDisplay(before.displays[2].id_key);
+  await mock.confirmCurrentLayout();
+  await mock.saveProfile("HDMI", "display-hdmi");
+  assert.equal((await mock.getSnapshot()).audio.defaults.console, "speakers");
+  await mock.restoreLastLayout();
+  assert.equal(
+    (await mock.getSnapshot()).audio.devices.find(
+      (d) => d.id === "display-hdmi",
+    ).available,
+    false,
+  );
+  await mock.applyProfile("HDMI");
+  assert.equal(
+    (await mock.getSnapshot()).audio.defaults.console,
+    "display-hdmi",
+  );
+  await mock.confirmCurrentLayout();
+  await mock.restoreLastLayout();
+  assert.deepEqual(
+    (await mock.getSnapshot()).audio.defaults,
+    before.audio.defaults,
+  );
+  assert.deepEqual((await mock.getSnapshot()).layout, before.layout);
+});
+
 test("subscriptions dispose registrations that finish after unmount", async () => {
   let resolve;
   let calls = 0;

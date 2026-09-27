@@ -214,6 +214,7 @@ fn saved_profile_identity_is_not_replaced_by_a_different_panel_on_the_same_port(
     let backend = MockBackend::new(vec![], live).unwrap();
     let mut config = AppConfig::default();
     config.profiles.push(Profile {
+        audio_output: None,
         name: "Disconnected".into(),
         layout: old.clone(),
     });

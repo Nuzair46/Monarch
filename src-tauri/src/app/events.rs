@@ -351,16 +351,19 @@ mod tests {
             layout: LayoutDto { outputs: vec![] },
             profiles: vec![
                 ProfileDto {
+                    audio_output: None,
                     name: "Desk".into(),
                     layout: LayoutDto { outputs: vec![] },
                 },
                 ProfileDto {
+                    audio_output: None,
                     name: "TV".into(),
                     layout: LayoutDto { outputs: vec![] },
                 },
             ],
             settings: monarch::AppSettings::default(),
             capabilities: vec![],
+            audio: monarch::AudioSnapshot::default(),
             pending_confirmation: Some(PendingConfirmationDto { remaining_ms: 5000 }),
         }
     }

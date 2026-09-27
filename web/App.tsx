@@ -35,6 +35,7 @@ import {
   restoreLastLayout,
   rollbackPending,
   saveProfile,
+  setProfileAudio,
   toggleDisplay,
   updateSettings,
   type ReleaseUpdateCheckResult,
@@ -56,6 +57,7 @@ function App() {
     useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newProfileName, setNewProfileName] = useState("");
+  const [newProfileAudio, setNewProfileAudio] = useState<string | null>(null);
   const [revertTimeoutInput, setRevertTimeoutInput] = useState("10");
   const [startWithWindowsEnabled, setStartWithWindowsEnabled] = useState(false);
   const [startupProfileName, setStartupProfileName] = useState<string | null>(
@@ -208,27 +210,27 @@ function App() {
           const payload = event.payload;
 
           if (payload.kind === "applied") {
-            toast("Layout applied", {
+            toast("Settings applied", {
               description: `Confirm within ${formatMs(payload.timeout_ms)} or it will roll back.`,
             });
           }
 
           if (payload.kind === "confirmed") {
-            toast.success("Layout confirmed.");
+            toast.success("Settings confirmed.");
           }
 
           if (payload.kind === "rollback_failed") {
-            toast.error("Could not restore the previous layout", {
-              description: `${payload.message} Try Revert again, or use Windows Display Settings.`,
+            toast.error("Could not restore the previous settings", {
+              description: `${payload.message} Try Revert again, or check Windows Display and Sound settings.`,
             });
           }
 
           if (payload.kind === "reverted") {
-            toast("Layout reverted", {
+            toast("Settings reverted", {
               description:
                 payload.reason === "timeout"
                   ? "The rollback timer expired."
-                  : "The pending layout was reverted.",
+                  : "The pending settings were reverted.",
             });
           }
 
@@ -411,7 +413,8 @@ function App() {
 
   async function handleSaveCurrentLayout() {
     await runAction(async () => {
-      await saveProfile(newProfileName.trim());
+      await saveProfile(newProfileName.trim(), newProfileAudio);
+      setNewProfileAudio(null);
       setNewProfileName("");
     }, "Profile saved");
   }
@@ -563,6 +566,14 @@ function App() {
           }
           profileShortcutBase={snapshot?.settings.profile_shortcut_base ?? null}
           newProfileName={newProfileName}
+          newProfileAudio={newProfileAudio}
+          onNewProfileAudioChange={setNewProfileAudio}
+          onSaveProfileAudio={(name, id) => {
+            void runAction(
+              () => setProfileAudio(name, id),
+              "Profile audio saved",
+            );
+          }}
           onNewProfileNameChange={setNewProfileName}
           onSaveCurrentLayout={() => {
             void handleSaveCurrentLayout();

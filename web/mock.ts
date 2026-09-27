@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  AudioOutput,
   AppSnapshot,
   Layout,
   Profile,
@@ -15,6 +16,7 @@ type MockListener = (event: { payload: unknown }) => void;
 const mockListeners = new Map<string, Set<MockListener>>();
 let mockState = buildMockSnapshot();
 let mockRestorableLayout = cloneLayout(mockState.layout);
+let mockRestorableAudio = deepClone(mockState.audio.defaults);
 let confirmationDeadline: number | null = null;
 let confirmationTimer: ReturnType<typeof setTimeout> | undefined;
 function ensureNoPending(): void {
@@ -33,6 +35,7 @@ function revert(reason: "manual" | "timeout"): void {
   if (!mockState.pending_confirmation)
     throw new Error("no layout is awaiting confirmation");
   mockState.layout = cloneLayout(mockRestorableLayout);
+  mockState.audio.defaults = deepClone(mockRestorableAudio);
   clearPending();
   syncDisplaysFromLayout();
   emitMockEvent("monarch://confirmation", { kind: "reverted", reason });
@@ -66,6 +69,16 @@ function emitMockStateChanged(): void {
 }
 
 function syncDisplaysFromLayout(): void {
+  const hdmi = mockState.audio.devices.find(
+    (device) => device.id === "display-hdmi",
+  )!;
+  hdmi.available = mockState.layout.outputs[2]?.enabled ?? false;
+  if (!hdmi.available) {
+    for (const role of ["console", "multimedia", "communications"] as const) {
+      if (mockState.audio.defaults[role] === hdmi.id)
+        mockState.audio.defaults[role] = "speakers";
+    }
+  }
   const activeOutputs = new Map(
     mockState.layout.outputs.map((output) => [output.display_key, output]),
   );
@@ -123,7 +136,10 @@ function sanitizeShortcutMap(
   );
 }
 
-function replaceMockLayout(nextLayout: Layout): void {
+function replaceMockLayout(
+  nextLayout: Layout,
+  audioId: string | null = null,
+): void {
   ensureNoPending();
   const validatedLayout = cloneLayout(nextLayout);
   ensureMockLayoutValid(validatedLayout);
@@ -157,7 +173,20 @@ function replaceMockLayout(nextLayout: Layout): void {
       throw new Error("Unsupported scaling; choose Preserve scaling.");
   }
   mockRestorableLayout = cloneLayout(mockState.layout);
+  mockRestorableAudio = deepClone(mockState.audio.defaults);
   mockState.layout = validatedLayout;
+  syncDisplaysFromLayout();
+  if (audioId) {
+    try {
+      selectAudio(audioId);
+    } catch (error) {
+      mockState.layout = cloneLayout(mockRestorableLayout);
+      syncDisplaysFromLayout();
+      mockState.audio.defaults = deepClone(mockRestorableAudio);
+      emitMockStateChanged();
+      throw error;
+    }
+  }
   const timeout_ms = mockState.settings.revert_timeout_secs * 1000;
   confirmationDeadline = Date.now() + timeout_ms;
   mockState.pending_confirmation = { remaining_ms: timeout_ms };
@@ -262,10 +291,24 @@ function buildMockSnapshot(): AppSnapshot {
           ? null
           : "Scaling is unavailable while this monitor is detached.",
     })),
+    audio: {
+      devices: [
+        { id: "speakers", name: "Speakers", available: true },
+        { id: "headphones", name: "USB Headphones", available: true },
+        { id: "display-hdmi", name: "Display audio (HDMI)", available: false },
+      ],
+      defaults: {
+        console: "speakers",
+        multimedia: "speakers",
+        communications: "headphones",
+      },
+      unavailable_reason: null,
+    },
     profiles: [
-      { name: "Desk", layout: cloneLayout(layout) },
+      { name: "Desk", layout: cloneLayout(layout), audio_output: null },
       {
         name: "Focus",
+        audio_output: null,
         layout: {
           outputs: layout.outputs.map((output) => ({
             ...output,
@@ -336,7 +379,7 @@ export async function applyProfile(name: string): Promise<void> {
   if (!profile) {
     throw new Error(`Profile not found: ${name}`);
   }
-  replaceMockLayout(profile.layout);
+  replaceMockLayout(profile.layout, profile.audio_output?.id);
   return;
 }
 
@@ -348,7 +391,10 @@ export async function deleteProfile(name: string): Promise<void> {
   return;
 }
 
-export async function saveProfile(name: string): Promise<void> {
+export async function saveProfile(
+  name: string,
+  audioOutputId: string | null = null,
+): Promise<void> {
   ensureNoPending();
   const trimmed = name.trim();
   if (!trimmed) {
@@ -357,6 +403,7 @@ export async function saveProfile(name: string): Promise<void> {
   const nextProfile: Profile = {
     name: trimmed,
     layout: cloneLayout(mockState.layout),
+    audio_output: resolveAudio(audioOutputId),
   };
   const existingIndex = mockState.profiles.findIndex(
     (profile) => profile.name === trimmed,
@@ -377,11 +424,15 @@ export async function restoreLastLayout(): Promise<void> {
     return;
   }
   const current = cloneLayout(mockState.layout);
+  const currentAudio = deepClone(mockState.audio.defaults);
+  const targetAudio = deepClone(mockRestorableAudio);
   const nextLayout = cloneLayout(mockRestorableLayout);
   ensureMockLayoutValid(nextLayout);
   mockState.layout = nextLayout;
   mockRestorableLayout = current;
   syncDisplaysFromLayout();
+  mockState.audio.defaults = targetAudio;
+  mockRestorableAudio = currentAudio;
   emitMockStateChanged();
   return;
 }
@@ -434,4 +485,38 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
 
 export async function getDisplayCapabilities(): Promise<DisplayCapabilities[]> {
   return deepClone(mockState.capabilities);
+}
+
+function resolveAudio(id: string | null): AudioOutput | null {
+  if (!id) return null;
+  const device = mockState.audio.devices.find((device) => device.id === id);
+  if (!device)
+    throw new Error(
+      "Audio output not found; reconnect the device or select another output.",
+    );
+  return { id: device.id, name: device.name };
+}
+
+function selectAudio(id: string): void {
+  const device = mockState.audio.devices.find(
+    (device) => device.id === id && device.available,
+  );
+  if (!device)
+    throw new Error(
+      "Audio output unavailable; connect or enable the device, or select another output for this profile.",
+    );
+  mockState.audio.defaults.console = id;
+  mockState.audio.defaults.multimedia = id;
+}
+
+export async function setProfileAudio(
+  name: string,
+  id: string | null,
+): Promise<void> {
+  ensureNoPending();
+  const profile = findProfile(name);
+  if (!profile) throw new Error(`Profile not found: ${name}`);
+  if ((profile.audio_output?.id ?? null) === id) return;
+  profile.audio_output = resolveAudio(id);
+  emitMockStateChanged();
 }

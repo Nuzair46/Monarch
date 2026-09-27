@@ -91,6 +91,7 @@ pub fn run_app() {
             commands::toggle_display,
             commands::apply_layout,
             commands::save_profile,
+            commands::set_profile_audio,
             commands::apply_profile,
             commands::delete_profile,
             commands::restore_last_layout,

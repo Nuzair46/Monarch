@@ -11,6 +11,7 @@ use crate::model::{
 };
 use crate::store::ConfigStore;
 use crate::ManagerError;
+use crate::{AudioDefaults, AudioOutput, AudioSnapshot};
 
 #[derive(Clone, Debug)]
 struct PendingConfirmation {
@@ -141,6 +142,14 @@ where
     }
 
     pub fn apply_layout(&mut self, layout: Layout) -> Result<(), ManagerError> {
+        self.apply_configuration(layout, None)
+    }
+
+    fn apply_configuration(
+        &mut self,
+        layout: Layout,
+        audio: Option<AudioDefaults>,
+    ) -> Result<(), ManagerError> {
         self.ensure_no_pending_confirmation()?;
         let mut layout = layout;
         layout.normalize_clone_groups();
@@ -166,28 +175,69 @@ where
 
         layout.ensure_supported()?;
         current_layout.ensure_supported()?;
-        self.backend.validate_layout(&layout)?;
+        let display_changed = layout != current_layout;
+        if display_changed || audio.is_none() {
+            self.backend.validate_layout(&layout)?;
+        }
+        let previous_audio = match self.audio_snapshot() {
+            Ok(snapshot) if snapshot.unavailable_reason.is_none() => Some(snapshot.defaults),
+            result if audio.is_some() => {
+                return Err(ManagerError::Backend(match result {
+                    Ok(snapshot) => snapshot.unavailable_reason.unwrap(),
+                    Err(error) => error.to_string(),
+                }));
+            }
+            _ => None,
+        };
         let mut next = self.config.clone();
         next.last_known_good_layout = Some(current_layout.clone());
         next.last_restorable_layout = Some(current_layout.clone());
         next.pending_recovery = Some(current_layout.clone());
+        next.pending_recovery_audio = previous_audio.clone();
+        next.last_restorable_audio = previous_audio;
         self.commit_config(next)?;
         self.pending_confirmation = Some(PendingConfirmation::new(current_layout, Duration::ZERO));
-        match self.backend.apply_layout(layout) {
-            Ok(()) => {
-                if let Some(pending) = &mut self.pending_confirmation {
-                    pending.applied_at = Instant::now();
-                    pending.timeout = self.confirmation_timeout;
-                }
-            }
+        let display_result = if display_changed || audio.is_none() {
+            self.backend.apply_layout(layout)
+        } else {
+            Ok(())
+        };
+        match display_result {
+            Ok(()) => {}
             Err(error @ ManagerError::ApplyRestored(_)) => {
+                if let Some(previous) = &self.config.pending_recovery_audio {
+                    self.backend
+                        .set_audio_defaults(previous)
+                        .map_err(|audio_error| {
+                            ManagerError::RecoveryRequired(format!(
+                                "{error}; audio recovery failed: {audio_error}"
+                            ))
+                        })?;
+                }
                 let mut restored = self.config.clone();
                 restored.pending_recovery = None;
+                restored.pending_recovery_audio = None;
                 self.commit_config(restored)?;
                 self.pending_confirmation = None;
                 return Err(error);
             }
             Err(error) => return Err(ManagerError::RecoveryRequired(error.to_string())),
+        }
+        if let Some(audio) = audio {
+            if let Err(error) = self.backend.set_audio_defaults(&audio) {
+                return match self.rollback_pending() {
+                    Ok(()) => Err(ManagerError::ApplyRestored(error.to_string())),
+                    Err(recovery) => Err(ManagerError::RecoveryRequired(format!(
+                        "{error}; recovery failed: {recovery}"
+                    ))),
+                };
+            }
+        }
+        // HDMI audio may take time to appear. Start the user's full countdown
+        // only after both display and audio verification finish.
+        if let Some(pending) = &mut self.pending_confirmation {
+            pending.applied_at = Instant::now();
+            pending.timeout = self.confirmation_timeout;
         }
         Ok(())
     }
@@ -201,6 +251,7 @@ where
         let mut confirmed_config = self.config.clone();
         confirmed_config.last_known_good_layout = Some(current_layout);
         confirmed_config.pending_recovery = None;
+        confirmed_config.pending_recovery_audio = None;
         self.commit_config(confirmed_config)?;
         self.pending_confirmation = None;
         Ok(())
@@ -218,9 +269,13 @@ where
         // succeeded so the watchdog (or a manual retry) can recover from failures.
         let (previous_layout, _) = self.remap_and_resolve_for_apply(previous_layout)?;
         self.backend.apply_layout(previous_layout.clone())?;
+        if let Some(previous) = &self.config.pending_recovery_audio {
+            self.backend.set_audio_defaults(previous)?;
+        }
         let mut restored_config = self.config.clone();
         restored_config.last_known_good_layout = Some(previous_layout);
         restored_config.pending_recovery = None;
+        restored_config.pending_recovery_audio = None;
         self.commit_config(restored_config)?;
         self.pending_confirmation = None;
         Ok(())
@@ -294,7 +349,28 @@ where
     }
 
     pub fn save_profile(&mut self, name: impl Into<String>) -> Result<(), ManagerError> {
+        let name = name.into();
+        let audio = self
+            .config
+            .profiles
+            .iter()
+            .find(|p| p.name == name.trim())
+            .and_then(|p| p.audio_output.clone());
+        self.save_profile_with_audio(name, audio)
+    }
+
+    pub fn save_profile_with_audio(
+        &mut self,
+        name: impl Into<String>,
+        audio_output: Option<AudioOutput>,
+    ) -> Result<(), ManagerError> {
         self.ensure_no_pending_confirmation()?;
+        if audio_output
+            .as_ref()
+            .is_some_and(|output| !output.is_valid())
+        {
+            return Err(ManagerError::Validation("invalid audio output".into()));
+        }
 
         let name = name.into();
         let name = name.trim();
@@ -310,6 +386,7 @@ where
         let profile = Profile {
             name: name.to_string(),
             layout,
+            audio_output,
         };
 
         let mut next = self.config.clone();
@@ -357,11 +434,63 @@ where
 
         target_layout.ensure_supported()?;
         current_layout.ensure_supported()?;
-        if current_layout == target_layout {
+        let audio = profile
+            .audio_output
+            .as_ref()
+            .map(|output| AudioDefaults::playback(&output.id));
+        if current_layout == target_layout && audio.is_none() {
             return Ok(());
         }
 
-        self.apply_layout(target_layout)
+        self.apply_configuration(target_layout, audio)
+    }
+
+    pub fn audio_snapshot(&self) -> Result<AudioSnapshot, ManagerError> {
+        self.backend.audio_snapshot()
+    }
+
+    pub fn resolve_audio_output(
+        &self,
+        id: Option<&str>,
+    ) -> Result<Option<AudioOutput>, ManagerError> {
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let snapshot = self.audio_snapshot()?;
+        if let Some(reason) = snapshot.unavailable_reason {
+            return Err(ManagerError::Backend(reason));
+        }
+        snapshot
+            .devices
+            .into_iter()
+            .find(|device| device.output.id == id)
+            .map(|device| Some(device.output))
+            .ok_or_else(|| {
+                ManagerError::NotFound(
+                    "audio output; reconnect it and refresh the device list".into(),
+                )
+            })
+    }
+
+    pub fn set_profile_audio(&mut self, name: &str, id: Option<&str>) -> Result<(), ManagerError> {
+        self.ensure_no_pending_confirmation()?;
+        let mut next = self.config.clone();
+        let profile = next
+            .profiles
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or_else(|| ManagerError::NotFound(format!("profile '{name}'")))?;
+        // A disconnected saved endpoint remains selected until explicitly changed.
+        if profile
+            .audio_output
+            .as_ref()
+            .map(|output| output.id.as_str())
+            == id
+        {
+            return Ok(());
+        }
+        profile.audio_output = self.resolve_audio_output(id)?;
+        self.commit_config(next)
     }
 
     /// Remap the desired layout onto the current enumeration and strictly validate it. An enabled
@@ -465,7 +594,10 @@ where
         normalize_primary(&mut remapped_target_layout);
         let (remapped_target_layout, _) =
             self.remap_and_resolve_for_apply(remapped_target_layout)?;
-        self.apply_layout(remapped_target_layout)?;
+        self.apply_configuration(
+            remapped_target_layout,
+            self.config.last_restorable_audio.clone(),
+        )?;
         self.confirm_current_layout()
     }
 
@@ -1211,6 +1343,7 @@ mod tests {
         let profile_layout = sample_layout_on_adapter(1);
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                audio_output: None,
                 name: "dual".to_string(),
                 layout: profile_layout,
             }],
@@ -1296,6 +1429,7 @@ mod tests {
         .unwrap();
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                audio_output: None,
                 name: "work".to_string(),
                 layout: Layout {
                     outputs: vec![
@@ -1486,6 +1620,7 @@ mod tests {
         let backend = MockBackend::new(displays, layout).unwrap();
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                audio_output: None,
                 name: "dual".to_string(),
                 layout: Layout {
                     outputs: vec![
@@ -1533,6 +1668,7 @@ mod tests {
         let backend = MockBackend::new(displays, layout).unwrap();
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                audio_output: None,
                 name: "unidentified".to_string(),
                 layout: Layout {
                     outputs: vec![
@@ -1656,6 +1792,7 @@ mod tests {
         let backend = MockBackend::new(displays, layout).unwrap();
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                audio_output: None,
                 name: "twins".to_string(),
                 layout: Layout {
                     outputs: vec![
@@ -1705,6 +1842,7 @@ mod tests {
             CountingBackend::new(MockBackend::new(sample_displays(), sample_layout()).unwrap());
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                audio_output: None,
                 name: "PC".to_string(),
                 layout: Layout {
                     outputs: vec![
@@ -1746,6 +1884,7 @@ mod tests {
             CountingBackend::new(MockBackend::new(sample_displays(), sample_layout()).unwrap());
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                audio_output: None,
                 name: "ghost".to_string(),
                 layout: Layout {
                     outputs: vec![

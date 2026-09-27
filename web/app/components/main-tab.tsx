@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TabsContent } from "@/components/ui/tabs";
 import { LayoutPreview } from "@/app/components/layout-preview";
 import { MonitorCard } from "@/app/components/monitor-card";
+import { CurrentAudioOutput } from "./audio-output";
 import { DisplayProperties } from "./display-properties";
 import {
   arrangementDraft,
@@ -64,9 +65,12 @@ export function MainTab({
     <TabsContent value="main" className="mt-0">
       <main className="grid gap-4">
         <div className="w-full gap-4 lg:flex">
-          <Card className="lg:w-2/3">
+          <Card className="min-w-0 lg:w-2/3">
             <CardHeader className="gap-3 md:flex-row md:items-start md:justify-between">
-              <CardTitle className="text-base">Layout Preview</CardTitle>
+              <div className="min-w-0 flex-1 space-y-2">
+                <CardTitle className="text-base">Layout Preview</CardTitle>
+                <CurrentAudioOutput audio={snapshot.audio} />
+              </div>
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <Badge variant="outline">
                   {layout.outputs.filter((o) => o.enabled).length} active
