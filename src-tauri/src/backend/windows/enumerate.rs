@@ -136,8 +136,8 @@ fn seed_connected_inactive_displays(
         // Resolution/position are deliberately a 0x0 sentinel: QDC_ALL_PATHS only carries modes
         // for ACTIVE paths, so a source-mode lookup here would alias another display's geometry
         // (the source id of an inactive path points at a source that belongs to whoever is
-        // currently driving it). Downstream, the cache merge restores the last real geometry and
-        // the attach recovery fills it from the post-extend snapshot.
+        // currently driving it). History can restore the last observed geometry;
+        // otherwise the native planner asks Windows to resolve an automatic mode.
         let resolution = Resolution {
             width: 0,
             height: 0,

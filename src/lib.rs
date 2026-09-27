@@ -6,6 +6,7 @@ pub mod history;
 pub mod identity;
 pub mod manager;
 pub mod model;
+mod placement;
 pub mod store;
 pub mod transaction;
 pub mod verification;

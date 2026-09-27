@@ -1099,6 +1099,74 @@ mod tests {
     }
 
     #[test]
+    fn reattach_non_first_target_does_not_borrow_an_active_sources_mode() {
+        let mut snapshot = active_modes_for(&[10, 30, 50]);
+        let mut desired = snapshot.layout.clone();
+        desired.outputs[1].resolution = Resolution {
+            width: 1080,
+            height: 1920,
+        };
+        desired.outputs[1].rotation = Some(monarch::Rotation::Portrait);
+        desired.outputs[1].refresh_rate_mhz = 119_880;
+        snapshot.layout.outputs[1].enabled = false;
+        snapshot.layout.outputs[1].resolution = Resolution {
+            width: 0,
+            height: 0,
+        };
+        let mut inactive = snapshot.raw.paths.remove(1);
+        inactive.flags = 0;
+        // Inactive alternatives can alias active source indices. Only the
+        // requested target's history may supply its mode after reconnection.
+        for source in [2, 0, 1] {
+            inactive.sourceInfo.id = source;
+            inactive.sourceInfo.Anonymous.modeInfoIdx = source * 2;
+            snapshot.raw.paths.push(inactive);
+        }
+        snapshot.raw.paths.reverse();
+        let (paths, modes) = plan_layout(&desired, &snapshot).unwrap();
+        assert_eq!(paths.len(), 3);
+        assert_eq!(
+            paths
+                .iter()
+                .map(|p| p.sourceInfo.id)
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        let attached = paths.iter().find(|p| p.targetInfo.id == 30).unwrap();
+        assert_eq!(attached.sourceInfo.id, 1);
+        let source = unsafe {
+            modes[attached.sourceInfo.Anonymous.modeInfoIdx as usize]
+                .Anonymous
+                .sourceMode
+        };
+        assert_eq!((source.width, source.height), (1080, 1920));
+        assert_eq!((source.position.x, source.position.y), (1920, 0));
+        assert_eq!(attached.targetInfo.rotation.0, 2);
+        assert_eq!(
+            (
+                attached.targetInfo.refreshRate.Numerator,
+                attached.targetInfo.refreshRate.Denominator
+            ),
+            (119_880, 1000)
+        );
+        assert_eq!(
+            unsafe { attached.targetInfo.Anonymous.modeInfoIdx },
+            u32::MAX
+        );
+        for path in paths.iter().filter(|p| p.targetInfo.id != 30) {
+            assert_eq!(
+                (
+                    path.targetInfo.refreshRate.Numerator,
+                    path.targetInfo.refreshRate.Denominator
+                ),
+                (60_000, 1001)
+            );
+            assert_ne!(unsafe { path.targetInfo.Anonymous.modeInfoIdx }, u32::MAX);
+        }
+    }
+
+    #[test]
     fn joining_and_splitting_clones_supply_valid_timings_on_reassigned_sources() {
         let mut snapshot = active_modes_for(&[1, 2, 3]);
         // Make the second display's active mode different from the primary's.

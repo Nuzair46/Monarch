@@ -173,6 +173,9 @@ impl Controller {
             match receiver.recv_timeout(Duration::from_millis(50)) {
                 Ok(request) => {
                     let result = self.perform(&app, &mut manager, request.operation);
+                    if let Err(error) = &result {
+                        crate::diagnostics::log(format!("operation:failed:{error}"));
+                    }
                     if let Err(error) = self.publish(&manager) {
                         crate::diagnostics::log(format!("snapshot:failed:{error}"));
                     }

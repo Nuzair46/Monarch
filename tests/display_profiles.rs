@@ -89,6 +89,24 @@ fn capabilities_reject_missing_modes_hdr_and_scaling_without_rounding_refresh() 
     assert!(validate(&portrait, &supported).is_ok());
 }
 #[test]
+fn partial_mode_lists_defer_exact_mode_validation_to_the_native_backend() {
+    let l = layout();
+    let mut supported = caps(&l);
+    supported[1].modes[0].refresh_rate_mhz = 60_000;
+    supported[1].modes_unavailable_reason = Some("Detached monitor: partial mode list".into());
+    assert!(validate(&l, &supported).is_ok());
+    supported[1].modes.clear();
+    assert!(validate(&l, &supported).is_ok());
+    // An incomplete mode list does not relax identity, HDR, or scaling checks.
+    supported[1].hdr_enabled = None;
+    assert!(validate(&l, &supported).is_err());
+    supported[1].hdr_enabled = Some(false);
+    supported[1].scale_percentages.clear();
+    assert!(validate(&l, &supported).is_err());
+    supported.remove(1);
+    assert!(validate(&l, &supported).is_err());
+}
+#[test]
 fn clone_groups_share_primary_but_never_infer_membership_from_overlap() {
     let mut l = cloned();
     assert!(l.ensure_supported().is_ok());
