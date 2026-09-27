@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use crate::identity::{
+    remap_layout as remap_layout_display_ids, resolve, Resolution as IdentityResolution,
+};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::backend::DisplayBackend;
@@ -52,9 +55,17 @@ where
 {
     pub fn new(backend: B, store: S) -> Result<Self, ManagerError> {
         let mut config = store.load()?;
-        let current_layout = backend.get_layout()?;
-        let current_displays = backend.list_displays().unwrap_or_default();
-        let mut should_persist = false;
+        if config.schema_version > crate::model::CONFIG_SCHEMA_VERSION {
+            return Err(ManagerError::Validation(
+                "configuration was written by a newer Monarch version".into(),
+            ));
+        }
+        let migrated = config.schema_version != crate::model::CONFIG_SCHEMA_VERSION;
+        config.schema_version = crate::model::CONFIG_SCHEMA_VERSION;
+        let snapshot = backend.snapshot()?;
+        let current_layout = snapshot.layout;
+        let current_displays = snapshot.displays;
+        let mut should_persist = migrated;
         if config
             .settings
             .profile_shortcut_base
@@ -62,6 +73,7 @@ where
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .is_none()
+            && config.settings.profile_shortcuts.is_empty()
         {
             config.settings.profile_shortcut_base = Some(DEFAULT_PROFILE_SHORTCUT_BASE.to_string());
             should_persist = true;
@@ -73,6 +85,7 @@ where
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .is_none()
+            && config.settings.display_toggle_shortcuts.is_empty()
         {
             config.settings.display_toggle_shortcut_base =
                 Some(DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE.to_string());
@@ -92,28 +105,32 @@ where
         if sync_display_fingerprints(&mut config, &current_displays) {
             should_persist = true;
         }
-        if migrate_saved_layout_ids_with_fingerprints(
-            &mut config,
-            &current_layout,
-            &current_displays,
-        ) {
+        if migrate_saved_layout_ids_with_fingerprints(&mut config, &current_layout) {
             should_persist = true;
         }
         if should_persist {
             store.save(&config)?;
         }
 
+        let pending_confirmation = config
+            .pending_recovery
+            .clone()
+            .map(|layout| PendingConfirmation::new(layout, Duration::ZERO));
         Ok(Self {
             backend,
             store,
             config,
-            pending_confirmation: None,
+            pending_confirmation,
             confirmation_timeout,
         })
     }
 
     pub fn set_confirmation_timeout(&mut self, timeout: Duration) {
         self.confirmation_timeout = timeout;
+    }
+
+    pub fn snapshot(&self) -> Result<crate::DisplaySnapshot, ManagerError> {
+        self.backend.snapshot()
     }
 
     pub fn list_displays(&self) -> Result<Vec<DisplayInfo>, ManagerError> {
@@ -158,16 +175,31 @@ where
         layout.ensure_valid()?;
         normalize_primary(&mut layout);
 
-        let current_layout = self.backend.get_layout()?;
-        self.config.last_known_good_layout = Some(current_layout.clone());
-        self.config.last_restorable_layout = Some(current_layout.clone());
-        self.persist_config()?;
-
-        self.backend.apply_layout(layout)?;
-        self.pending_confirmation = Some(PendingConfirmation::new(
-            current_layout,
-            self.confirmation_timeout,
-        ));
+        let (layout, current_layout) = self.remap_and_resolve_for_apply(layout)?;
+        layout.ensure_supported()?;
+        current_layout.ensure_supported()?;
+        let mut next = self.config.clone();
+        next.last_known_good_layout = Some(current_layout.clone());
+        next.last_restorable_layout = Some(current_layout.clone());
+        next.pending_recovery = Some(current_layout.clone());
+        self.commit_config(next)?;
+        self.pending_confirmation = Some(PendingConfirmation::new(current_layout, Duration::ZERO));
+        match self.backend.apply_layout(layout) {
+            Ok(()) => {
+                if let Some(pending) = &mut self.pending_confirmation {
+                    pending.applied_at = Instant::now();
+                    pending.timeout = self.confirmation_timeout;
+                }
+            }
+            Err(error @ ManagerError::ApplyRestored(_)) => {
+                let mut restored = self.config.clone();
+                restored.pending_recovery = None;
+                self.commit_config(restored)?;
+                self.pending_confirmation = None;
+                return Err(error);
+            }
+            Err(error) => return Err(ManagerError::RecoveryRequired(error.to_string())),
+        }
         Ok(())
     }
 
@@ -179,6 +211,7 @@ where
         let current_layout = self.backend.get_layout()?;
         let mut confirmed_config = self.config.clone();
         confirmed_config.last_known_good_layout = Some(current_layout);
+        confirmed_config.pending_recovery = None;
         self.store.save(&confirmed_config)?;
         self.config = confirmed_config;
         self.pending_confirmation = None;
@@ -195,9 +228,11 @@ where
 
         // Keep the recovery target and its deadline until the rollback has fully
         // succeeded so the watchdog (or a manual retry) can recover from failures.
+        let (previous_layout, _) = self.remap_and_resolve_for_apply(previous_layout)?;
         self.backend.apply_layout(previous_layout.clone())?;
         let mut restored_config = self.config.clone();
         restored_config.last_known_good_layout = Some(previous_layout);
+        restored_config.pending_recovery = None;
         self.store.save(&restored_config)?;
         self.config = restored_config;
         self.pending_confirmation = None;
@@ -221,7 +256,17 @@ where
 
     pub fn toggle_display(&mut self, display_id: &DisplayId) -> Result<(), ManagerError> {
         let mut layout = self.backend.get_layout()?;
-        let resolved_display_id = resolve_display_id_for_layout_action(display_id, &layout)
+        let known = self
+            .config
+            .display_fingerprints
+            .iter()
+            .find(|f| {
+                f.display_id.endpoint() == display_id.endpoint()
+                    && f.display_id.edid_hash == display_id.edid_hash
+            })
+            .map(|f| &f.display_id)
+            .unwrap_or(display_id);
+        let resolved_display_id = resolve_display_id_for_layout_action(known, &layout)
             .unwrap_or_else(|| display_id.clone());
         let index = layout
             .find_output_index(&resolved_display_id)
@@ -259,25 +304,28 @@ where
             ));
         }
 
-        let layout = self.backend.get_layout()?;
+        let observed = self.backend.snapshot()?;
+        let layout = observed.layout;
+        layout.ensure_supported()?;
         let profile = Profile {
             name: name.to_string(),
             layout,
         };
 
-        if let Some(existing) = self
-            .config
+        let mut next = self.config.clone();
+        sync_display_fingerprints(&mut next, &observed.displays);
+        if let Some(existing) = next
             .profiles
             .iter_mut()
             .find(|candidate| candidate.name == profile.name)
         {
             *existing = profile;
         } else {
-            self.config.profiles.push(profile);
-            self.config.profiles.sort_by(|a, b| a.name.cmp(&b.name));
+            next.profiles.push(profile);
+            next.profiles.sort_by(|a, b| a.name.cmp(&b.name));
         }
 
-        self.persist_config()
+        self.commit_config(next)
     }
 
     pub fn list_profiles(&self) -> Vec<Profile> {
@@ -301,6 +349,8 @@ where
 
         let (target_layout, current_layout) = self.remap_and_resolve_for_apply(target_layout)?;
 
+        target_layout.ensure_supported()?;
+        current_layout.ensure_supported()?;
         if current_layout == target_layout {
             return Ok(());
         }
@@ -319,8 +369,22 @@ where
         target_layout: Layout,
     ) -> Result<(Layout, Layout), ManagerError> {
         let mut current_layout = self.backend.get_layout()?;
+        current_layout.ensure_valid()?;
         normalize_primary(&mut current_layout);
-        let target_layout = remap_layout_display_ids(&target_layout, &current_layout);
+        let mut target_layout = remap_layout_display_ids_with_fingerprints(
+            &target_layout,
+            &current_layout,
+            &self.config.display_fingerprints,
+        );
+        for output in &mut target_layout.outputs {
+            if output.rotation.is_none() {
+                output.rotation = current_layout
+                    .outputs
+                    .iter()
+                    .find(|o| o.display_id == output.display_id)
+                    .and_then(|o| o.rotation);
+            }
+        }
 
         if ensure_all_enabled_outputs_resolve(&target_layout, &current_layout).is_ok() {
             return Ok((target_layout, current_layout));
@@ -328,8 +392,22 @@ where
 
         self.backend.prepare_attach_targets(&target_layout)?;
         let mut current_layout = self.backend.get_layout()?;
+        current_layout.ensure_valid()?;
         normalize_primary(&mut current_layout);
-        let target_layout = remap_layout_display_ids(&target_layout, &current_layout);
+        let mut target_layout = remap_layout_display_ids_with_fingerprints(
+            &target_layout,
+            &current_layout,
+            &self.config.display_fingerprints,
+        );
+        for output in &mut target_layout.outputs {
+            if output.rotation.is_none() {
+                output.rotation = current_layout
+                    .outputs
+                    .iter()
+                    .find(|o| o.display_id == output.display_id)
+                    .and_then(|o| o.rotation);
+            }
+        }
         self.ensure_outputs_resolve_or_report_disconnected(&target_layout, &current_layout)?;
         Ok((target_layout, current_layout))
     }
@@ -353,6 +431,10 @@ where
             return Ok(());
         };
 
+        if let IdentityResolution::Ambiguous(candidates) = resolve(&unresolved.display_id, current)
+        {
+            return Err(ManagerError::Validation(format!("display identity is ambiguous ({} candidates); reconnect the intended monitor on its saved port or re-save the profile", candidates.len())));
+        }
         let edid_hash = unresolved
             .display_id
             .edid_hash
@@ -379,12 +461,13 @@ where
     }
 
     pub fn delete_profile(&mut self, name: &str) -> Result<(), ManagerError> {
-        let before = self.config.profiles.len();
-        self.config.profiles.retain(|profile| profile.name != name);
-        if self.config.profiles.len() == before {
+        let mut next = self.config.clone();
+        let before = next.profiles.len();
+        next.profiles.retain(|profile| profile.name != name);
+        if next.profiles.len() == before {
             return Err(ManagerError::NotFound(format!("profile '{name}'")));
         }
-        self.persist_config()
+        self.commit_config(next)
     }
 
     pub fn restore_last_layout(&mut self) -> Result<(), ManagerError> {
@@ -400,13 +483,10 @@ where
         let mut remapped_target_layout = target_layout;
         remapped_target_layout.ensure_valid()?;
         normalize_primary(&mut remapped_target_layout);
-        let (remapped_target_layout, current_layout) =
+        let (remapped_target_layout, _) =
             self.remap_and_resolve_for_apply(remapped_target_layout)?;
-        self.backend.apply_layout(remapped_target_layout.clone())?;
-        self.pending_confirmation = None;
-        self.config.last_restorable_layout = Some(current_layout);
-        self.config.last_known_good_layout = Some(remapped_target_layout);
-        self.persist_config()
+        self.apply_layout(remapped_target_layout)?;
+        self.confirm_current_layout()
     }
 
     pub fn settings(&self) -> &AppSettings {
@@ -414,7 +494,12 @@ where
     }
 
     pub fn update_settings(&mut self, settings: AppSettings) -> Result<(), ManagerError> {
-        let revert_timeout_secs = settings.revert_timeout_secs.max(1);
+        if !(1..=60).contains(&settings.revert_timeout_secs) {
+            return Err(ManagerError::Validation(
+                "revert timeout must be between 1 and 60 seconds".into(),
+            ));
+        }
+        let revert_timeout_secs = settings.revert_timeout_secs;
         let startup_profile_name = settings
             .startup_profile_name
             .as_deref()
@@ -427,15 +512,29 @@ where
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| DEFAULT_PROFILE_SHORTCUT_BASE.to_string());
+            .or_else(|| {
+                settings
+                    .profile_shortcuts
+                    .is_empty()
+                    .then(|| DEFAULT_PROFILE_SHORTCUT_BASE.to_string())
+            });
         let display_toggle_shortcut_base = settings
             .display_toggle_shortcut_base
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE.to_string());
-        if profile_shortcut_base.eq_ignore_ascii_case(&display_toggle_shortcut_base) {
+            .or_else(|| {
+                settings
+                    .display_toggle_shortcuts
+                    .is_empty()
+                    .then(|| DEFAULT_DISPLAY_TOGGLE_SHORTCUT_BASE.to_string())
+            });
+        if profile_shortcut_base
+            .as_ref()
+            .zip(display_toggle_shortcut_base.as_ref())
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
             return Err(ManagerError::Validation(
                 "profile and monitor shortcut bases must be different".to_string(),
             ));
@@ -464,18 +563,20 @@ where
                 Some((display_key.to_string(), shortcut.to_string()))
             })
             .collect();
-        self.confirmation_timeout = Duration::from_secs(revert_timeout_secs);
-        self.config.settings = AppSettings {
+        let mut next = self.config.clone();
+        next.settings = AppSettings {
             revert_timeout_secs,
             start_with_windows: settings.start_with_windows,
             startup_profile_name,
             global_shortcuts_enabled: settings.global_shortcuts_enabled,
-            profile_shortcut_base: Some(profile_shortcut_base),
-            display_toggle_shortcut_base: Some(display_toggle_shortcut_base),
+            profile_shortcut_base,
+            display_toggle_shortcut_base,
             profile_shortcuts,
             display_toggle_shortcuts,
         };
-        self.persist_config()
+        self.commit_config(next)?;
+        self.confirmation_timeout = Duration::from_secs(revert_timeout_secs);
+        Ok(())
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -489,8 +590,10 @@ where
         Ok(())
     }
 
-    fn persist_config(&self) -> Result<(), ManagerError> {
-        self.store.save(&self.config)
+    fn commit_config(&mut self, next: AppConfig) -> Result<(), ManagerError> {
+        self.store.save(&next)?;
+        self.config = next;
+        Ok(())
     }
 }
 
@@ -537,53 +640,18 @@ fn resolve_display_id_for_layout_action(
     requested: &DisplayId,
     layout: &Layout,
 ) -> Option<DisplayId> {
-    if layout.find_output_index(requested).is_some() {
-        return Some(requested.clone());
+    match resolve(requested, layout) {
+        IdentityResolution::Resolved(id) => Some(id),
+        _ => None,
     }
-
-    if let Some(edid_hash) = requested.edid_hash {
-        let mut matches = layout
-            .outputs
-            .iter()
-            .filter(|output| output.display_id.edid_hash == Some(edid_hash));
-        let first = matches.next()?;
-        if matches.next().is_none() {
-            return Some(first.display_id.clone());
-        }
-    }
-
-    if requested.edid_hash.is_none() {
-        let mut matches = layout
-            .outputs
-            .iter()
-            .filter(|output| output.display_id.target_id == requested.target_id);
-        let first = matches.next()?;
-        if matches.next().is_none() {
-            return Some(first.display_id.clone());
-        }
-    }
-
-    None
-}
-
-fn fingerprint_for_display(display_id: &DisplayId, friendly_name: Option<&str>) -> Option<String> {
-    let edid_hash = display_id.edid_hash?;
-    let normalized_name = friendly_name
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("")
-        .to_ascii_uppercase();
-    Some(format!("{edid_hash:016x}:{normalized_name}"))
 }
 
 fn sync_display_fingerprints(config: &mut AppConfig, displays: &[DisplayInfo]) -> bool {
     let mut changed = false;
     for display in displays {
-        let fingerprint = fingerprint_for_display(&display.id, Some(&display.friendly_name));
         let next = crate::model::DisplayFingerprint {
             display_id: display.id.clone(),
             friendly_name: display.friendly_name.clone(),
-            edid_fingerprint: fingerprint,
         };
 
         if let Some(existing) = config
@@ -612,16 +680,23 @@ fn sync_display_fingerprints(config: &mut AppConfig, displays: &[DisplayInfo]) -
 fn migrate_saved_layout_ids_with_fingerprints(
     config: &mut AppConfig,
     current_layout: &Layout,
-    current_displays: &[DisplayInfo],
 ) -> bool {
     let mut changed = false;
     let mut remap_profile_layout = |layout: &mut Layout| {
-        let remapped = remap_layout_display_ids_with_fingerprints(
+        let mut remapped = remap_layout_display_ids_with_fingerprints(
             layout,
             current_layout,
-            current_displays,
             &config.display_fingerprints,
         );
+        for (previous, current) in layout.outputs.iter().zip(&mut remapped.outputs) {
+            if current_layout
+                .outputs
+                .iter()
+                .any(|o| o.display_id == current.display_id)
+            {
+                crate::identity::preserve_evidence(&previous.display_id, &mut current.display_id);
+            }
+        }
         if &remapped != layout {
             *layout = remapped;
             changed = true;
@@ -639,161 +714,53 @@ fn migrate_saved_layout_ids_with_fingerprints(
         remap_profile_layout(layout);
     }
 
+    if let Some(layout) = &mut config.pending_recovery {
+        remap_profile_layout(layout);
+    }
+    let mut shortcuts = std::collections::BTreeMap::new();
+    for (key, shortcut) in &config.settings.display_toggle_shortcuts {
+        let replacement = crate::identity::parse_display_key(key)
+            .ok()
+            .and_then(|id| {
+                let known = config
+                    .display_fingerprints
+                    .iter()
+                    .find(|f| {
+                        f.display_id.endpoint() == id.endpoint()
+                            && f.display_id.edid_hash == id.edid_hash
+                    })
+                    .map(|f| &f.display_id)
+                    .unwrap_or(&id);
+                match resolve(known, current_layout) {
+                    IdentityResolution::Resolved(id) => Some(crate::identity::display_key(&id)),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| key.clone());
+        changed |= replacement != *key;
+        shortcuts.insert(replacement, shortcut.clone());
+    }
+    config.settings.display_toggle_shortcuts = shortcuts;
     changed
 }
 
 fn remap_layout_display_ids_with_fingerprints(
     desired: &Layout,
     current: &Layout,
-    current_displays: &[DisplayInfo],
-    fingerprints: &[crate::model::DisplayFingerprint],
+    fingerprints: &[crate::DisplayFingerprint],
 ) -> Layout {
-    let mut remapped = remap_layout_display_ids(desired, current);
-    let current_ids: HashSet<DisplayId> = current
-        .outputs
-        .iter()
-        .map(|output| output.display_id.clone())
-        .collect();
-    let mut used: HashSet<DisplayId> = remapped
-        .outputs
-        .iter()
-        .filter(|output| current_ids.contains(&output.display_id))
-        .map(|output| output.display_id.clone())
-        .collect();
-
-    let friendly_by_id: HashMap<DisplayId, String> = current_displays
-        .iter()
-        .map(|display| (display.id.clone(), display.friendly_name.clone()))
-        .collect();
-    let fingerprint_by_id: HashMap<DisplayId, String> = fingerprints
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .edid_fingerprint
-                .as_ref()
-                .map(|fingerprint| (entry.display_id.clone(), fingerprint.clone()))
-        })
-        .collect();
-
-    let mut current_by_fingerprint: HashMap<String, Vec<DisplayId>> = HashMap::new();
-    for output in &current.outputs {
-        let fingerprint = fingerprint_by_id
-            .get(&output.display_id)
-            .cloned()
-            .or_else(|| {
-                let friendly = friendly_by_id.get(&output.display_id).map(String::as_str);
-                fingerprint_for_display(&output.display_id, friendly)
-            });
-        if let Some(fingerprint) = fingerprint {
-            current_by_fingerprint
-                .entry(fingerprint)
-                .or_default()
-                .push(output.display_id.clone());
-        }
-    }
-
-    for output in &mut remapped.outputs {
-        if current_ids.contains(&output.display_id) {
-            continue;
-        }
-
-        let fingerprint = fingerprint_by_id
-            .get(&output.display_id)
-            .cloned()
-            .or_else(|| fingerprint_for_display(&output.display_id, None));
-        let Some(fingerprint) = fingerprint else {
-            continue;
-        };
-        let Some(candidates) = current_by_fingerprint.get(&fingerprint) else {
-            continue;
-        };
-
-        let available: Vec<_> = candidates
-            .iter()
-            .filter(|candidate| !used.contains(*candidate))
-            .cloned()
-            .collect();
-        if available.len() != 1 {
-            continue;
-        }
-
-        let replacement = available[0].clone();
-        used.insert(replacement.clone());
-        output.display_id = replacement;
-    }
-
-    remapped
-}
-
-fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
-    let current_ids: HashSet<DisplayId> = current
-        .outputs
-        .iter()
-        .map(|output| output.display_id.clone())
-        .collect();
-
-    if desired
-        .outputs
-        .iter()
-        .all(|output| current_ids.contains(&output.display_id))
-    {
-        return desired.clone();
-    }
-
-    let mut remapped = desired.clone();
-    let mut used: HashSet<DisplayId> = HashSet::new();
-    for output in &remapped.outputs {
-        if current_ids.contains(&output.display_id) {
-            used.insert(output.display_id.clone());
-        }
-    }
-
-    let mut current_by_edid: HashMap<u64, Vec<&crate::model::OutputConfig>> = HashMap::new();
-    for output in &current.outputs {
-        if let Some(edid_hash) = output.display_id.edid_hash {
-            current_by_edid.entry(edid_hash).or_default().push(output);
-        }
-    }
-
-    for output in &mut remapped.outputs {
-        if current_ids.contains(&output.display_id) {
-            continue;
-        }
-
-        let mut replacement = None;
-
-        if let Some(edid_hash) = output.display_id.edid_hash {
-            let candidates = unique_unused_candidates(
-                current_by_edid.get(&edid_hash).cloned().unwrap_or_default(),
-                &used,
-            );
-            replacement =
-                choose_remap_candidate(&candidates).map(|candidate| candidate.display_id.clone());
-        }
-
-        if replacement.is_none() && output.display_id.edid_hash.is_none() {
-            // Deterministic fallback for legacy profiles created before EDID hashes were
-            // persisted: remap by target id with the same deterministic preference, but never
-            // guess across adapters (iGPU/dGPU pairs reuse the same target id numbering, so a
-            // cross-adapter pick could land on the wrong physical monitor and get persisted).
-            let candidates = unique_unused_candidates_by_target_id(
-                output.display_id.target_id,
-                &current.outputs,
-                &used,
-            );
-            if candidates_share_one_adapter(&candidates) {
-                replacement = choose_remap_candidate(&candidates)
-                    .map(|candidate| candidate.display_id.clone());
+    let mut enriched = desired.clone();
+    for output in &mut enriched.outputs {
+        if output.display_id.identity == Default::default() {
+            if let Some(known) = fingerprints.iter().find(|f| {
+                f.display_id.endpoint() == output.display_id.endpoint()
+                    && f.display_id.edid_hash == output.display_id.edid_hash
+            }) {
+                output.display_id.identity = known.display_id.identity.clone();
             }
         }
-
-        if let Some(next_id) = replacement {
-            used.insert(next_id.clone());
-            output.display_id = next_id;
-        }
     }
-
-    remapped
+    remap_layout_display_ids(&enriched, current)
 }
 
 fn ensure_all_enabled_outputs_resolve(
@@ -825,63 +792,6 @@ fn ensure_all_enabled_outputs_resolve(
     Ok(())
 }
 
-fn candidates_share_one_adapter(candidates: &[&crate::model::OutputConfig]) -> bool {
-    let mut adapters = candidates
-        .iter()
-        .map(|candidate| candidate.display_id.adapter_luid);
-    let Some(first) = adapters.next() else {
-        return true;
-    };
-    adapters.all(|adapter| adapter == first)
-}
-
-fn choose_remap_candidate<'a>(
-    candidates: &[&'a crate::model::OutputConfig],
-) -> Option<&'a crate::model::OutputConfig> {
-    if candidates.is_empty() {
-        return None;
-    }
-    if candidates.len() == 1 {
-        return Some(candidates[0]);
-    }
-
-    // Deterministic tie-break for duplicate identities (e.g. a stale cached entry plus the same
-    // physical monitor re-enumerated under a new adapter LUID after resume/reboot): prefer the
-    // single enabled candidate. Two active identical twins stay ambiguous and are left unmapped.
-    let enabled: Vec<_> = candidates
-        .iter()
-        .copied()
-        .filter(|candidate| candidate.enabled)
-        .collect();
-    if enabled.len() == 1 {
-        return Some(enabled[0]);
-    }
-
-    None
-}
-
-fn unique_unused_candidates<'a>(
-    candidates: Vec<&'a crate::model::OutputConfig>,
-    used: &HashSet<DisplayId>,
-) -> Vec<&'a crate::model::OutputConfig> {
-    candidates
-        .into_iter()
-        .filter(|candidate| !used.contains(&candidate.display_id))
-        .collect()
-}
-
-fn unique_unused_candidates_by_target_id<'a>(
-    target_id: u32,
-    current_outputs: &'a [crate::model::OutputConfig],
-    used: &HashSet<DisplayId>,
-) -> Vec<&'a crate::model::OutputConfig> {
-    current_outputs
-        .iter()
-        .filter(|candidate| candidate.display_id.target_id == target_id)
-        .filter(|candidate| !used.contains(&candidate.display_id))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,6 +810,7 @@ mod tests {
             adapter_luid,
             target_id,
             edid_hash: Some(target_id as u64),
+            identity: Default::default(),
         }
     }
 
@@ -920,6 +831,7 @@ mod tests {
                     },
                     refresh_rate_mhz: 60_000,
                     primary: true,
+                    rotation: None,
                 },
                 OutputConfig {
                     display_id: sample_display_id_on_adapter(adapter_luid, 2),
@@ -931,6 +843,7 @@ mod tests {
                     },
                     refresh_rate_mhz: 144_000,
                     primary: false,
+                    rotation: None,
                 },
             ],
         }
@@ -1426,6 +1339,7 @@ mod tests {
                 adapter_luid: 9,
                 target_id: 1,
                 edid_hash: Some(1),
+                identity: Default::default(),
             },
             friendly_name: "Left".to_string(),
             is_active: true,
@@ -1441,6 +1355,7 @@ mod tests {
                 adapter_luid: 9,
                 target_id: 2,
                 edid_hash: Some(3),
+                identity: Default::default(),
             },
             friendly_name: "Ultrawide".to_string(),
             is_active: false,
@@ -1462,6 +1377,7 @@ mod tests {
                         resolution: display_one.resolution.clone(),
                         refresh_rate_mhz: display_one.refresh_rate_mhz,
                         primary: true,
+                        rotation: None,
                     },
                     OutputConfig {
                         display_id: display_three_reusing_target.id.clone(),
@@ -1470,6 +1386,7 @@ mod tests {
                         resolution: display_three_reusing_target.resolution.clone(),
                         refresh_rate_mhz: display_three_reusing_target.refresh_rate_mhz,
                         primary: false,
+                        rotation: None,
                     },
                 ],
             },
@@ -1485,6 +1402,7 @@ mod tests {
                                 adapter_luid: 1,
                                 target_id: 1,
                                 edid_hash: Some(1),
+                                identity: Default::default(),
                             },
                             enabled: true,
                             position: Position { x: 0, y: 0 },
@@ -1494,12 +1412,14 @@ mod tests {
                             },
                             refresh_rate_mhz: 60_000,
                             primary: true,
+                            rotation: None,
                         },
                         OutputConfig {
                             display_id: DisplayId {
                                 adapter_luid: 1,
                                 target_id: 2,
                                 edid_hash: Some(2),
+                                identity: Default::default(),
                             },
                             enabled: true,
                             position: Position { x: 1920, y: 0 },
@@ -1509,6 +1429,7 @@ mod tests {
                             },
                             refresh_rate_mhz: 60_000,
                             primary: false,
+                            rotation: None,
                         },
                     ],
                 },
@@ -1530,16 +1451,19 @@ mod tests {
             adapter_luid: 9,
             target_id: 1,
             edid_hash: Some(1),
+            identity: Default::default(),
         };
         let stale_id = DisplayId {
             adapter_luid: 1,
             target_id: 2,
             edid_hash: Some(2),
+            identity: Default::default(),
         };
         let fresh_id = DisplayId {
             adapter_luid: 9,
             target_id: 2,
             edid_hash: Some(2),
+            identity: Default::default(),
         };
 
         let displays = vec![
@@ -1589,6 +1513,7 @@ mod tests {
                     },
                     refresh_rate_mhz: 60_000,
                     primary: true,
+                    rotation: None,
                 },
                 OutputConfig {
                     display_id: stale_id.clone(),
@@ -1600,6 +1525,7 @@ mod tests {
                     },
                     refresh_rate_mhz: 144_000,
                     primary: false,
+                    rotation: None,
                 },
                 OutputConfig {
                     display_id: fresh_id.clone(),
@@ -1611,6 +1537,7 @@ mod tests {
                     },
                     refresh_rate_mhz: 144_000,
                     primary: false,
+                    rotation: None,
                 },
             ],
         };
@@ -1629,11 +1556,12 @@ mod tests {
             },
             refresh_rate_mhz: 60_000,
             primary,
+            rotation: None,
         }
     }
 
     #[test]
-    fn apply_profile_prefers_active_candidate_among_duplicate_edid_entries() {
+    fn apply_profile_rejects_ambiguous_identity_even_if_only_one_candidate_is_active() {
         let (displays, layout, stale_id, fresh_id) = duplicate_edid_current_state();
         let backend = MockBackend::new(displays, layout).unwrap();
         let store = MemoryConfigStore::new(AppConfig {
@@ -1646,6 +1574,7 @@ mod tests {
                                 adapter_luid: 5,
                                 target_id: 1,
                                 edid_hash: Some(1),
+                                identity: Default::default(),
                             },
                             0,
                             true,
@@ -1655,6 +1584,7 @@ mod tests {
                                 adapter_luid: 5,
                                 target_id: 2,
                                 edid_hash: Some(2),
+                                identity: Default::default(),
                             },
                             1920,
                             false,
@@ -1666,20 +1596,12 @@ mod tests {
         });
         let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
 
-        manager.apply_profile("dual").unwrap();
-
-        let applied = backend.current_layout().unwrap();
-        let secondary = applied
-            .outputs
-            .iter()
-            .find(|output| output.display_id.edid_hash == Some(2))
-            .expect("expected remapped secondary output");
-        assert_eq!(secondary.display_id, fresh_id);
-        assert!(secondary.enabled);
-        assert!(!applied
-            .outputs
-            .iter()
-            .any(|output| output.display_id == stale_id));
+        let before = backend.current_layout().unwrap();
+        let error = manager.apply_profile("dual").unwrap_err().to_string();
+        assert!(error.contains("ambiguous"));
+        assert_eq!(backend.current_layout().unwrap(), before);
+        assert!(!manager.has_pending_confirmation());
+        let _ = (stale_id, fresh_id);
     }
 
     #[test]
@@ -1699,6 +1621,7 @@ mod tests {
                                 adapter_luid: 5,
                                 target_id: 1,
                                 edid_hash: None,
+                                identity: Default::default(),
                             },
                             0,
                             true,
@@ -1708,6 +1631,7 @@ mod tests {
                                 adapter_luid: 5,
                                 target_id: 2,
                                 edid_hash: None,
+                                identity: Default::default(),
                             },
                             1920,
                             false,
@@ -1723,7 +1647,7 @@ mod tests {
         assert!(matches!(
             err,
             ManagerError::Validation(message)
-                if message.contains("is not connected right now")
+                if message.contains("ambiguous")
         ));
     }
 
@@ -1733,16 +1657,19 @@ mod tests {
             adapter_luid: 9,
             target_id: 1,
             edid_hash: Some(1),
+            identity: Default::default(),
         };
         let twin_left_id = DisplayId {
             adapter_luid: 9,
             target_id: 2,
             edid_hash: Some(7),
+            identity: Default::default(),
         };
         let twin_right_id = DisplayId {
             adapter_luid: 9,
             target_id: 3,
             edid_hash: Some(7),
+            identity: Default::default(),
         };
         let twin_display = |id: &DisplayId| DisplayInfo {
             id: id.clone(),
@@ -1780,6 +1707,7 @@ mod tests {
             },
             refresh_rate_mhz: 144_000,
             primary: false,
+            rotation: None,
         };
         let layout = Layout {
             outputs: vec![
@@ -1793,6 +1721,7 @@ mod tests {
                     },
                     refresh_rate_mhz: 60_000,
                     primary: true,
+                    rotation: None,
                 },
                 twin_output(&twin_left_id, 1920),
                 twin_output(&twin_right_id, 4480),
@@ -1809,6 +1738,7 @@ mod tests {
                                 adapter_luid: 5,
                                 target_id: 1,
                                 edid_hash: Some(1),
+                                identity: Default::default(),
                             },
                             0,
                             true,
@@ -1818,6 +1748,7 @@ mod tests {
                                 adapter_luid: 5,
                                 target_id: 9,
                                 edid_hash: Some(7),
+                                identity: Default::default(),
                             },
                             1920,
                             false,
@@ -1833,7 +1764,7 @@ mod tests {
         assert!(matches!(
             err,
             ManagerError::Validation(message)
-                if message.contains("is not connected right now")
+                if message.contains("ambiguous")
         ));
     }
 
@@ -1847,11 +1778,13 @@ mod tests {
             adapter_luid: 9,
             target_id: 1,
             edid_hash: Some(1),
+            identity: Default::default(),
         };
         let seeded_tv_id = DisplayId {
             adapter_luid: 9,
             target_id: 4352,
             edid_hash: Some(77),
+            identity: Default::default(),
         };
         let displays = vec![
             DisplayInfo {
@@ -1889,6 +1822,7 @@ mod tests {
                     },
                     refresh_rate_mhz: 60_000,
                     primary: true,
+                    rotation: None,
                 },
                 OutputConfig {
                     display_id: seeded_tv_id.clone(),
@@ -1900,6 +1834,7 @@ mod tests {
                     },
                     refresh_rate_mhz: 60_000,
                     primary: false,
+                    rotation: None,
                 },
             ],
         };
@@ -1914,6 +1849,7 @@ mod tests {
                                 adapter_luid: 1,
                                 target_id: 1,
                                 edid_hash: None,
+                                identity: Default::default(),
                             },
                             0,
                             true,
@@ -1923,6 +1859,7 @@ mod tests {
                                 adapter_luid: 1,
                                 target_id: 4352,
                                 edid_hash: None,
+                                identity: Default::default(),
                             },
                             1920,
                             false,
@@ -1966,6 +1903,7 @@ mod tests {
                                 adapter_luid: 1,
                                 target_id: 4353,
                                 edid_hash: Some(0xa8c7_f832_281a_39c5),
+                                identity: Default::default(),
                             },
                             1920,
                             false,
@@ -2005,6 +1943,7 @@ mod tests {
                                 adapter_luid: 1,
                                 target_id: 9,
                                 edid_hash: Some(99),
+                                identity: Default::default(),
                             },
                             1920,
                             false,

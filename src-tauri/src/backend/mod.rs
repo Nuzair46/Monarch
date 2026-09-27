@@ -27,6 +27,14 @@ impl SystemDisplayBackend {
 }
 
 impl DisplayBackend for SystemDisplayBackend {
+    fn snapshot(&self) -> Result<monarch::DisplaySnapshot, monarch::ManagerError> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Windows(backend) => backend.snapshot(),
+            Self::Mock(backend) => backend.snapshot(),
+        }
+    }
+
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, monarch::ManagerError> {
         match self {
             #[cfg(target_os = "windows")]
@@ -91,6 +99,7 @@ fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
                 adapter_luid: 1,
                 target_id: 1,
                 edid_hash: Some(1),
+                identity: Default::default(),
             },
             friendly_name: "Primary Panel (Mock)".to_string(),
             is_active: true,
@@ -106,6 +115,7 @@ fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
                 adapter_luid: 1,
                 target_id: 2,
                 edid_hash: Some(2),
+                identity: Default::default(),
             },
             friendly_name: "Side Display (Mock)".to_string(),
             is_active: true,
@@ -121,6 +131,7 @@ fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
                 adapter_luid: 1,
                 target_id: 3,
                 edid_hash: Some(3),
+                identity: Default::default(),
             },
             friendly_name: "Portrait Display (Mock)".to_string(),
             is_active: false,
@@ -142,6 +153,7 @@ fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
                 resolution: displays[0].resolution.clone(),
                 refresh_rate_mhz: displays[0].refresh_rate_mhz,
                 primary: true,
+                rotation: None,
             },
             OutputConfig {
                 display_id: displays[1].id.clone(),
@@ -150,6 +162,7 @@ fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
                 resolution: displays[1].resolution.clone(),
                 refresh_rate_mhz: displays[1].refresh_rate_mhz,
                 primary: false,
+                rotation: None,
             },
             OutputConfig {
                 display_id: displays[2].id.clone(),
@@ -158,6 +171,7 @@ fn build_mock_backend() -> Result<MockBackend, monarch::ManagerError> {
                 resolution: displays[2].resolution.clone(),
                 refresh_rate_mhz: displays[2].refresh_rate_mhz,
                 primary: false,
+                rotation: None,
             },
         ],
     };

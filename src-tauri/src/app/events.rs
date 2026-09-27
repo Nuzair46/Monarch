@@ -8,7 +8,6 @@ use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::app::shortcuts;
 use crate::app::state::MonarchAppState;
 use crate::diagnostics;
 
@@ -39,137 +38,10 @@ pub fn emit_confirmation<R: Runtime>(app: &AppHandle<R>, payload: ConfirmationEv
     let _ = app.emit(EVENT_CONFIRMATION, payload);
 }
 
-pub fn spawn_confirmation_watchdog<R: Runtime>(app: AppHandle<R>, timeout: Duration) {
-    let started_at = {
-        let state = app.state::<MonarchAppState>();
-        let Ok(guard) = state.0.lock() else { return };
-        guard.manager.pending_confirmation_started_at()
-    };
-    let Some(started_at) = started_at else { return };
-    std::thread::spawn(move || {
-        std::thread::sleep(timeout);
-        let result = monarch::watchdog::run_confirmation_watchdog(
-            || {
-                let state = app.state::<MonarchAppState>();
-                let mut guard = state
-                    .0
-                    .lock()
-                    .map_err(|_| "state mutex poisoned".to_string())?;
-                monarch::watchdog::poll_confirmation(&mut guard.manager, started_at)
-            },
-            std::thread::sleep,
-        );
-        match result {
-            Ok(true) => {
-                diagnostics::log("confirm_watchdog:rolled_back:timeout");
-                refresh_tray_menu(&app);
-                emit_state_changed(&app);
-                emit_confirmation(
-                    &app,
-                    ConfirmationEvent::Reverted {
-                        reason: ConfirmationRevertReason::Timeout,
-                    },
-                );
-            }
-            Ok(false) => {}
-            Err(message) => {
-                diagnostics::log(format!("confirm_watchdog:rollback_failed:{message}"));
-                emit_state_changed(&app);
-                emit_confirmation(&app, ConfirmationEvent::RollbackFailed { message });
-            }
-        }
-    });
-}
-
-pub fn spawn_color_state_watchdog<R: Runtime>(app: AppHandle<R>) {
-    std::thread::spawn(move || {
-        let mut last_signature: Option<Option<String>> = None;
-
-        loop {
-            std::thread::sleep(Duration::from_millis(1200));
-
-            let state = app.state::<MonarchAppState>();
-            let mut emit_refresh = false;
-            let mut consume_change = true;
-            let next_signature = {
-                let guard = match state.0.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => return,
-                };
-
-                let current_signature = match guard.manager.color_state_signature() {
-                    Ok(signature) => signature,
-                    Err(_) => continue,
-                };
-
-                if let Some(previous_signature) = &last_signature {
-                    let changed = *previous_signature != current_signature;
-                    if changed {
-                        let should_auto_reapply = should_auto_reapply_calibration(
-                            previous_signature.as_ref(),
-                            current_signature.as_ref(),
-                        );
-
-                        if should_auto_reapply {
-                            if !guard.manager.has_pending_confirmation() {
-                                if guard.manager.reapply_color_calibration().is_ok() {
-                                    emit_refresh = true;
-                                } else {
-                                    // Keep the previous signature so we retry on the next poll.
-                                    consume_change = false;
-                                }
-                            } else {
-                                // Defer consumption while a confirmation rollback is pending so a
-                                // later poll can still react to the HDR/color-state change.
-                                consume_change = false;
-                            }
-                        }
-                    }
-                }
-
-                current_signature
-            };
-
-            if consume_change {
-                last_signature = Some(next_signature);
-            }
-
-            if emit_refresh {
-                emit_state_changed(&app);
-            }
-        }
-    });
-}
-
-pub fn spawn_topology_state_watchdog<R: Runtime>(app: AppHandle<R>) {
-    std::thread::spawn(move || {
-        let mut last_signature: Option<String> = None;
-
-        loop {
-            std::thread::sleep(Duration::from_millis(1800));
-
-            let signature = match topology_watch_signature(&app) {
-                Ok(signature) => signature,
-                Err(_) => continue,
-            };
-
-            match &last_signature {
-                None => {
-                    last_signature = Some(signature);
-                }
-                Some(previous) if previous == &signature => {}
-                Some(_) => {
-                    last_signature = Some(signature);
-                    let _ = shortcuts::sync_global_shortcuts(&app);
-                    refresh_tray_menu(&app);
-                    emit_state_changed(&app);
-                }
-            }
-        }
-    });
-}
-
-fn should_auto_reapply_calibration(previous: Option<&String>, current: Option<&String>) -> bool {
+pub(super) fn should_auto_reapply_calibration(
+    previous: Option<&String>,
+    current: Option<&String>,
+) -> bool {
     let (Some(previous), Some(current)) = (previous, current) else {
         return false;
     };
@@ -231,45 +103,6 @@ fn parse_color_state_signature(signature: &str) -> Option<HashMap<String, char>>
     }
 
     Some(map)
-}
-
-fn topology_watch_signature<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
-    let state = app.state::<MonarchAppState>();
-    let guard = state
-        .0
-        .lock()
-        .map_err(|_| "state mutex poisoned".to_string())?;
-    let displays = guard
-        .manager
-        .list_displays()
-        .map_err(|err| err.to_string())?;
-
-    let mut entries = displays
-        .iter()
-        .map(|display| {
-            (
-                display.id.adapter_luid,
-                display.id.target_id,
-                display.id.edid_hash,
-                display.is_active,
-                display.is_primary,
-            )
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-
-    let mut parts = Vec::with_capacity(displays.len());
-    for (adapter_luid, target_id, edid_hash, is_active, is_primary) in entries {
-        parts.push(format!(
-            "{adapter_luid:016x}:{target_id}:{}:{}:{}",
-            edid_hash
-                .map(|value| format!("{value:016x}"))
-                .unwrap_or_else(|| "-".to_string()),
-            if is_active { 1 } else { 0 },
-            if is_primary { 1 } else { 0 }
-        ));
-    }
-    Ok(parts.join("|"))
 }
 
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -351,136 +184,36 @@ fn schedule_tray_refresh_retry<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
-fn tray_action_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 fn tray_menu_refresh_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn spawn_serialized_action<R, F>(app: &AppHandle<R>, name: &'static str, action: F)
-where
-    R: Runtime,
-    F: FnOnce(AppHandle<R>) + Send + 'static,
-{
-    let app = app.clone();
-    std::thread::spawn(move || {
-        diagnostics::log(format!("tray_action:start:{name}"));
-        let guard = match tray_action_lock().lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                diagnostics::log(format!("tray_action:lock_poisoned:{name}"));
-                return;
-            }
-        };
-        action(app.clone());
-        drop(guard);
-        diagnostics::log(format!("tray_action:end:{name}"));
-    });
-}
-
-pub fn apply_profile_external_action_result<R: Runtime>(
-    app: &AppHandle<R>,
-    name: &str,
-) -> Result<(), String> {
-    let state = app.state::<MonarchAppState>();
-    let mut guard = state
-        .0
-        .lock()
-        .map_err(|_| "state mutex poisoned".to_string())?;
-    diagnostics::log(format!("apply_profile:start:{name}"));
-    guard
-        .manager
-        .apply_profile(name)
-        .map_err(|err| err.to_string())?;
-    let pending_timeout = guard.manager.pending_confirmation_remaining();
-    let auto_confirmed =
-        pending_timeout.is_some() && guard.manager.confirm_current_layout().is_ok();
-    drop(guard);
-
-    let _ = shortcuts::sync_global_shortcuts(app);
-    refresh_tray_menu(app);
-    emit_state_changed(app);
-
-    if let Some(timeout) = pending_timeout.filter(|_| !auto_confirmed) {
-        emit_confirmation(
-            app,
-            ConfirmationEvent::Applied {
-                timeout_ms: timeout.as_millis() as u64,
-            },
-        );
-        spawn_confirmation_watchdog(app.clone(), timeout);
+fn submit<R: Runtime>(app: &AppHandle<R>, operation: super::coordinator::Operation) {
+    let controller = app.state::<MonarchAppState>().controller.clone();
+    match controller.submit(operation) {
+        Ok(result) => {
+            tauri::async_runtime::spawn(async move {
+                if let Ok(Err(error)) = result.await {
+                    diagnostics::log(format!("external_action:failed:{error}"));
+                }
+            });
+        }
+        Err(error) => diagnostics::log(error),
     }
-    diagnostics::log(format!(
-        "apply_profile:done:{name}:auto_confirm={auto_confirmed}"
-    ));
-    Ok(())
 }
 
 pub fn handle_profile_apply_external_action<R: Runtime>(app: &AppHandle<R>, name: &str) {
-    let name = name.to_string();
-    spawn_serialized_action(app, "apply_profile", move |app| {
-        if let Err(err) = apply_profile_external_action_result(&app, &name) {
-            diagnostics::log(format!("apply_profile:error:{name}:{err}"));
-        }
-    });
+    submit(
+        app,
+        super::coordinator::Operation::ApplyProfile(name.to_string(), true),
+    );
 }
-
-pub fn handle_toggle_display_external_action<R: Runtime>(app: &AppHandle<R>, display_key: &str) {
-    let display_key = display_key.to_string();
-    spawn_serialized_action(app, "toggle_display", move |app| {
-        toggle_display_external_action_inner(&app, &display_key);
-    });
-}
-
-fn toggle_display_external_action_inner<R: Runtime>(app: &AppHandle<R>, display_key: &str) {
-    let state = app.state::<MonarchAppState>();
-    let lock = state.0.lock();
-    if let Ok(mut guard) = lock {
-        if let Ok(display_id) = crate::app::state::parse_display_key(display_key) {
-            if guard.manager.toggle_display(&display_id).is_ok() {
-                let timeout = guard
-                    .manager
-                    .pending_confirmation_remaining()
-                    .unwrap_or_else(|| Duration::from_secs(10));
-                let auto_confirmed = guard.manager.confirm_current_layout().is_ok();
-                drop(guard);
-                let _ = shortcuts::sync_global_shortcuts(app);
-                refresh_tray_menu(app);
-                emit_state_changed(app);
-
-                if !auto_confirmed {
-                    emit_confirmation(
-                        app,
-                        ConfirmationEvent::Applied {
-                            timeout_ms: timeout.as_millis() as u64,
-                        },
-                    );
-                    spawn_confirmation_watchdog(app.clone(), timeout);
-                }
-            } else {
-                diagnostics::log(format!(
-                    "toggle_display:error:manager_toggle_failed:{display_key}"
-                ));
-            }
-        } else {
-            diagnostics::log(format!("toggle_display:error:invalid_key:{display_key}"));
-        }
-    } else {
-        diagnostics::log("toggle_display:error:state_lock_failed");
-    }
-}
-
-pub fn spawn_deferred_tray_refresh<R: Runtime>(app: AppHandle<R>, delay: Duration) {
-    std::thread::spawn(move || {
-        if !delay.is_zero() {
-            std::thread::sleep(delay);
-        }
-        refresh_tray_menu(&app);
-    });
+pub fn handle_toggle_display_external_action<R: Runtime>(app: &AppHandle<R>, key: &str) {
+    submit(
+        app,
+        super::coordinator::Operation::Toggle(key.to_string(), true),
+    );
 }
 
 #[derive(Clone)]
@@ -498,28 +231,17 @@ struct TrayMenuSnapshot {
 
 fn tray_menu_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<TrayMenuSnapshot, String> {
     let state = app.state::<MonarchAppState>();
-    let guard = state
-        .0
-        .lock()
-        .map_err(|_| "state mutex poisoned".to_string())?;
-
-    let profiles = guard
-        .manager
-        .list_profiles()
+    let snapshot = state.controller.snapshot()?;
+    let profiles = snapshot.profiles.into_iter().map(|p| p.name).collect();
+    let displays = snapshot
+        .displays
         .into_iter()
-        .map(|profile| profile.name)
-        .collect::<Vec<_>>();
-    let displays = guard
-        .manager
-        .list_displays()
-        .map_err(|err| err.to_string())?
-        .into_iter()
-        .map(|display| TrayMenuDisplay {
-            id_key: crate::app::state::format_display_key(&display.id),
-            friendly_name: display.friendly_name,
-            is_active: display.is_active,
+        .map(|d| TrayMenuDisplay {
+            id_key: d.id_key,
+            friendly_name: d.friendly_name,
+            is_active: d.is_active,
         })
-        .collect::<Vec<_>>();
+        .collect();
 
     Ok(TrayMenuSnapshot { profiles, displays })
 }
@@ -597,21 +319,7 @@ fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
 }
 
 fn handle_restore_last_layout<R: Runtime>(app: &AppHandle<R>) {
-    spawn_serialized_action(app, "restore_last_layout", move |app| {
-        let state = app.state::<MonarchAppState>();
-        let lock = state.0.lock();
-        if let Ok(mut guard) = lock {
-            if guard.manager.restore_last_layout().is_ok() {
-                drop(guard);
-                refresh_tray_menu(&app);
-                emit_state_changed(&app);
-            } else {
-                diagnostics::log("restore_last_layout:error:manager_restore_failed");
-            }
-        } else {
-            diagnostics::log("restore_last_layout:error:state_lock_failed");
-        }
-    });
+    submit(app, super::coordinator::Operation::Restore);
 }
 
 /// Subscribe to system power-resume and display-change broadcasts so the backend cache is
@@ -711,33 +419,7 @@ mod system_events {
     }
 
     fn handle_settled_event<R: Runtime>(app: &AppHandle<R>, resume: bool) {
-        let action_name = if resume {
-            "system_resume_refresh"
-        } else {
-            "display_change_refresh"
-        };
-        super::spawn_serialized_action(app, action_name, move |app| {
-            if resume {
-                // Only a resume invalidates the backend cache: adapter LUIDs may have changed
-                // and transient EDID failures may have polluted it. Plain WM_DISPLAYCHANGE must
-                // NOT invalidate, or the detached-display cache would be lost on every apply.
-                let state = app.state::<MonarchAppState>();
-                match state.0.lock() {
-                    Ok(guard) => {
-                        if let Err(err) = guard.manager.invalidate_backend_cache() {
-                            diagnostics::log(format!("system_resume:invalidate_cache_error:{err}"));
-                        }
-                    }
-                    Err(_) => {
-                        diagnostics::log("system_resume:error:state_lock_failed");
-                        return;
-                    }
-                };
-            }
-            let _ = crate::app::shortcuts::sync_global_shortcuts(&app);
-            super::refresh_tray_menu(&app);
-            super::emit_state_changed(&app);
-        });
+        app.state::<MonarchAppState>().controller.refresh(resume);
     }
 
     /// NOTE: deliberately NOT a message-only window (HWND_MESSAGE parent): message-only windows

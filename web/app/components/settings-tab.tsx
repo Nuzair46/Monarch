@@ -63,7 +63,7 @@ function ShortcutBaseField({
   defaultValue,
   onChange,
 }: ShortcutBaseFieldProps) {
-  const displayValue = value.trim() || defaultValue;
+  const displayValue = value.trim() || "Custom shortcuts";
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Tab") {
@@ -288,7 +288,7 @@ export function SettingsTab({
                       value={profileShortcutBase}
                       defaultValue={DEFAULT_PROFILE_SHORTCUT_BASE}
                       onChange={onProfileShortcutBaseChange}
-                      description="Click and press your preferred modifier combo (e.g. press Ctrl+Shift+1 to record Ctrl+Shift). Profiles use IDs shown in the Profiles tab."
+                      description="Existing custom shortcuts are preserved until you record a base. Click and press your preferred modifier combo (e.g. press Ctrl+Shift+1 to record Ctrl+Shift). Profiles use IDs shown in the Profiles tab."
                     />
                   </div>
 
@@ -299,7 +299,7 @@ export function SettingsTab({
                       value={displayShortcutBase}
                       defaultValue={DEFAULT_MONITOR_SHORTCUT_BASE}
                       onChange={onDisplayShortcutBaseChange}
-                      description="Click and press your preferred modifier combo (e.g. press Ctrl+Alt+1 to record Ctrl+Alt). Monitor IDs and full shortcuts are shown on the Main tab."
+                      description="Existing custom shortcuts are preserved until you record a base. Click and press your preferred modifier combo (e.g. press Ctrl+Alt+1 to record Ctrl+Alt). Monitor IDs and full shortcuts are shown on the Main tab."
                     />
                   </div>
                 </div>

@@ -32,13 +32,14 @@ pub fn verify_applied_layout(desired: &Layout, actual: &Layout) -> Result<(), Ma
     }
     for (key, wanted) in expected {
         let got = &observed[&key];
-        if wanted.position != got.position
+        if wanted.rotation.is_some() && wanted.rotation != got.rotation
+            || wanted.position != got.position
             || wanted.resolution != got.resolution
             || wanted.primary != got.primary
             || wanted.refresh_rate_mhz.abs_diff(got.refresh_rate_mhz) > 2
         {
             return Err(ManagerError::Backend(format!(
-                "Windows did not apply the requested placement, primary display, resolution or refresh rate for display {} on adapter {:016x}", key.1, key.0
+                "Windows did not apply the requested placement, primary display, rotation, resolution or refresh rate for display {} on adapter {:016x}", key.1, key.0
             )));
         }
     }
@@ -58,9 +59,11 @@ mod tests {
                         adapter_luid: 1,
                         target_id: id,
                         edid_hash: Some(id as u64),
+                        identity: Default::default(),
                     },
                     enabled: true,
                     primary: id == 1,
+                    rotation: None,
                     position: Position {
                         x: (id as i32 - 1) * 1920,
                         y: 0,

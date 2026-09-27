@@ -1,6 +1,4 @@
-use std::sync::Mutex;
-
-use monarch::{DisplayId, FileConfigStore, MonarchDisplayManager};
+use monarch::{FileConfigStore, MonarchDisplayManager};
 use tauri::{Manager, WindowEvent};
 
 use crate::app::{commands, events, shortcuts, startup};
@@ -8,11 +6,9 @@ use crate::backend::SystemDisplayBackend;
 
 pub type MonarchManager = MonarchDisplayManager<SystemDisplayBackend, FileConfigStore>;
 
-pub struct MonarchRuntimeState {
-    pub manager: MonarchManager,
+pub struct MonarchAppState {
+    pub controller: super::coordinator::Controller,
 }
-
-pub struct MonarchAppState(pub Mutex<MonarchRuntimeState>);
 
 pub fn run_app() {
     let _single_instance_guard = match crate::app::single_instance::try_acquire() {
@@ -22,10 +18,8 @@ pub fn run_app() {
                 if let Err(err) = crate::app::ipc::send_apply_profile_request(&profile_name) {
                     eprintln!("Monarch is already running and IPC profile apply failed: {err}");
                 }
-            } else {
-                if let Err(err) = crate::app::ipc::send_show_main_window_request() {
-                    eprintln!("Monarch is already running and IPC show-main failed: {err}");
-                }
+            } else if let Err(err) = crate::app::ipc::send_show_main_window_request() {
+                eprintln!("Monarch is already running and IPC show-main failed: {err}");
             }
             return;
         }
@@ -49,20 +43,19 @@ pub fn run_app() {
                 requested_profile_name.or_else(|| manager.settings().startup_profile_name.clone());
 
             let startup_enabled = manager.settings().start_with_windows;
-            let state = MonarchAppState(Mutex::new(MonarchRuntimeState { manager }));
+            let controller = super::coordinator::Controller::start(app.handle().clone(), manager)?;
+            let state = MonarchAppState { controller };
             app.manage(state);
 
             if let Err(err) = startup::sync_start_with_windows(startup_enabled) {
                 eprintln!("Monarch startup task sync failed: {err}");
             }
-            if let Err(err) = shortcuts::sync_global_shortcuts(&app.handle()) {
+            if let Err(err) = shortcuts::sync_global_shortcuts(app.handle()) {
                 eprintln!("Monarch global shortcut sync failed: {err}");
             }
 
-            events::build_tray(&app.handle()).map_err(|err| err.to_string())?;
-            events::refresh_tray_menu(&app.handle());
-            events::spawn_color_state_watchdog(app.handle().clone());
-            events::spawn_topology_state_watchdog(app.handle().clone());
+            events::build_tray(app.handle()).map_err(|err| err.to_string())?;
+            events::refresh_tray_menu(app.handle());
             events::spawn_system_event_listener(app.handle().clone());
             crate::app::ipc::spawn_listener(app.handle().clone());
 
@@ -71,7 +64,7 @@ pub fn run_app() {
             // keeps the auto-confirm semantics the old synchronous path had.
             if let Some(profile_name) = startup_profile_name {
                 crate::diagnostics::log(format!("startup_profile:queued:{profile_name}"));
-                events::handle_profile_apply_external_action(&app.handle(), &profile_name);
+                events::handle_profile_apply_external_action(app.handle(), &profile_name);
             }
 
             if let Some(window) = app.get_webview_window("main") {
@@ -93,9 +86,6 @@ pub fn run_app() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::list_displays,
-            commands::get_layout,
-            commands::list_profiles,
             commands::get_snapshot,
             commands::toggle_display,
             commands::apply_layout,
@@ -112,41 +102,4 @@ pub fn run_app() {
         .expect("error while running tauri application");
 }
 
-pub fn format_display_key(id: &DisplayId) -> String {
-    let edid = id
-        .edid_hash
-        .map(|value| format!("{value:016x}"))
-        .unwrap_or_else(|| "-".to_string());
-    format!("{:016x}:{}:{edid}", id.adapter_luid, id.target_id)
-}
-
-pub fn parse_display_key(key: &str) -> Result<DisplayId, monarch::ManagerError> {
-    let mut parts = key.split(':');
-    let luid_hex = parts.next().ok_or_else(|| {
-        monarch::ManagerError::Validation("invalid display key (adapter_luid)".to_string())
-    })?;
-    let target = parts.next().ok_or_else(|| {
-        monarch::ManagerError::Validation("invalid display key (target_id)".to_string())
-    })?;
-    let edid = parts.next().unwrap_or("-");
-
-    let adapter_luid = u64::from_str_radix(luid_hex, 16).map_err(|_| {
-        monarch::ManagerError::Validation("invalid display key adapter_luid hex".to_string())
-    })?;
-    let target_id = target.parse::<u32>().map_err(|_| {
-        monarch::ManagerError::Validation("invalid display key target_id".to_string())
-    })?;
-    let edid_hash = if edid == "-" {
-        None
-    } else {
-        Some(u64::from_str_radix(edid, 16).map_err(|_| {
-            monarch::ManagerError::Validation("invalid display key edid hash".to_string())
-        })?)
-    };
-
-    Ok(DisplayId {
-        adapter_luid,
-        target_id,
-        edid_hash,
-    })
-}
+pub use monarch::identity::{display_key as format_display_key, parse_display_key};

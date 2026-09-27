@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -51,23 +52,100 @@ impl Default for FileConfigStore {
 
 impl ConfigStore for FileConfigStore {
     fn load(&self) -> Result<AppConfig, ManagerError> {
-        if !self.path.exists() {
-            return Ok(AppConfig::default());
+        let read = |path: &Path| -> Result<AppConfig, ManagerError> {
+            Ok(serde_json::from_slice(&fs::read(path)?)?)
+        };
+        match read(&self.path) {
+            Ok(config) => Ok(config),
+            Err(primary_error) => match read(&self.path.with_extension("json.bak")) {
+                Ok(config) => Ok(config),
+                Err(_) if !self.path.exists() && !self.path.with_extension("json.bak").exists() => {
+                    Ok(AppConfig::default())
+                }
+                Err(_) => Err(primary_error),
+            },
         }
-
-        let bytes = fs::read(&self.path)?;
-        let config = serde_json::from_slice(&bytes)?;
-        Ok(config)
     }
 
     fn save(&self, config: &AppConfig) -> Result<(), ManagerError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let body = serde_json::to_vec_pretty(config)?;
-        fs::write(&self.path, body)?;
+        if let Ok(previous) = fs::read(&self.path) {
+            // Never replace a usable backup with a corrupt primary file.
+            if serde_json::from_slice::<AppConfig>(&previous).is_ok() {
+                atomic_write(&self.path.with_extension("json.bak"), &previous)?;
+            }
+        }
+        atomic_write(&self.path, &body)?;
         Ok(())
     }
+}
+
+/// Replace a file without exposing a partial write to readers or the next process.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let (temp, mut file) = loop {
+        let temp = path.with_extension(format!(
+            "tmp.{}.{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => break (temp, file),
+            // A crashed process may have left a file under a subsequently reused PID.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temp, path)?;
+        #[cfg(unix)]
+        fs::File::open(
+            path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?
+        .sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::rename(from, to)
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xffff))
 }
 
 #[derive(Clone, Debug, Default)]

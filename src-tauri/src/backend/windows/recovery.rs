@@ -196,6 +196,7 @@ mod tests {
                 adapter_luid: adapter,
                 target_id: target,
                 edid_hash: Some(target as u64),
+                identity: Default::default(),
             },
             enabled: true,
             position: Position {
@@ -208,6 +209,7 @@ mod tests {
             },
             refresh_rate_mhz: 60_000,
             primary,
+            rotation: None,
         }
     }
 

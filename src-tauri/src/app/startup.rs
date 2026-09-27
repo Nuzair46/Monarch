@@ -1,114 +1,111 @@
 #[cfg(target_os = "windows")]
 mod imp {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Output};
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::*;
     const START_HIDDEN_ARG: &str = "--start-hidden";
-    const RUN_KEY_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    const RUN_KEY_VALUE_NAME: &str = "Monarch";
-    const START_DELAY_SECONDS: u64 = 10;
-
-    pub fn should_start_hidden() -> bool {
-        std::env::args_os().any(|arg| arg == START_HIDDEN_ARG)
+    struct Key(HKEY);
+    impl Drop for Key {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = RegCloseKey(self.0);
+            }
+        }
     }
 
+    pub fn should_start_hidden() -> bool {
+        std::env::args_os().any(|a| a == START_HIDDEN_ARG)
+    }
     pub fn requested_profile_name() -> Option<String> {
         super::parse_profile_name_from_args(
             std::env::args_os()
                 .skip(1)
-                .map(|arg| arg.to_string_lossy().into_owned()),
+                .map(|a| a.to_string_lossy().into_owned()),
+        )
+    }
+    pub fn sync_start_with_windows(enabled: bool) -> Result<(), String> {
+        let command = if enabled {
+            let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+            let executable = executable.to_string_lossy().replace('\'', "''");
+            Some(format!("powershell.exe -NoProfile -WindowStyle Hidden -Command \"Start-Sleep -Seconds 10; & '{executable}' --start-hidden\""))
+        } else {
+            None
+        };
+        update_registration(
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+            command.as_deref(),
         )
     }
 
-    pub fn sync_start_with_windows(enabled: bool) -> Result<(), String> {
-        if enabled {
-            create_run_key_entry()
-        } else {
-            delete_run_key_entry()
-        }
-    }
-
-    fn create_run_key_entry() -> Result<(), String> {
-        let exe_path = std::env::current_exe()
-            .map_err(|err| format!("could not resolve current executable path: {err}"))?;
-        let exe_for_ps = powershell_single_quoted(&exe_path.to_string_lossy());
-        let launch_command = format!(
-            "powershell.exe -NoProfile -WindowStyle Hidden -Command \"Start-Sleep -Seconds {START_DELAY_SECONDS}; & '{exe_for_ps}' {START_HIDDEN_ARG}\""
-        );
-
-        run_reg(&[
-            "add".to_string(),
-            RUN_KEY_PATH.to_string(),
-            "/v".to_string(),
-            RUN_KEY_VALUE_NAME.to_string(),
-            "/t".to_string(),
-            "REG_SZ".to_string(),
-            "/d".to_string(),
-            launch_command,
-            "/f".to_string(),
-        ])
-        .map(|_| ())
-    }
-
-    fn delete_run_key_entry() -> Result<(), String> {
-        match run_reg(&[
-            "delete".to_string(),
-            RUN_KEY_PATH.to_string(),
-            "/v".to_string(),
-            RUN_KEY_VALUE_NAME.to_string(),
-            "/f".to_string(),
-        ]) {
-            Ok(_) => Ok(()),
-            Err(err) if is_registry_value_not_found_error(&err) => Ok(()),
-            Err(err) => Err(err),
-        }
-    }
-
-    fn run_reg(args: &[String]) -> Result<Output, String> {
-        let output = Command::new("reg.exe")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(args)
-            .output()
-            .map_err(|err| format!("failed to run reg.exe: {err}"))?;
-
-        if output.status.success() {
-            Ok(output)
-        } else {
-            Err(render_failure("reg.exe", &output))
-        }
-    }
-
-    fn render_failure(binary: &str, output: &Output) -> String {
-        let mut rendered = String::new();
-        if !output.stdout.is_empty() {
-            rendered.push_str(&String::from_utf8_lossy(&output.stdout));
-        }
-        if !output.stderr.is_empty() {
-            if !rendered.is_empty() {
-                rendered.push(' ');
+    fn update_registration(path: PCWSTR, command: Option<&str>) -> Result<(), String> {
+        unsafe {
+            let mut handle = HKEY::default();
+            let status = if command.is_some() {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    path,
+                    None,
+                    None,
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_SET_VALUE,
+                    None,
+                    &mut handle,
+                    None,
+                )
+            } else {
+                RegOpenKeyExW(HKEY_CURRENT_USER, path, None, KEY_SET_VALUE, &mut handle)
+            };
+            if command.is_none() && status == ERROR_FILE_NOT_FOUND {
+                return Ok(());
             }
-            rendered.push_str(&String::from_utf8_lossy(&output.stderr));
-        }
-        let rendered = rendered.trim();
-
-        if rendered.is_empty() {
-            format!("{binary} failed with exit code {:?}", output.status.code())
-        } else {
-            format!(
-                "{binary} failed with exit code {:?}: {rendered}",
-                output.status.code()
-            )
+            status
+                .ok()
+                .map_err(|e| format!("cannot open startup registry key: {e}"))?;
+            let key = Key(handle);
+            let status = if let Some(command) = command {
+                let bytes: Vec<u8> = command
+                    .encode_utf16()
+                    .chain(Some(0))
+                    .flat_map(u16::to_le_bytes)
+                    .collect();
+                RegSetValueExW(key.0, w!("Monarch"), None, REG_SZ, Some(&bytes))
+            } else {
+                RegDeleteValueW(key.0, w!("Monarch"))
+            };
+            if status == ERROR_SUCCESS || (command.is_none() && status == ERROR_FILE_NOT_FOUND) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "cannot update startup registry value (Windows error {})",
+                    status.0
+                ))
+            }
         }
     }
 
-    fn is_registry_value_not_found_error(message: &str) -> bool {
-        let lower = message.to_ascii_lowercase();
-        lower.contains("unable to find") || lower.contains("cannot find")
-    }
+    #[cfg(test)]
+    mod registry_tests {
+        use super::*;
+        // Isolated fixture key: this never changes the user's actual Run registration.
+        struct Fixture(Vec<u16>);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(self.0.as_ptr()));
+                }
+            }
+        }
 
-    fn powershell_single_quoted(value: &str) -> String {
-        value.replace('\'', "''")
+        #[test]
+        fn deleting_missing_startup_value_is_idempotent_in_every_windows_locale() {
+            let path = format!("Software\\Monarch\\Tests\\startup-{}", std::process::id());
+            let fixture = Fixture(path.encode_utf16().chain(Some(0)).collect());
+            let path = PCWSTR(fixture.0.as_ptr());
+            update_registration(path, None).unwrap();
+            update_registration(path, Some("пример.exe --start-hidden")).unwrap();
+            update_registration(path, None).unwrap();
+            update_registration(path, None).unwrap();
+        }
     }
 }
 

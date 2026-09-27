@@ -23,15 +23,10 @@ use windows::Win32::Devices::Display::{
     SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-    COINIT_APARTMENTTHREADED,
-};
 use windows::Win32::UI::ColorSystem::{
     GetDeviceGammaRamp, SetDeviceGammaRamp, WcsGetCalibrationManagementState,
     WcsSetCalibrationManagementState,
 };
-use windows::Win32::UI::Shell::{DesktopWallpaper, IDesktopWallpaper, DESKTOP_WALLPAPER_POSITION};
 
 use super::win32_types::{luid_to_u64, TopologySnapshot};
 
@@ -117,8 +112,6 @@ pub fn apply_layout_against_snapshot(
     desired.ensure_valid()?;
     ensure_requested_paths(desired, snapshot)?;
     let saved_gamma_ramps = capture_active_gamma_ramps(snapshot);
-    let saved_wallpapers = capture_active_wallpapers(snapshot);
-    let saved_wallpaper_position = capture_wallpaper_position();
 
     let desired_outputs = desired_output_index(desired);
     let mut next_paths: Vec<DISPLAYCONFIG_PATH_INFO> = snapshot.raw.paths.clone();
@@ -135,6 +128,15 @@ pub fn apply_layout_against_snapshot(
         }
 
         if enabled {
+            if let Some(rotation) = desired_output.and_then(|o| o.rotation) {
+                path.targetInfo.rotation =
+                    windows::Win32::Devices::Display::DISPLAYCONFIG_ROTATION(match rotation {
+                        monarch::Rotation::Landscape => 1,
+                        monarch::Rotation::Portrait => 2,
+                        monarch::Rotation::LandscapeFlipped => 3,
+                        monarch::Rotation::PortraitFlipped => 4,
+                    });
+            }
             apply_desired_source_mode(path, &mut next_modes, desired_output);
             apply_desired_target_refresh(path, desired_output);
         }
@@ -188,8 +190,6 @@ pub fn apply_layout_against_snapshot(
     };
     best_effort_reload_color_calibration();
     best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
-    best_effort_restore_wallpapers(&next_snapshot, &saved_wallpapers);
-    best_effort_restore_wallpaper_position(saved_wallpaper_position);
     Ok(next_snapshot)
 }
 
@@ -419,39 +419,6 @@ fn capture_active_gamma_ramps(snapshot: &TopologySnapshot) -> HashMap<(u64, u32)
     ramps
 }
 
-fn capture_active_wallpapers(snapshot: &TopologySnapshot) -> HashMap<(u64, u32), String> {
-    let Some(session) = create_desktop_wallpaper_session() else {
-        return HashMap::new();
-    };
-    let mut wallpapers = HashMap::new();
-
-    for path in &snapshot.raw.paths {
-        if path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG == 0 {
-            continue;
-        }
-
-        let key = (
-            luid_to_u64(
-                path.targetInfo.adapterId.HighPart,
-                path.targetInfo.adapterId.LowPart,
-            ),
-            path.targetInfo.id,
-        );
-
-        let Some(monitor_device_path) = target_monitor_device_path(path) else {
-            continue;
-        };
-        let Some(wallpaper_path) =
-            get_wallpaper_for_monitor(&session.desktop_wallpaper, &monitor_device_path)
-        else {
-            continue;
-        };
-        wallpapers.insert(key, wallpaper_path);
-    }
-
-    wallpapers
-}
-
 fn best_effort_restore_gamma_ramps(
     snapshot: &TopologySnapshot,
     ramps: &HashMap<(u64, u32), GammaRampWords>,
@@ -477,60 +444,6 @@ fn best_effort_restore_gamma_ramps(
         };
         let _ = set_gamma_ramp_for_device(&device_name, ramp);
     }
-}
-
-fn best_effort_restore_wallpapers(
-    snapshot: &TopologySnapshot,
-    wallpapers: &HashMap<(u64, u32), String>,
-) {
-    if wallpapers.is_empty() {
-        return;
-    }
-
-    let Some(session) = create_desktop_wallpaper_session() else {
-        return;
-    };
-
-    for path in &snapshot.raw.paths {
-        if path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG == 0 {
-            continue;
-        }
-
-        let key = (
-            luid_to_u64(
-                path.targetInfo.adapterId.HighPart,
-                path.targetInfo.adapterId.LowPart,
-            ),
-            path.targetInfo.id,
-        );
-        let Some(wallpaper_path) = wallpapers.get(&key) else {
-            continue;
-        };
-        let Some(monitor_device_path) = target_monitor_device_path(path) else {
-            continue;
-        };
-
-        let _ = set_wallpaper_for_monitor(
-            &session.desktop_wallpaper,
-            &monitor_device_path,
-            wallpaper_path,
-        );
-    }
-}
-
-fn capture_wallpaper_position() -> Option<DESKTOP_WALLPAPER_POSITION> {
-    let session = create_desktop_wallpaper_session()?;
-    unsafe { session.desktop_wallpaper.GetPosition().ok() }
-}
-
-fn best_effort_restore_wallpaper_position(position: Option<DESKTOP_WALLPAPER_POSITION>) {
-    let Some(position) = position else {
-        return;
-    };
-    let Some(session) = create_desktop_wallpaper_session() else {
-        return;
-    };
-    let _ = unsafe { session.desktop_wallpaper.SetPosition(position) };
 }
 
 fn desired_output_index(desired: &Layout) -> HashMap<(u64, u32), &monarch::OutputConfig> {
@@ -564,12 +477,15 @@ fn apply_desired_source_mode(
     let Some(output) = desired_output.copied() else {
         return;
     };
-    if output.resolution.width == 0 || output.resolution.height == 0 {
-        // Geometry sentinel (a seeded, never-yet-active display): writing 0x0 into the source
-        // mode would make SetDisplayConfig fail with 87 or stack the display on the primary.
-        // Leave the snapshot's real source mode untouched and let Windows place it.
+    let monarch::model::ModePreference::Exact {
+        position,
+        resolution,
+    } = output.mode_preference()
+    else {
+        // The recovery planner resolves automatic modes from Windows' observed
+        // source mode before verification; never write a 0x0 mode into CCD.
         return;
-    }
+    };
 
     let mode_index = unsafe { path.sourceInfo.Anonymous.modeInfoIdx } as usize;
     let Some(mode) = modes.get_mut(mode_index) else {
@@ -581,10 +497,10 @@ fn apply_desired_source_mode(
 
     unsafe {
         let source = &mut mode.Anonymous.sourceMode;
-        source.position.x = output.position.x;
-        source.position.y = output.position.y;
-        source.width = output.resolution.width;
-        source.height = output.resolution.height;
+        source.position.x = position.x;
+        source.position.y = position.y;
+        source.width = resolution.width;
+        source.height = resolution.height;
     }
 }
 
@@ -630,12 +546,14 @@ fn path_priority_rank(
 
 fn source_gdi_device_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     unsafe {
-        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
-        source.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
-            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-            size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
-            adapterId: path.sourceInfo.adapterId,
-            id: path.sourceInfo.id,
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
         };
 
         let status = DisplayConfigGetDeviceInfo(&mut source.header);
@@ -647,14 +565,16 @@ fn source_gdi_device_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     }
 }
 
-fn target_monitor_device_path(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
+pub(super) fn target_monitor_device_path(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     unsafe {
-        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
-        target.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
-            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-            size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
-            adapterId: path.targetInfo.adapterId,
-            id: path.targetInfo.id,
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
         };
 
         let status = DisplayConfigGetDeviceInfo(&mut target.header);
@@ -668,12 +588,14 @@ fn target_monitor_device_path(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> 
 
 pub(super) fn target_advanced_color_enabled(path: &DISPLAYCONFIG_PATH_INFO) -> Option<bool> {
     unsafe {
-        let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default();
-        info.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
-            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
-            size: size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
-            adapterId: path.targetInfo.adapterId,
-            id: path.targetInfo.id,
+        let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+                size: size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
         };
 
         let status = DisplayConfigGetDeviceInfo(&mut info.header);
@@ -740,72 +662,6 @@ fn wide_array_to_string(wide: &[u16]) -> String {
     String::from_utf16_lossy(&wide[..len])
 }
 
-struct DesktopWallpaperSession {
-    desktop_wallpaper: IDesktopWallpaper,
-    should_uninitialize: bool,
-}
-
-impl Drop for DesktopWallpaperSession {
-    fn drop(&mut self) {
-        if self.should_uninitialize {
-            unsafe {
-                CoUninitialize();
-            }
-        }
-    }
-}
-
-fn create_desktop_wallpaper_session() -> Option<DesktopWallpaperSession> {
-    let mut should_uninitialize = false;
-    unsafe {
-        if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() {
-            should_uninitialize = true;
-        }
-
-        let desktop_wallpaper: IDesktopWallpaper =
-            CoCreateInstance(&DesktopWallpaper, None, CLSCTX_ALL).ok()?;
-        Some(DesktopWallpaperSession {
-            desktop_wallpaper,
-            should_uninitialize,
-        })
-    }
-}
-
-fn get_wallpaper_for_monitor(
-    desktop_wallpaper: &IDesktopWallpaper,
-    monitor_device_path: &str,
-) -> Option<String> {
-    let monitor_wide = to_wide_null(monitor_device_path);
-    let wallpaper = unsafe {
-        desktop_wallpaper
-            .GetWallpaper(PCWSTR(monitor_wide.as_ptr()))
-            .ok()?
-    };
-
-    let wallpaper_path = unsafe { wallpaper.to_string().ok() };
-    unsafe {
-        CoTaskMemFree(Some(wallpaper.0.cast()));
-    }
-    wallpaper_path
-}
-
-fn set_wallpaper_for_monitor(
-    desktop_wallpaper: &IDesktopWallpaper,
-    monitor_device_path: &str,
-    wallpaper_path: &str,
-) -> bool {
-    let monitor_wide = to_wide_null(monitor_device_path);
-    let wallpaper_wide = to_wide_null(wallpaper_path);
-    unsafe {
-        desktop_wallpaper
-            .SetWallpaper(
-                PCWSTR(monitor_wide.as_ptr()),
-                PCWSTR(wallpaper_wide.as_ptr()),
-            )
-            .is_ok()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::win32_types::RawTopologySnapshot;
@@ -822,6 +678,7 @@ mod tests {
                         adapter_luid: 1,
                         target_id: *target,
                         edid_hash: Some(*target as u64),
+                        identity: Default::default(),
                     },
                     enabled: true,
                     position: Position {
@@ -834,6 +691,7 @@ mod tests {
                     },
                     refresh_rate_mhz: 60_000,
                     primary: index == 0,
+                    rotation: None,
                 })
                 .collect(),
         }
@@ -859,7 +717,6 @@ mod tests {
             },
             layout: layout(targets),
             displays: Vec::new(),
-            attachable: Vec::new(),
         }
     }
 

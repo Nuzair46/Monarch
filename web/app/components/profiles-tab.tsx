@@ -76,7 +76,7 @@ export function ProfilesTab({
                 </div>
               ) : (
                 snapshot.profiles.map((profile, index) => {
-                  const shortcutLabel = indexedShortcutLabel(profileShortcutBase, index);
+                  const shortcutLabel = profileShortcutBase ? indexedShortcutLabel(profileShortcutBase, index) : snapshot.settings.profile_shortcuts[profile.name] ?? null;
 
                   return (
                     <div

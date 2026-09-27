@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   prepare_release:
-    name: Prepare Release (Bump + Commit + Tag)
+    name: Prepare Release (Bump + Commit)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -44,7 +44,9 @@ jobs:
 
       - name: Bump version across all manifests
         shell: bash
-        run: node tools/version-bump.mjs "${{ inputs.release_version }}"
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: node tools/version-bump.mjs "$RELEASE_VERSION"
 
       - name: Resolve bumped version metadata
         id: resolve
@@ -89,11 +91,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml src-tauri/Cargo.toml package.json src-tauri/tauri.conf.json
+          git add Cargo.toml Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock package.json src-tauri/tauri.conf.json
           git commit -m "chore(release): ${{ steps.resolve.outputs.tag_name }} [skip ci]"
-          git tag "${{ steps.resolve.outputs.tag_name }}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
-          git push origin "${{ steps.resolve.outputs.tag_name }}"
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   release_build:
@@ -103,7 +103,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout tagged release commit
+      - name: Checkout release commit
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare_release.outputs.commit_sha }}
@@ -129,14 +129,20 @@ jobs:
       - name: Install JS dependencies
         run: yarn install --frozen-lockfile
 
+      - name: Run web and release-tool regression tests
+        run: yarn test
+
       - name: Build frontend
         run: yarn build
 
       - name: Run core Rust tests
-        run: cargo test --manifest-path Cargo.toml
+        run: cargo test --locked --manifest-path Cargo.toml
+
+      - name: Run desktop Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Build Windows app (MSI)
-        run: yarn tauri build --bundles msi
+        run: yarn tauri build --bundles msi -- --locked
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
@@ -158,6 +164,18 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout validated release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare_release.outputs.commit_sha }}
+
+      - name: Tag validated release
+        env:
+          RELEASE_TAG: ${{ needs.prepare_release.outputs.tag_name }}
+        run: |
+          git tag "$RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
+
       - name: Download release artifact
         uses: actions/download-artifact@v4
         with:
