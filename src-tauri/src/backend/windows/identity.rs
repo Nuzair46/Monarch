@@ -21,7 +21,7 @@ impl Drop for Key {
     }
 }
 
-pub fn monitor_serial(device_path: &str) -> Option<String> {
+fn monitor_edid(device_path: &str) -> Option<[u8; 128]> {
     let path: Vec<u16> = device_path.encode_utf16().chain(Some(0)).collect();
     unsafe {
         let set = DeviceSet(SetupDiCreateDeviceInfoList(None, None).ok()?);
@@ -76,6 +76,10 @@ pub fn monitor_serial(device_path: &str) -> Option<String> {
         .ok()
         .ok()?;
         bytes.copy_from_slice(data.get(..count as usize)?);
-        monarch::identity::edid_serial(&bytes)
+        Some(bytes)
     }
+}
+
+pub fn monitor_serial(path: &str) -> Option<String> {
+    monarch::identity::edid_serial(&monitor_edid(path)?)
 }

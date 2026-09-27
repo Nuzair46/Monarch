@@ -324,6 +324,7 @@ mod tests {
                 outputs: Vec::new(),
             },
             profiles: Vec::new(),
+            capabilities: Vec::new(),
             settings: AppSettings::default(),
             pending_confirmation: None,
         })

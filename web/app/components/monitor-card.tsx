@@ -11,8 +11,9 @@ type MonitorCardProps = {
   busy: boolean;
   hasPendingConfirmation: boolean;
   activeDisplayCount: number;
-  onMakePrimaryRequest: (display: DisplayInfo) => void;
   onToggleRequest: (display: DisplayInfo) => void;
+  onEdit: () => void;
+  editDisabled: boolean;
 };
 
 export function MonitorCard({
@@ -23,8 +24,9 @@ export function MonitorCard({
   busy,
   hasPendingConfirmation,
   activeDisplayCount,
-  onMakePrimaryRequest,
   onToggleRequest,
+  onEdit,
+  editDisabled,
 }: MonitorCardProps) {
   const isActive = display.is_active;
   const isPrimary = display.is_primary;
@@ -37,19 +39,20 @@ export function MonitorCard({
     <article className="rounded-xl border p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          <span className="block text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Monitor {monitorNumber}
-          </p>
-          <h3 className="truncate text-sm font-semibold leading-none text-foreground">
+          </span>
+          <span className="block truncate text-sm font-semibold leading-none text-foreground">
             {display.friendly_name}
-          </h3>
-          <p className="text-sm text-muted-foreground">
+          </span>
+          <span className="block text-sm text-muted-foreground">
             {resolutionLabel} · {formatHz(display.refresh_rate_mhz)}
-          </p>
+          </span>
           {shortcutLabel ? (
-            <p className="text-xs font-mono text-muted-foreground">
-              {shortcutsEnabled ? "Shortcut" : "Shortcut (disabled)"}: {shortcutLabel}
-            </p>
+            <span className="block text-xs font-mono text-muted-foreground">
+              {shortcutsEnabled ? "Shortcut" : "Shortcut (disabled)"}:{" "}
+              {shortcutLabel}
+            </span>
           ) : null}
         </div>
 
@@ -57,24 +60,21 @@ export function MonitorCard({
           <Badge variant={isActive ? "default" : "secondary"}>
             {isActive ? "Active" : "Detached"}
           </Badge>
-          {isPrimary ? (
-            <Badge variant="outline">Primary</Badge>
-          ) : null}
+          {isPrimary ? <Badge variant="outline">Primary</Badge> : null}
         </div>
       </div>
 
       <div className="mt-4 flex flex-wrap items-center justify-end gap-2 border-t pt-3">
-        {isActive && !isPrimary ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={busy || hasPendingConfirmation}
-            onClick={() => onMakePrimaryRequest(display)}
-          >
-            Make Primary
-          </Button>
-        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={editDisabled}
+          onClick={onEdit}
+          aria-label={`Settings for monitor ${monitorNumber}: ${display.friendly_name}`}
+        >
+          Settings
+        </Button>
         <Button
           type="button"
           size="sm"

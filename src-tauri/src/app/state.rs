@@ -87,6 +87,7 @@ pub fn run_app() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
+            commands::get_display_capabilities,
             commands::toggle_display,
             commands::apply_layout,
             commands::save_profile,
@@ -98,8 +99,9 @@ pub fn run_app() {
             commands::update_settings,
             commands::open_external_url,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_, _| {});
 }
 
 pub use monarch::identity::{display_key as format_display_key, parse_display_key};

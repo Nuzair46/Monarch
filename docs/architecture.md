@@ -44,17 +44,22 @@ Raw `DISPLAYCONFIG_PATH_INFO` and `DISPLAYCONFIG_MODE_INFO` arrays exist only du
 
 1. Resolve and validate the requested layout and capture the current layout.
 2. Atomically persist `pending_recovery` and the previous layout before the first mutation.
-3. Apply and verify the observed active set, placement, primary, rotation, resolution and refresh rate.
+3. Apply and verify the observed active set, placement, logical-source primary status, rotation, resolution, fractional refresh, HDR, scaling and clone membership.
 4. Start the confirmation interval only after apply succeeds. Unresolved failures remain pending with an immediate recovery deadline.
 5. On confirmation, persist the new last-good layout and remove the journal. On rollback, verify restoration and persist it before removing the journal.
 
 Startup reconstructs an unfinished journal as an immediately expired transaction. The worker attempts recovery before ordinary queued actions. Automation from profiles, hotkeys and the tray can auto-confirm only a successful operation. A persistence failure keeps recovery available.
 
-Only complete, valid configuration in the current schema (2) is supported. Missing or unknown fields, older or newer schema versions, and unsupported saved layouts trigger a reset. Monarch deletes `config.json` and `config.json.bak` and continues startup with default settings and no saved profiles; it never migrates old profiles or restores the backup automatically. A missing primary file also discards an orphaned backup. Filesystem access failures remain errors. Disconnected monitors do not invalidate an otherwise supported profile or recovery journal. An unsupported live desktop can still be displayed in the app, but does not seed saved recovery layouts.
+Monarch 2.0 uses schema 3 for optional HDR/scaling preferences and clone groups.
+Configurations and profiles from earlier schemas are reset;
+there is no migration path. Geometry history has its own version 2 and rejects the
+old format. Malformed data and unsupported schemas reset; filesystem failures remain
+errors. Missing primary configuration never resurrects a backup. Valid current-format
+profiles and recovery journals retain disconnected monitors.
 
 Mutators clone state, save, then commit it in memory. File writes flush a unique temporary file before atomic replacement; Windows uses `MoveFileExW` with replacement and write-through. A supported previous config is retained as `config.json.bak` for manual recovery.
 
-An output without an observed mode uses `0x0` geometry, which becomes an automatic mode preference at the planning boundary. Recovery obtains real geometry from Windows before verification. Explicit layouts reject duplicate endpoints, multiple enabled primaries and out-of-range values. Source coordinates describe desktop geometry; rotation is stored separately and must be present, with `null` representing an unknown orientation. Cloned/overlapping layouts are rejected before mutation because the assignment solver models extended desktops. See [Microsoft's source-mode coordinate rules](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_source_mode).
+An output without an observed mode uses `0x0` geometry, which becomes an automatic mode preference at the planning boundary. Windows resolves automatic modes; exact preferences must pass preflight and observation. Explicit layouts reject duplicate endpoints, multiple primary sources and out-of-range values. Source coordinates describe desktop geometry; rotation is stored separately and must be present, with `null` representing an unknown orientation. Clone groups share position, source resolution, scaling and primary status; extended surfaces cannot overlap. Cloning is never inferred from rectangles, and saved groups never contain Windows source IDs. See [Microsoft's source-mode coordinate rules](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_source_mode).
 
 ## Windows integration
 
@@ -71,3 +76,59 @@ Instance mutex and pipe names include the user SID and Windows session ID. The n
 `yarn test` exercises asynchronous subscription disposal, the browser confirmation contract and version-bump fixtures, including a locked Cargo check. Both Cargo lockfiles are committed with release version changes. Release builds test core and desktop code using locked dependencies and create the permanent tag only after the Windows build succeeds. Keep Tauri, its runtimes and the CLI compatible when updating the lockfiles.
 
 A Windows target source check on Linux can compile code and tests with `MONARCH_SKIP_TAURI_BUILD=1`; it does not execute Win32 calls or prove the MSI build. Hardware acceptance remains necessary for GPU/driver behavior, slideshow/disabled backgrounds, mixed adapters, dock changes, localized registry handling and multiple login sessions.
+
+## Display editing and capabilities
+
+The main preview stages position offsets against the observed layout. Dropped
+monitors join adjacent edges and the preview checks for gaps/overlaps. Save layout
+rebases the primary source to the origin and applies positions through the manager's
+verified confirmation transaction. Per-monitor Settings dialogs have independent
+drafts and Save settings applies directly. They contain primary, orientation, HDR,
+scaling, duplication and independent resolution/refresh choices. Resolution changes
+keep neighbouring source rectangles joined. Saving properties leaves unsaved position
+offsets in the preview, which always uses the latest observed modes and preferences.
+Profiles capture the current layout; there is no saved-profile editing command.
+Missing optional preferences preserve observed state. Geometry history is never
+capability evidence.
+
+Selecting Duplicate creates an explicit clone group for a mirrored desktop. Shared
+resolution choices intersect every member's reported modes in desktop orientation;
+scaling choices intersect their readable ranges. The initial draft keeps the selected
+desktop's resolution if shared, otherwise the joining monitor's if shared, otherwise
+the largest reported common resolution. Refresh rates remain target-specific: keep a
+supported current rate or select the closest reported rate at the shared resolution.
+HDR and rotation are retained per target. The dialog exposes rates for every member,
+so a subsequent shared-resolution edit cannot leave an inaccessible invalid rate on
+another monitor. Missing/incompatible capabilities reject joining without mutation.
+Unrelated extended displays retain their modes.
+
+The Windows planner chooses one route per target, one common source per clone group,
+and distinct sources for extended surfaces. Position, primary and preference changes
+reuse active source formats and target timings, including the original refresh-rate
+rational, rather than reconstructing them from rounded display values. Changed modes
+invalidate only their own old timing. Requests with an explicit refresh rate supply
+progressive scan-line ordering for the non-interlaced DXGI mode list. Automatic
+mode requests retain 0/0 refresh and unspecified ordering; unchanged targets retain
+their observed ordering. Windows permits unspecified ordering only with automatic
+refresh ([API requirement](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ne-wingdi-displayconfig_scanline_ordering)).
+The planner submits the source/target mode table
+to `SDC_VALIDATE`, then applies without `SDC_ALLOW_CHANGES`. Rejected requests log
+route/mode indices, source rectangles and target timings for diagnosis. Native routing is queried
+again before HDR and DPI setters, and all requested properties (including clone
+membership) are observed before confirmation starts. Failed apply restores captured
+native modes and preferences; the persisted recovery layout covers timeout/restart.
+Wallpaper and SDR calibration recovery remain in the transaction.
+
+The preview follows the [Windows source-surface layout rules](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-displayconfig_source_mode):
+source surfaces cannot overlap or leave gaps, and the primary source is at (0, 0).
+
+Mode lists use DXGI rational refresh rates. A detached target or a cloned source
+cannot supply another target's mode list; only its target-specific preferred mode
+and any observed active mode are offered until it is extended. Windows validates
+the complete combination again at apply. HDR probes the HDR-specific request before
+falling back to the older advanced-color request. Scaling is isolated in
+`backend/windows/scaling.rs`: the undocumented -3/-4 device-info requests are used
+only for readable standard ranges, with no custom/global or registry scaling.
+
+
+Hardware acceptance for these paths is tracked in [the Windows checklist](windows-hardware-checklist.md).

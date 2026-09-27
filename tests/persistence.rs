@@ -86,11 +86,32 @@ fn missing_primary_does_not_resurrect_an_orphaned_backup() {
 
 #[test]
 fn older_and_future_schemas_reset_instead_of_migrating_or_blocking_startup() {
-    for version in [0, 1, u32::MAX] {
+    for version in [0, 1, 2, u32::MAX] {
         let mut config = saved_config();
         config.schema_version = version;
         assert_startup_resets(serde_json::to_value(config).unwrap());
     }
+}
+
+#[test]
+fn a_valid_one_x_configuration_starts_fresh_without_importing_profiles() {
+    let mut legacy = serde_json::to_value(saved_config()).unwrap();
+    legacy["schema_version"] = serde_json::json!(2);
+    fn remove_new_fields(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for key in ["hdr_enabled", "scale_percent", "clone_group"] {
+                    fields.remove(key);
+                }
+                fields.values_mut().for_each(remove_new_fields);
+            }
+            serde_json::Value::Array(values) => values.iter_mut().for_each(remove_new_fields),
+            _ => {}
+        }
+    }
+    remove_new_fields(&mut legacy);
+    assert!(serde_json::from_value::<AppConfig>(legacy.clone()).is_ok());
+    assert_startup_resets(legacy);
 }
 
 #[test]
@@ -272,6 +293,9 @@ fn layout() -> Layout {
                 enabled: true,
                 primary: target == 1,
                 rotation: Some(Rotation::Landscape),
+                hdr_enabled: None,
+                scale_percent: None,
+                clone_group: None,
                 position: Position {
                     x: (target as i32 - 1) * 1920,
                     y: 0,

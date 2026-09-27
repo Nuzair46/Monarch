@@ -39,6 +39,8 @@ pub struct PositionDto {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OutputConfigDto {
     pub display_key: String,
+    #[serde(default)]
+    pub identity: monarch::MonitorIdentity,
     pub enabled: bool,
     pub position: PositionDto,
     pub resolution: ResolutionDto,
@@ -46,6 +48,12 @@ pub struct OutputConfigDto {
     pub primary: bool,
     #[serde(default)]
     pub rotation: Option<monarch::Rotation>,
+    #[serde(default)]
+    pub hdr_enabled: Option<bool>,
+    #[serde(default)]
+    pub scale_percent: Option<u32>,
+    #[serde(default)]
+    pub clone_group: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -70,8 +78,25 @@ pub struct AppSnapshotDto {
     pub displays: Vec<DisplayInfoDto>,
     pub layout: LayoutDto,
     pub profiles: Vec<ProfileDto>,
+    pub capabilities: Vec<DisplayCapabilitiesDto>,
     pub settings: AppSettings,
     pub pending_confirmation: Option<PendingConfirmationDto>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct DisplayCapabilitiesDto {
+    pub display_key: String,
+    pub identity: monarch::MonitorIdentity,
+    #[serde(flatten)]
+    pub capabilities: monarch::capabilities::DisplayCapabilities,
+}
+
+#[tauri::command]
+pub async fn get_display_capabilities(
+    state: State<'_, MonarchAppState>,
+) -> CommandResult<Vec<DisplayCapabilitiesDto>> {
+    state.controller.refresh(false);
+    Ok(state.controller.snapshot()?.capabilities)
 }
 
 #[tauri::command]
@@ -172,10 +197,31 @@ where
         displays,
         layout,
         profiles: Vec::new(),
+        capabilities: manager
+            .get_display_capabilities()?
+            .into_iter()
+            .map(|capabilities| DisplayCapabilitiesDto {
+                display_key: format_display_key(&capabilities.display_id),
+                identity: capabilities.display_id.identity.clone(),
+                capabilities,
+            })
+            .collect(),
         settings: manager.settings().clone(),
         pending_confirmation: None,
     };
     update_snapshot_metadata(&mut snapshot, manager);
+    snapshot.profiles = manager
+        .list_profiles()
+        .into_iter()
+        .map(|mut p| {
+            let saved = p.layout.clone();
+            p.layout = monarch::identity::remap_layout(&p.layout, &observed.layout);
+            for (old, current) in saved.outputs.iter().zip(&mut p.layout.outputs) {
+                monarch::identity::preserve_evidence(&old.display_id, &mut current.display_id);
+            }
+            profile_to_dto(p)
+        })
+        .collect();
     Ok(snapshot)
 }
 
@@ -220,6 +266,7 @@ fn layout_to_dto(layout: &Layout) -> LayoutDto {
 fn output_to_dto(output: &OutputConfig) -> OutputConfigDto {
     OutputConfigDto {
         display_key: format_display_key(&output.display_id),
+        identity: output.display_id.identity.clone(),
         enabled: output.enabled,
         position: PositionDto {
             x: output.position.x,
@@ -232,6 +279,9 @@ fn output_to_dto(output: &OutputConfig) -> OutputConfigDto {
         refresh_rate_mhz: output.refresh_rate_mhz,
         primary: output.primary,
         rotation: output.rotation,
+        hdr_enabled: output.hdr_enabled,
+        scale_percent: output.scale_percent,
+        clone_group: output.clone_group.clone(),
     }
 }
 
@@ -240,8 +290,9 @@ fn dto_to_layout(dto: LayoutDto) -> CommandResult<Layout> {
         .outputs
         .into_iter()
         .map(|output| {
-            let display_id = crate::app::state::parse_display_key(&output.display_key)
+            let mut display_id = crate::app::state::parse_display_key(&output.display_key)
                 .map_err(|err| err.to_string())?;
+            display_id.identity = output.identity;
             Ok(OutputConfig {
                 display_id,
                 enabled: output.enabled,
@@ -256,6 +307,9 @@ fn dto_to_layout(dto: LayoutDto) -> CommandResult<Layout> {
                 refresh_rate_mhz: output.refresh_rate_mhz,
                 primary: output.primary,
                 rotation: output.rotation,
+                hdr_enabled: output.hdr_enabled,
+                scale_percent: output.scale_percent,
+                clone_group: output.clone_group,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;

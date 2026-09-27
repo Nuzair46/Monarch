@@ -1,10 +1,12 @@
 pub mod backend;
+pub mod capabilities;
 pub mod error;
 pub mod history;
 pub mod identity;
 pub mod manager;
 pub mod model;
 pub mod store;
+pub mod transaction;
 pub mod verification;
 pub mod watchdog;
 

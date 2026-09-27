@@ -1,19 +1,17 @@
 use super::apply::{
     active_color_state_signature, apply_layout_against_snapshot, capture_sdr_gamma_ramps,
-    gamma_ramp_looks_identity, reapply_color_calibration_for_active_with_cached_sdr,
-    run_display_switch_extend, try_topology_extend, GammaRampKey, GammaRampWords,
+    gamma_ramp_looks_identity, reapply_color_calibration_for_active_with_cached_sdr, GammaRampKey,
+    GammaRampWords,
 };
 use super::enumerate::{
     query_active_only_topology, query_active_topology, query_connected_topology,
 };
-use super::recovery::recover_layout;
-use super::win32_types::{RawTopologySnapshot, TopologySnapshot};
+use super::win32_types::TopologySnapshot;
 use crate::diagnostics;
 use monarch::history::GeometryHistory;
 use monarch::{DisplayBackend, DisplayInfo, DisplaySnapshot, Layout, ManagerError};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
-const DISPLAYCONFIG_PATH_ACTIVE_FLAG: u32 = 1;
 
 #[derive(Default)]
 struct BackendCache {
@@ -124,20 +122,9 @@ impl WindowsDisplayBackend {
     }
 
     fn apply_layout_inner(&self, layout: Layout) -> Result<(), ManagerError> {
-        let active = query_active_only_topology()?;
-        let inventory = self.refresh_active()?;
-        let desired = monarch::identity::resolve_layout(&layout, &inventory.layout)?;
-        let (observed, _) = if desired_enables_inactive_output(&desired, &active.layout) {
-            recover_apply_with_topology_extend(&desired)?
-        } else {
-            match apply_layout_against_snapshot(&desired, &active) {
-                Ok(observed) => (observed, desired),
-                Err(error) => {
-                    diagnostics::log(format!("apply:recovery:{error}"));
-                    recover_apply_with_topology_extend(&desired)?
-                }
-            }
-        };
+        let connected = query_connected_topology()?;
+        let desired = monarch::identity::resolve_layout(&layout, &connected.layout)?;
+        let observed = apply_layout_against_snapshot(&desired, &connected)?;
         merge_sdr_gamma_cache(
             &mut self
                 .cache
@@ -152,6 +139,30 @@ impl WindowsDisplayBackend {
 }
 
 impl DisplayBackend for WindowsDisplayBackend {
+    fn get_display_capabilities(
+        &self,
+    ) -> Result<Vec<monarch::capabilities::DisplayCapabilities>, ManagerError> {
+        super::capabilities::current()
+    }
+    fn validate_layout(&self, layout: &Layout) -> Result<(), ManagerError> {
+        let connected = query_connected_topology()?;
+        monarch::capabilities::validate(layout, &super::capabilities::discover(&connected))?;
+        let (paths, modes) = super::apply::plan_layout(layout, &connected)?;
+        use windows::Win32::Devices::Display::*;
+        let status = unsafe {
+            SetDisplayConfig(
+                Some(&paths),
+                Some(&modes),
+                SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+            )
+        };
+        if status != 0 {
+            super::apply::log_rejected_plan(status, &paths, &modes);
+            return Err(super::apply::validation_error(status));
+        }
+        Ok(())
+    }
+
     fn snapshot(&self) -> Result<DisplaySnapshot, ManagerError> {
         self.refresh_active()
     }
@@ -166,15 +177,16 @@ impl DisplayBackend for WindowsDisplayBackend {
         let previous = capture_pre_recovery_state()?;
         previous.layout.ensure_supported()?;
         let _wallpaper = super::wallpaper::WallpaperState::capture(&previous);
-        match self.apply_layout_inner(layout) {
-            Ok(()) => Ok(()),
-            Err(error) => match restore_pre_extend_topology(&previous) {
-                Ok(()) => Err(ManagerError::ApplyRestored(error.to_string())),
-                Err(rollback) => Err(ManagerError::RecoveryRequired(format!(
-                    "{error}; restoring previous layout failed: {rollback}"
-                ))),
-            },
+        let gamma = super::apply::capture_active_gamma_ramps(&previous);
+        let result = monarch::transaction::apply_with_recovery(
+            || self.apply_layout_inner(layout),
+            || restore_captured_state(&previous),
+        );
+        if let Ok(observed) = query_active_only_topology() {
+            super::apply::best_effort_reload_color_calibration();
+            super::apply::best_effort_restore_gamma_ramps(&observed, &gamma);
         }
+        result
     }
     fn color_state_signature(&self) -> Result<Option<String>, ManagerError> {
         WindowsDisplayBackend::color_state_signature(self)
@@ -190,20 +202,6 @@ impl DisplayBackend for WindowsDisplayBackend {
     }
 }
 
-fn raw_path_connectors(raw: &RawTopologySnapshot) -> HashSet<(u64, u32)> {
-    raw.paths
-        .iter()
-        .map(|p| {
-            (
-                super::win32_types::luid_to_u64(
-                    p.targetInfo.adapterId.HighPart,
-                    p.targetInfo.adapterId.LowPart,
-                ),
-                p.targetInfo.id,
-            )
-        })
-        .collect()
-}
 fn merge_sdr_gamma_cache(
     cache: &mut HashMap<GammaRampKey, GammaRampWords>,
     observed: HashMap<GammaRampKey, GammaRampWords>,
@@ -221,111 +219,46 @@ fn merge_sdr_gamma_cache(
     }
 }
 
-fn desired_enables_inactive_output(desired: &Layout, active_layout: &Layout) -> bool {
-    desired.outputs.iter().any(|output| {
-        output.enabled
-            && !active_layout.outputs.iter().any(|active| {
-                active.enabled && active.display_id.endpoint() == output.display_id.endpoint()
-            })
-    })
-}
-
-fn enabled_outputs_missing_from_raw<'a>(
-    layout: &'a Layout,
-    raw: &RawTopologySnapshot,
-) -> Vec<&'a monarch::OutputConfig> {
-    let active = RawTopologySnapshot {
-        paths: raw
-            .paths
-            .iter()
-            .filter(|p| p.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG != 0)
-            .copied()
-            .collect(),
-        modes: Vec::new(),
-    };
-    let connectors = raw_path_connectors(&active);
-    layout
+fn restore_captured_state(previous: &TopologySnapshot) -> Result<(), ManagerError> {
+    use windows::Win32::Devices::Display::*;
+    let connected = query_connected_topology()?;
+    let desired = monarch::identity::resolve_layout(&previous.layout, &connected.layout)?;
+    let same_endpoints = previous
+        .layout
         .outputs
         .iter()
-        .filter(|output| output.enabled)
-        .filter(|output| {
-            !connectors.contains(&(output.display_id.adapter_luid, output.display_id.target_id))
-        })
-        .collect()
-}
-
-fn describe_output_for_error(
-    output: &monarch::OutputConfig,
-    base_snapshot: &TopologySnapshot,
-) -> String {
-    let edid = output
-        .display_id
-        .edid_hash
-        .map(|value| format!("{value:016x}"))
-        .unwrap_or_else(|| "-".to_string());
-    let friendly = base_snapshot
-        .displays
-        .iter()
-        .find(|display| {
-            display.id == output.display_id
-                || (output.display_id.edid_hash.is_some()
-                    && display.id.edid_hash == output.display_id.edid_hash)
-        })
-        .map(|display| format!("'{}' ", display.friendly_name))
-        .unwrap_or_default();
-    format!(
-        "{friendly}(target_id={}, edid_hash={edid})",
-        output.display_id.target_id
-    )
-}
-
-const RECOVER_SETTLE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(3500);
-const RECOVER_SETTLE_STEP: std::time::Duration = std::time::Duration::from_millis(250);
-/// Fill in geometry for enabled outputs that still carry the 0x0 sentinel (a display seeded from
-/// ALL_PATHS and never active on this boot) using the post-extend snapshot, where Windows has
-/// just assigned it a real source mode.
-fn fill_sentinel_geometry_from_snapshot(layout: &mut Layout, snapshot: &TopologySnapshot) {
-    for output in &mut layout.outputs {
-        if !output.enabled || output.resolution.width != 0 || output.resolution.height != 0 {
-            continue;
+        .zip(&desired.outputs)
+        .all(|(a, b)| !a.enabled || a.display_id.endpoint() == b.display_id.endpoint());
+    let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG;
+    let validation = if same_endpoints {
+        unsafe {
+            SetDisplayConfig(
+                Some(&previous.raw.paths),
+                Some(&previous.raw.modes),
+                SDC_VALIDATE | flags,
+            )
         }
-        let Some(active) = snapshot
-            .layout
-            .outputs
-            .iter()
-            .find(|active| active.display_id == output.display_id)
-        else {
-            continue;
-        };
-        output.position = active.position.clone();
-        output.resolution = active.resolution.clone();
-        output.refresh_rate_mhz = active.refresh_rate_mhz;
-        if output.rotation.is_none() {
-            output.rotation = active.rotation;
+    } else {
+        -1
+    };
+    let status = if validation == 0 {
+        unsafe {
+            SetDisplayConfig(
+                Some(&previous.raw.paths),
+                Some(&previous.raw.modes),
+                SDC_APPLY | flags | SDC_SAVE_TO_DATABASE,
+            )
         }
+    } else {
+        validation
+    };
+    if status != 0 {
+        apply_layout_against_snapshot(&desired, &connected)?;
+    } else {
+        let refreshed = super::apply::wait_for_requested_outputs(&desired)?;
+        super::apply::restore_preferences(&desired, &refreshed)?;
     }
-}
-
-/// Best-effort undo of a recovery that did not pan out. Both the explicit attach and the extend
-/// change (and persist) the topology, so leaving them in place would silently rewrite the user's
-/// setup on a failed attach. Re-applying the pre-recovery layout works because its enabled set
-/// only covers the previously active outputs, and apply's `unwrap_or(false)` disables everything
-/// the recovery added.
-fn restore_pre_extend_topology(previous: &TopologySnapshot) -> Result<(), ManagerError> {
-    query_active_only_topology()
-        .and_then(|active| {
-            let desired = monarch::identity::resolve_layout(&previous.layout, &active.layout)?;
-            apply_layout_against_snapshot(&desired, &active)
-        })
-        .or_else(|initial| {
-            let connected = query_connected_topology()?;
-            let desired = monarch::identity::resolve_layout(&previous.layout, &connected.layout)?;
-            let recovered = recover_layout(&desired, &connected).map_err(|error| {
-                ManagerError::Backend(format!("{initial}; rollback reconnect failed: {error}"))
-            })?;
-            apply_layout_against_snapshot(&desired, &recovered)
-        })
-        .map(|_| ())
+    super::apply::wait_for_verified_layout(&desired).map(|_| ())
 }
 
 /// The pre-recovery topology is the ONLY rollback net on a machine with no internal panel, so it
@@ -339,135 +272,10 @@ fn capture_pre_recovery_state() -> Result<TopologySnapshot, ManagerError> {
             diagnostics::log(format!(
                 "recover:pre_state_query_failed:{first_error}:retrying"
             ));
-            std::thread::sleep(RECOVER_SETTLE_STEP);
+            std::thread::sleep(std::time::Duration::from_millis(250));
             query_active_only_topology()
         }
     }
-}
-
-enum SettleOutcome {
-    Settled(TopologySnapshot, Layout),
-    StillMissing(String),
-}
-
-/// Poll a fresh enumeration until every enabled output of `working_layout` resolves, or the
-/// deadline passes. Polling (rather than one fixed sleep) is what an HDMI/TV handshake needs,
-/// and the remap is redone on every attempt because the connector can come back under a
-/// different (adapter_luid, target_id).
-///
-/// Reports what it observed and nothing more: rollback and error wording are the caller's call.
-fn settle_poll(
-    working_layout: &Layout,
-    deadline: std::time::Duration,
-    label: &str,
-) -> Result<SettleOutcome, ManagerError> {
-    let deadline_at = std::time::Instant::now() + deadline;
-    let mut attempt = 0usize;
-    loop {
-        attempt += 1;
-        std::thread::sleep(RECOVER_SETTLE_STEP);
-        let snapshot = match query_active_only_topology() {
-            Ok(snapshot) => snapshot,
-            Err(error) if std::time::Instant::now() < deadline_at => {
-                diagnostics::log(format!("recover:settle_query:{label}:{error}"));
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let layout = match monarch::identity::resolve_layout(working_layout, &snapshot.layout) {
-            Ok(layout) => layout,
-            Err(error) if std::time::Instant::now() < deadline_at => {
-                diagnostics::log(format!("recover:settle_identity:{label}:{error}"));
-                continue;
-            }
-            Err(error) => return Ok(SettleOutcome::StillMissing(error.to_string())),
-        };
-        let missing = enabled_outputs_missing_from_raw(&layout, &snapshot.raw);
-        diagnostics::log(format!(
-            "recover:settle_poll:{label}:{attempt}:missing={}",
-            missing.len()
-        ));
-        if missing.is_empty() {
-            return Ok(SettleOutcome::Settled(snapshot, layout));
-        }
-        if std::time::Instant::now() >= deadline_at {
-            return Ok(SettleOutcome::StillMissing(describe_output_for_error(
-                missing[0], &snapshot,
-            )));
-        }
-    }
-}
-
-/// Apply the desired layout once the recovery has brought every output back.
-fn finish_recovery(
-    recovered_snapshot: TopologySnapshot,
-    mut retry_layout: Layout,
-) -> Result<(TopologySnapshot, Layout), ManagerError> {
-    fill_sentinel_geometry_from_snapshot(&mut retry_layout, &recovered_snapshot);
-    let snapshot = apply_layout_against_snapshot(&retry_layout, &recovered_snapshot)?;
-    Ok((snapshot, retry_layout))
-}
-
-fn recover_apply_with_topology_extend(
-    working_layout: &Layout,
-) -> Result<(TopologySnapshot, Layout), ManagerError> {
-    // Every recovery step actually attempted, so the final error can name them honestly.
-    let mut attempted: Vec<&str> = Vec::new();
-
-    // Select a complete one-source-per-target assignment from fresh alternatives.
-    // Do not splice QDC_ALL_PATHS routes directly into the cached topology.
-    attempted.push("an explicit topology assignment");
-    let explicit = query_connected_topology().and_then(|connected| {
-        let desired = monarch::identity::resolve_layout(working_layout, &connected.layout)?;
-        let recovered = recover_layout(&desired, &connected)?;
-        finish_recovery(recovered, desired)
-    });
-    match explicit {
-        Ok(result) => return Ok(result),
-        Err(error) => diagnostics::log(format!("recover:explicit_assignment_failed:{error}")),
-    }
-
-    // (b) CCD topology extend. Its status cannot judge success (0 is also returned for a no-op),
-    // so the settle poll decides.
-    attempted.push("a topology extend");
-    try_topology_extend();
-    let still_missing = match settle_poll(working_layout, RECOVER_SETTLE_DEADLINE, "extend") {
-        Ok(SettleOutcome::Settled(snapshot, layout)) => {
-            diagnostics::log("recover:resolved:topology_extend");
-            return finish_recovery(snapshot, layout);
-        }
-        Ok(SettleOutcome::StillMissing(description)) => description,
-        Err(error) => {
-            return Err(error);
-        }
-    };
-
-    // (c) DisplaySwitch: same shell path as Win+P, last resort.
-    diagnostics::log(format!("recover:escalate:display_switch:{still_missing}"));
-    if let Err(error) = run_display_switch_extend() {
-        diagnostics::log(format!("recover:display_switch_failed:{error}"));
-        return Err(error);
-    }
-    attempted.push("DisplaySwitch /extend");
-
-    let still_missing = match settle_poll(working_layout, RECOVER_SETTLE_DEADLINE, "display_switch")
-    {
-        Ok(SettleOutcome::Settled(snapshot, layout)) => {
-            diagnostics::log("recover:resolved:display_switch");
-            return finish_recovery(snapshot, layout);
-        }
-        Ok(SettleOutcome::StillMissing(description)) => description,
-        Err(error) => {
-            return Err(error);
-        }
-    };
-
-    // (d) Out of options: undo everything the recovery touched and name what was tried.
-    diagnostics::log(format!("recover:still_missing:{still_missing}"));
-    Err(ManagerError::Backend(format!(
-        "cannot attach display {still_missing}: it did not come back after {}. reconnect it or attach it once from Windows Display settings",
-        attempted.join(", then ")
-    )))
 }
 
 #[cfg(test)]
@@ -478,7 +286,7 @@ mod hardware_tests {
 
     impl Drop for RestoreOnDrop {
         fn drop(&mut self) {
-            if let Err(error) = restore_pre_extend_topology(&self.0) {
+            if let Err(error) = restore_captured_state(&self.0) {
                 eprintln!("Hardware test cleanup failed: {error}");
             }
         }

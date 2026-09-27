@@ -82,6 +82,13 @@ pub struct OutputConfig {
     /// Unknown orientation is explicit for outputs without an observed mode.
     #[serde(deserialize_with = "Option::deserialize")]
     pub rotation: Option<Rotation>,
+    #[serde(default)]
+    pub hdr_enabled: Option<bool>,
+    #[serde(default)]
+    pub scale_percent: Option<u32>,
+    /// Layout-local identity; never a Windows source ID.
+    #[serde(default)]
+    pub clone_group: Option<String>,
 }
 
 /// An output without an observed mode uses 0x0. Resolve that automatic preference
@@ -95,6 +102,13 @@ pub enum ModePreference<'a> {
 }
 
 impl OutputConfig {
+    pub fn shares_source(&self, other: &Self) -> bool {
+        self.enabled
+            && other.enabled
+            && self.clone_group.is_some()
+            && self.clone_group == other.clone_group
+    }
+
     pub fn mode_preference(&self) -> ModePreference<'_> {
         if self.resolution.width == 0 && self.resolution.height == 0 {
             ModePreference::Automatic
@@ -114,8 +128,25 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Profiles currently describe extended desktops. Reject unsupported cloned
-    /// sources before journaling or mutating rather than guessing their routing.
+    pub fn normalize_clone_groups(&mut self) {
+        let mut counts = BTreeMap::new();
+        for o in self.outputs.iter().filter(|o| o.enabled) {
+            if let Some(group) = &o.clone_group {
+                *counts.entry(group.clone()).or_insert(0) += 1;
+            }
+        }
+        for o in &mut self.outputs {
+            if !o.enabled
+                || o.clone_group
+                    .as_ref()
+                    .is_some_and(|g| counts.get(g).copied().unwrap_or(0) < 2)
+            {
+                o.clone_group = None;
+            }
+        }
+    }
+
+    /// Overlap is permitted only for explicitly duplicated sources.
     pub fn ensure_supported(&self) -> Result<(), ManagerError> {
         self.ensure_valid()?;
         let active: Vec<_> = self
@@ -133,8 +164,10 @@ impl Layout {
                         < i64::from(b.position.y) + i64::from(b.resolution.height)
                     && i64::from(b.position.y)
                         < i64::from(a.position.y) + i64::from(a.resolution.height);
-                if overlap {
-                    return Err(ManagerError::Validation("cloned or overlapping displays are not supported; select Extend in Windows Display Settings first".into()));
+                if overlap && !a.shares_source(b) {
+                    return Err(ManagerError::Validation(
+                        "extended displays overlap; move them apart or choose Duplicate of".into(),
+                    ));
                 }
             }
         }
@@ -157,16 +190,44 @@ impl Layout {
             ));
         }
 
-        if self
+        let primaries: Vec<_> = self
             .outputs
             .iter()
             .filter(|o| o.enabled && o.primary)
-            .count()
-            > 1
+            .collect();
+        if primaries
+            .iter()
+            .skip(1)
+            .any(|o| !o.shares_source(primaries[0]))
         {
             return Err(ManagerError::Validation(
                 "layout has multiple primary displays".into(),
             ));
+        }
+        for (index, a) in self.outputs.iter().enumerate() {
+            if a.clone_group
+                .as_ref()
+                .is_some_and(|g| g.trim().is_empty() || g.len() > 128)
+                || a.scale_percent.is_some_and(|s| !(100..=500).contains(&s))
+            {
+                return Err(ManagerError::Validation(
+                    "invalid clone group or scaling percentage".into(),
+                ));
+            }
+            for b in self
+                .outputs
+                .iter()
+                .skip(index + 1)
+                .filter(|b| a.shares_source(b))
+            {
+                if a.position != b.position
+                    || a.resolution != b.resolution
+                    || a.scale_percent != b.scale_percent
+                    || a.primary != b.primary
+                {
+                    return Err(ManagerError::Validation("duplicated displays must share position, resolution, scaling and primary status".into()));
+                }
+            }
         }
         let mut endpoints = HashSet::new();
         for output in &self.outputs {
@@ -299,7 +360,7 @@ impl AppConfig {
     }
 }
 
-pub const CONFIG_SCHEMA_VERSION: u32 = 2;
+pub const CONFIG_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug)]
 pub struct DisplaySnapshot {

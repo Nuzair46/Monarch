@@ -7,3 +7,7 @@ mod wallpaper;
 mod win32_types;
 
 pub use topology::WindowsDisplayBackend;
+
+mod capabilities;
+mod hdr;
+mod scaling;

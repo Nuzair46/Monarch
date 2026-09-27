@@ -39,13 +39,11 @@ import {
   updateSettings,
   type ReleaseUpdateCheckResult,
 } from "./tauri";
-import type {
-  AppSettings,
-  AppSnapshot,
-  DisplayInfo,
-} from "./types";
+import type { AppSettings, AppSnapshot } from "./types";
 
-function normalizeShortcutBaseForCompare(value: string | null | undefined): string {
+function normalizeShortcutBaseForCompare(
+  value: string | null | undefined,
+): string {
   return (value ?? "").trim().toLowerCase();
 }
 
@@ -54,12 +52,15 @@ function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [pendingLayoutDecisionBusy, setPendingLayoutDecisionBusy] = useState(false);
+  const [pendingLayoutDecisionBusy, setPendingLayoutDecisionBusy] =
+    useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newProfileName, setNewProfileName] = useState("");
   const [revertTimeoutInput, setRevertTimeoutInput] = useState("10");
   const [startWithWindowsEnabled, setStartWithWindowsEnabled] = useState(false);
-  const [startupProfileName, setStartupProfileName] = useState<string | null>(null);
+  const [startupProfileName, setStartupProfileName] = useState<string | null>(
+    null,
+  );
   const [globalShortcutsEnabled, setGlobalShortcutsEnabled] = useState(
     DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
   );
@@ -71,9 +72,12 @@ function App() {
   );
   const [pendingDisplayToggle, setPendingDisplayToggle] =
     useState<PendingDisplayToggle | null>(null);
-  const [pendingProfileDelete, setPendingProfileDelete] = useState<string | null>(null);
+  const [pendingProfileDelete, setPendingProfileDelete] = useState<
+    string | null
+  >(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
-  const [updateCheckResult, setUpdateCheckResult] = useState<ReleaseUpdateCheckResult | null>(null);
+  const [updateCheckResult, setUpdateCheckResult] =
+    useState<ReleaseUpdateCheckResult | null>(null);
   const [updateCheckError, setUpdateCheckError] = useState<string | null>(null);
   const refreshInFlight = useRef<Promise<boolean> | null>(null);
   const refreshQueued = useRef(false);
@@ -89,11 +93,10 @@ function App() {
         setStartWithWindowsEnabled(next.settings.start_with_windows);
         setStartupProfileName(next.settings.startup_profile_name);
         setGlobalShortcutsEnabled(
-          next.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
+          next.settings.global_shortcuts_enabled ??
+            DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
         );
-        setProfileShortcutBaseInput(
-          next.settings.profile_shortcut_base ?? "",
-        );
+        setProfileShortcutBaseInput(next.settings.profile_shortcut_base ?? "");
         setDisplayShortcutBaseInput(
           next.settings.display_toggle_shortcut_base ?? "",
         );
@@ -160,9 +163,7 @@ function App() {
     return true;
   }
 
-  function runPendingLayoutDecision(
-    action: () => Promise<void>,
-  ): void {
+  function runPendingLayoutDecision(action: () => Promise<void>): void {
     if (pendingLayoutDecisionBusy) {
       return;
     }
@@ -194,40 +195,47 @@ function App() {
 
     const listeners = subscriptions((error) => setError(String(error)));
 
-    listeners.add(listenMonarchEvent("monarch://state-changed", () => {
-      void refreshState();
-    }));
+    listeners.add(
+      listenMonarchEvent("monarch://state-changed", () => {
+        void refreshState();
+      }),
+    );
 
-    listeners.add(listenMonarchEvent<"monarch://confirmation">("monarch://confirmation", (event) => {
-      const payload = event.payload;
+    listeners.add(
+      listenMonarchEvent<"monarch://confirmation">(
+        "monarch://confirmation",
+        (event) => {
+          const payload = event.payload;
 
-      if (payload.kind === "applied") {
-        toast("Layout applied", {
-          description: `Confirm within ${formatMs(payload.timeout_ms)} or it will roll back.`,
-        });
-      }
+          if (payload.kind === "applied") {
+            toast("Layout applied", {
+              description: `Confirm within ${formatMs(payload.timeout_ms)} or it will roll back.`,
+            });
+          }
 
-      if (payload.kind === "confirmed") {
-        toast.success("Layout confirmed.");
-      }
+          if (payload.kind === "confirmed") {
+            toast.success("Layout confirmed.");
+          }
 
-      if (payload.kind === "rollback_failed") {
-        toast.error("Could not restore the previous layout", {
-          description: `${payload.message} Try Revert again, or use Windows Display Settings.`,
-        });
-      }
+          if (payload.kind === "rollback_failed") {
+            toast.error("Could not restore the previous layout", {
+              description: `${payload.message} Try Revert again, or use Windows Display Settings.`,
+            });
+          }
 
-      if (payload.kind === "reverted") {
-        toast("Layout reverted", {
-          description:
-            payload.reason === "timeout"
-              ? "The rollback timer expired."
-              : "The pending layout was reverted.",
-        });
-      }
+          if (payload.kind === "reverted") {
+            toast("Layout reverted", {
+              description:
+                payload.reason === "timeout"
+                  ? "The rollback timer expired."
+                  : "The pending layout was reverted.",
+            });
+          }
 
-      void refreshState();
-    }));
+          void refreshState();
+        },
+      ),
+    );
 
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === "visible") {
@@ -265,9 +273,13 @@ function App() {
 
   const rawRevertTimeout = revertTimeoutInput.trim();
   const revertTimeoutIsWholeNumber = /^\d+$/.test(rawRevertTimeout);
-  const parsedRevertTimeout = revertTimeoutIsWholeNumber ? Number(rawRevertTimeout) : NaN;
+  const parsedRevertTimeout = revertTimeoutIsWholeNumber
+    ? Number(rawRevertTimeout)
+    : NaN;
   const revertTimeoutInRange =
-    revertTimeoutIsWholeNumber && parsedRevertTimeout >= 1 && parsedRevertTimeout <= 60;
+    revertTimeoutIsWholeNumber &&
+    parsedRevertTimeout >= 1 &&
+    parsedRevertTimeout <= 60;
   const duplicateShortcutBase =
     normalizeShortcutBaseForCompare(profileShortcutBaseInput) !== "" &&
     normalizeShortcutBaseForCompare(profileShortcutBaseInput) ===
@@ -287,7 +299,8 @@ function App() {
       startWithWindowsEnabled !== snapshot.settings.start_with_windows ||
       startupProfileName !== snapshot.settings.startup_profile_name ||
       globalShortcutsEnabled !==
-        (snapshot.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED) ||
+        (snapshot.settings.global_shortcuts_enabled ??
+          DEFAULT_GLOBAL_SHORTCUTS_ENABLED) ||
       profileShortcutBaseInput.trim() !==
         (snapshot.settings.profile_shortcut_base ?? "") ||
       displayShortcutBaseInput.trim() !==
@@ -322,9 +335,9 @@ function App() {
       ? "Enter a whole number between 1 and 60."
       : duplicateShortcutBase
         ? "Profile and monitor shortcut bases must be different."
-      : revertTimeoutInRange
-        ? null
-        : "Revert timeout must be a whole number between 1 and 60.";
+        : revertTimeoutInRange
+          ? null
+          : "Revert timeout must be a whole number between 1 and 60.";
 
   async function handleConfirmDisplayToggle() {
     if (!pendingDisplayToggle) {
@@ -333,7 +346,8 @@ function App() {
 
     if (hasPendingConfirmation) {
       toast("Resolve pending confirmation first", {
-        description: "Confirm or revert the current layout change before toggling another display.",
+        description:
+          "Confirm or revert the current layout change before toggling another display.",
       });
       return;
     }
@@ -344,52 +358,6 @@ function App() {
     await runAction(
       () => toggleDisplay(target.idKey),
       target.currentlyActive ? "Display detached" : "Display attached",
-    );
-  }
-
-  async function handleMakePrimaryDisplay(display: DisplayInfo) {
-    if (!snapshot) {
-      return;
-    }
-
-    if (!display.is_active || display.is_primary) {
-      return;
-    }
-
-    if (hasPendingConfirmation) {
-      toast("Resolve pending confirmation first", {
-        description: "Confirm or revert the current layout change before selecting a new primary display.",
-      });
-      return;
-    }
-
-    let foundTarget = false;
-    const nextLayout = {
-      outputs: snapshot.layout.outputs.map((output) => {
-        if (output.display_key === display.id_key) {
-          foundTarget = true;
-          return {
-            ...output,
-            primary: output.enabled,
-          };
-        }
-        return {
-          ...output,
-          primary: false,
-        };
-      }),
-    };
-
-    if (!foundTarget) {
-      const message = "Could not find display in current layout.";
-      setError(message);
-      toast.error(message);
-      return;
-    }
-
-    await runAction(
-      () => applyLayout(nextLayout),
-      `${display.friendly_name} set as primary`,
     );
   }
 
@@ -408,7 +376,8 @@ function App() {
 
     if (hasPendingConfirmation) {
       toast("Resolve pending confirmation first", {
-        description: "Profile changes are locked while a layout confirmation is pending.",
+        description:
+          "Profile changes are locked while a layout confirmation is pending.",
       });
       return;
     }
@@ -441,13 +410,10 @@ function App() {
   }
 
   async function handleSaveCurrentLayout() {
-    await runAction(
-      async () => {
-        await saveProfile(newProfileName.trim());
-        setNewProfileName("");
-      },
-      "Profile saved",
-    );
+    await runAction(async () => {
+      await saveProfile(newProfileName.trim());
+      setNewProfileName("");
+    }, "Profile saved");
   }
 
   function markSettingsDirty() {
@@ -511,8 +477,7 @@ function App() {
       startup_profile_name: startupProfileName,
       global_shortcuts_enabled: globalShortcutsEnabled,
       profile_shortcut_base: profileShortcutBaseInput.trim() || null,
-      display_toggle_shortcut_base:
-        displayShortcutBaseInput.trim() || null,
+      display_toggle_shortcut_base: displayShortcutBaseInput.trim() || null,
       profile_shortcuts: snapshot.settings.profile_shortcuts,
       display_toggle_shortcuts: snapshot.settings.display_toggle_shortcuts,
     };
@@ -524,11 +489,10 @@ function App() {
       setStartWithWindowsEnabled(nextSettings.start_with_windows);
       setStartupProfileName(nextSettings.startup_profile_name);
       setGlobalShortcutsEnabled(
-        nextSettings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
+        nextSettings.global_shortcuts_enabled ??
+          DEFAULT_GLOBAL_SHORTCUTS_ENABLED,
       );
-      setProfileShortcutBaseInput(
-        nextSettings.profile_shortcut_base ?? "",
-      );
+      setProfileShortcutBaseInput(nextSettings.profile_shortcut_base ?? "");
       setDisplayShortcutBaseInput(
         nextSettings.display_toggle_shortcut_base ?? "",
       );
@@ -548,7 +512,11 @@ function App() {
       >
         <AppHeader />
 
-        {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
+        {error ? (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
 
         {loading ? (
           <Card>
@@ -565,16 +533,15 @@ function App() {
           actionBusy={actionBusy}
           hasPendingConfirmation={hasPendingConfirmation}
           shortcutsEnabled={
-            snapshot?.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED
+            snapshot?.settings.global_shortcuts_enabled ??
+            DEFAULT_GLOBAL_SHORTCUTS_ENABLED
           }
           displayShortcutBase={
             snapshot?.settings.display_toggle_shortcut_base ?? null
           }
+          onApplyLayout={(layout) => runAction(() => applyLayout(layout))}
           onRestoreLastLayout={() => {
             void runAction(restoreLastLayout, "Restored last layout");
-          }}
-          onMakePrimaryRequest={(selected) => {
-            void handleMakePrimaryDisplay(selected);
           }}
           onToggleRequest={(selected) =>
             setPendingDisplayToggle({
@@ -591,11 +558,10 @@ function App() {
           actionBusy={actionBusy}
           hasPendingConfirmation={hasPendingConfirmation}
           shortcutsEnabled={
-            snapshot?.settings.global_shortcuts_enabled ?? DEFAULT_GLOBAL_SHORTCUTS_ENABLED
+            snapshot?.settings.global_shortcuts_enabled ??
+            DEFAULT_GLOBAL_SHORTCUTS_ENABLED
           }
-          profileShortcutBase={
-            snapshot?.settings.profile_shortcut_base ?? null
-          }
+          profileShortcutBase={snapshot?.settings.profile_shortcut_base ?? null}
           newProfileName={newProfileName}
           onNewProfileNameChange={setNewProfileName}
           onSaveCurrentLayout={() => {

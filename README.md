@@ -30,6 +30,8 @@ Monarch lets you:
 
 - Detach a monitor in software (no cable unplugging)
 - Reattach it later
+- Edit resolution, fractional refresh, orientation, HDR and supported scaling
+- Extend, duplicate or detach displays, including a duplicated pair beside an extended monitor
 - Save display layouts as profiles
 - Restore the previous layout quickly
 - Recover automatically with a confirmation timeout if a layout change goes wrong
@@ -51,6 +53,37 @@ It uses Windows display topology APIs (`DisplayConfig`) to change which outputs 
 3. Confirm the layout change (or it auto-rolls back)
 4. Click `Attach` later to bring the display back
 5. Use `Save Current Layout` in `Profiles` to store common setups
+
+## Editing displays
+
+Monarch 2.0 starts with a fresh configuration. Settings and profiles from 1.x are
+not supported or migrated; recreate profiles from your current desktop.
+
+Drag monitors in **Layout Preview** to arrange them. Dropped monitors snap to an
+adjoining edge; gaps and overlaps must be resolved before **Save layout**. This
+button applies positions only. **Discard changes** restores the preview without
+changing Windows. Arrow keys move a focused monitor; Shift makes larger adjustments.
+
+Choose **Settings** beside a monitor's Attach/Detach button to change resolution,
+refresh rate, orientation, scaling, HDR, duplication or the primary display.
+**Save settings** applies directly from that dialog; **Cancel** discards its changes.
+It does not apply unsaved positions from the preview. Both save actions use the
+confirmation timer and restore captured settings if you revert or time out.
+
+Mode lists come from Windows. Unsupported HDR or scaling controls explain why they
+are unavailable. Detached or duplicated monitors may expose only their preferred
+and observed modes; extend the monitor first to enumerate additional modes.
+**Duplicate of…** mirrors the selected display's desktop. Monarch chooses a shared
+resolution and scaling supported by all monitors in the group. Each monitor keeps
+its own refresh rate when supported at that resolution; otherwise a supported rate
+is selected for that monitor. Orientation and HDR remain per monitor. Review the
+shared settings and each monitor's refresh rate in the dialog before saving.
+If Windows rejects the combination, choose compatible settings explicitly. **Extend** places the member
+beside the remaining desktop. **Detached** keeps the other group members active.
+Profiles save the current confirmed layout and can be applied or deleted; they have
+no separate editor.
+
+Real-device verification scenarios are listed in the [Windows hardware checklist](docs/windows-hardware-checklist.md).
 
 ## Command-Line Profile Switch (Automation)
 

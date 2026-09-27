@@ -360,6 +360,7 @@ mod tests {
                 },
             ],
             settings: monarch::AppSettings::default(),
+            capabilities: vec![],
             pending_confirmation: Some(PendingConfirmationDto { remaining_ms: 5000 }),
         }
     }
