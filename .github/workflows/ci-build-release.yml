@@ -68,14 +68,6 @@ jobs:
           console.log(`Resolved release tag: ${tagName}`);
           NODE
 
-      - name: Fail if version change produced no diff
-        shell: bash
-        run: |
-          if git diff --quiet -- Cargo.toml src-tauri/Cargo.toml package.json src-tauri/tauri.conf.json; then
-            echo "No version changes detected. Provide a new version." >&2
-            exit 1
-          fi
-
       - name: Ensure tag does not already exist
         shell: bash
         run: |
@@ -85,15 +77,17 @@ jobs:
             exit 1
           fi
 
-      - name: Commit version bump and push
+      - name: Commit version bump or reuse unpublished version
         id: commit
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock package.json src-tauri/tauri.conf.json
-          git commit -m "chore(release): ${{ steps.resolve.outputs.tag_name }} [skip ci]"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): ${{ steps.resolve.outputs.tag_name }} [skip ci]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   release_build:
@@ -142,7 +136,7 @@ jobs:
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Build Windows app (MSI)
-        run: yarn tauri build --bundles msi -- --locked
+        run: yarn build:msi
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
