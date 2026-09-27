@@ -1,5 +1,15 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Volume2 } from "lucide-react";
 import type { AudioOutput, AudioSnapshot, Profile } from "@/types";
 
@@ -18,6 +28,7 @@ export function AudioOutputSelect({
   disabled: boolean;
   label?: string;
 }) {
+  const id = useId();
   const devices = [...audio.devices].sort(
     (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
   );
@@ -25,41 +36,52 @@ export function AudioOutputSelect({
   const unavailable = devices.filter((device) => !device.available);
   const missing = value && !audio.devices.some((device) => device.id === value);
   return (
-    <label className="grid min-w-0 gap-1 text-sm">
-      {label}
-      <select
-        aria-label={label}
-        className="h-10 w-full min-w-0 rounded-md border bg-background px-2 text-sm disabled:opacity-50"
-        value={value ?? ""}
+    <div className="grid min-w-0 gap-1.5">
+      <label htmlFor={id} className="field-label">
+        Audio output
+      </label>
+      <Select
+        value={value ?? "__unchanged__"}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.value || null)}
+        onValueChange={(next) =>
+          onChange(next === "__unchanged__" ? null : next)
+        }
       >
-        <option value="">Leave unchanged</option>
-        {available.length > 0 && (
-          <optgroup label="Available">
-            {available.map((device) => (
-              <option key={device.id} value={device.id}>
-                {device.name}
-              </option>
-            ))}
-          </optgroup>
-        )}
-        {(unavailable.length > 0 || missing) && (
-          <optgroup label="Unavailable">
-            {missing && (
-              <option value={value} disabled>
-                {saved?.name ?? "Saved audio output"} (unavailable)
-              </option>
-            )}
-            {unavailable.map((device) => (
-              <option key={device.id} value={device.id}>
-                {device.name} (unavailable)
-              </option>
-            ))}
-          </optgroup>
-        )}
-      </select>
-    </label>
+        <SelectTrigger id={id} aria-label={label}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__unchanged__">Leave unchanged</SelectItem>
+          {available.length > 0 && (
+            <SelectGroup>
+              <SelectSeparator />
+              <SelectLabel>Available</SelectLabel>
+              {available.map((device) => (
+                <SelectItem key={device.id} value={device.id}>
+                  {device.name}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          )}
+          {(unavailable.length > 0 || missing) && (
+            <SelectGroup>
+              <SelectSeparator />
+              <SelectLabel>Unavailable</SelectLabel>
+              {missing && (
+                <SelectItem value={value} disabled>
+                  {saved?.name ?? "Saved audio output"} (unavailable)
+                </SelectItem>
+              )}
+              {unavailable.map((device) => (
+                <SelectItem key={device.id} value={device.id}>
+                  {device.name} (unavailable)
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          )}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 
@@ -97,8 +119,8 @@ export function ProfileAudio({
   const saved = profile.audio_output?.id ?? null;
   const [selected, setSelected] = useState(saved);
   return (
-    <div className="flex min-w-0 flex-col gap-2 sm:col-span-2 sm:flex-row sm:items-end">
-      <div className="w-full sm:max-w-md">
+    <div className="flex min-w-0 flex-wrap items-end gap-2">
+      <div className="min-w-0 basis-56 grow sm:max-w-sm">
         <AudioOutputSelect
           label={`Audio output for ${profile.name}`}
           audio={audio}
@@ -111,14 +133,12 @@ export function ProfileAudio({
       {selected !== saved && (
         <>
           <Button
-            size="sm"
             disabled={disabled}
             onClick={() => onSave(profile.name, selected)}
           >
             Save audio
           </Button>
           <Button
-            size="sm"
             variant="outline"
             disabled={disabled}
             onClick={() => setSelected(saved)}

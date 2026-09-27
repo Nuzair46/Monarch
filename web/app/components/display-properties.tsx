@@ -1,6 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { SelectField } from "@/components/ui/select-field";
+import { X } from "lucide-react";
 import {
   capabilityMatches,
   changeAttachment,
@@ -22,8 +25,6 @@ import type {
   OutputConfig,
 } from "@/types";
 
-const selectClass =
-  "h-9 w-full rounded-md border bg-background px-2 text-sm disabled:opacity-50";
 const rotations = [
   ["landscape", "Landscape"],
   ["portrait", "Portrait (90°)"],
@@ -43,31 +44,27 @@ function RefreshRateField({
   onChange: (rate: number) => void;
 }) {
   const rates = refreshChoices(cap, output);
+  const choices = rates.map((rate) => ({
+    value: String(rate),
+    label: `${rate / 1000} Hz`,
+  }));
+  if (!rates.includes(output.refresh_rate_mhz)) {
+    const current = rates.some(
+      (r) => Math.abs(r - output.refresh_rate_mhz) <= 2,
+    );
+    choices.unshift({
+      value: String(output.refresh_rate_mhz),
+      label: `${output.refresh_rate_mhz / 1000} Hz (${current ? "current" : "unavailable"})`,
+    });
+  }
   return (
-    <label className="grid gap-1 text-sm">
-      {label}
-      <select
-        className={selectClass}
-        aria-label={label}
-        value={output.refresh_rate_mhz}
-        disabled={!rates.length}
-        onChange={(e) => onChange(Number(e.target.value))}
-      >
-        {!rates.includes(output.refresh_rate_mhz) && (
-          <option value={output.refresh_rate_mhz}>
-            {output.refresh_rate_mhz / 1000} Hz
-            {rates.some((r) => Math.abs(r - output.refresh_rate_mhz) <= 2)
-              ? " (current)"
-              : " (unavailable)"}
-          </option>
-        )}
-        {rates.map((rate) => (
-          <option key={rate} value={rate}>
-            {rate / 1000} Hz
-          </option>
-        ))}
-      </select>
-    </label>
+    <SelectField
+      label={label}
+      value={String(output.refresh_rate_mhz)}
+      choices={choices}
+      disabled={!rates.length}
+      onValueChange={(value) => onChange(Number(value))}
+    />
   );
 }
 
@@ -86,6 +83,11 @@ export function DisplayProperties({
   onSave: (layout: Layout) => Promise<boolean>;
   onClose: () => void;
 }) {
+  const opener = useRef(
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
   const [draft, setDraft] = useState(() => structuredClone(initial));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -129,6 +131,27 @@ export function DisplayProperties({
             o !== output && o.enabled && o.clone_group === output.clone_group,
         )?.display_key ?? "extend")
       : "extend";
+  const resolutionChoices = resolutions.map((r) => ({
+    value: `${r.width}x${r.height}`,
+    label: `${r.width} × ${r.height}`,
+  }));
+  if (!resolutionChoices.some((r) => r.value === resolutionKey))
+    resolutionChoices.unshift({
+      value: resolutionKey,
+      label: `${dimensions.width} × ${dimensions.height} (current)`,
+    });
+  const scaleChoices = scales.map((scale) => ({
+    value: String(scale),
+    label: `${scale}%`,
+  }));
+  if (output.scale_percent != null && !scales.includes(output.scale_percent))
+    scaleChoices.unshift({
+      value: String(output.scale_percent),
+      label: `${output.scale_percent}% (current)`,
+    });
+  if (preserveScaling)
+    scaleChoices.unshift({ value: "preserve", label: "Preserve scaling" });
+
   return (
     <Dialog.Root
       open
@@ -137,101 +160,96 @@ export function DisplayProperties({
       }}
     >
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/70" />
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
         <Dialog.Content
-          className="fixed left-1/2 top-1/2 z-40 max-h-[90vh] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border bg-background p-5"
-          onEscapeKeyDown={(e) => {
-            if (locked) e.preventDefault();
+          className="fixed left-1/2 top-1/2 z-40 flex max-h-[90vh] w-[calc(100%-2rem)] max-w-[560px] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border bg-background shadow-lg outline-none"
+          onEscapeKeyDown={(event) => {
+            if (locked) event.preventDefault();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (opener.current?.isConnected) opener.current.focus();
           }}
         >
-          <Dialog.Title className="text-lg font-semibold">
-            {display?.friendly_name ?? "Display"} settings
-          </Dialog.Title>
-          <Dialog.Description className="mt-1 text-sm text-muted-foreground">
-            Save to apply these settings. You can confirm or revert afterward.
-          </Dialog.Description>
-          {draft.outputs.some((o) => {
-            const before = initial.outputs.find(
-              (p) => p.display_key === o.display_key,
-            );
-            return (
-              before &&
-              (before.position.x !== o.position.x ||
-                before.position.y !== o.position.y)
-            );
-          }) && (
-            <p className="mt-2 text-sm text-muted-foreground">
-              Monitor positions will adjust to keep display edges joined and the
-              primary display at the desktop origin.
-            </p>
-          )}
-          <fieldset
-            disabled={locked}
-            className="my-5 grid gap-4 sm:grid-cols-2"
-          >
-            <label className="grid gap-1 text-sm sm:col-span-2">
-              Display mode
-              <select
-                className={selectClass}
-                aria-label="Display mode"
+          <div className="relative shrink-0 border-b px-5 py-4 pr-14">
+            <Dialog.Title className="text-base font-semibold">
+              {display?.friendly_name ?? "Display"} settings
+            </Dialog.Title>
+            <Dialog.Description className="mt-1 text-xs text-muted-foreground">
+              Changes apply when you save. Confirm to keep them, or revert.
+            </Dialog.Description>
+            <Dialog.Close asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={locked}
+                className="absolute right-3 top-3"
+                aria-label="Close monitor settings"
+              >
+                <X />
+              </Button>
+            </Dialog.Close>
+          </div>
+          <div className="min-h-0 overflow-y-auto px-5 py-5">
+            <fieldset disabled={locked} className="grid gap-4 sm:grid-cols-2">
+              <SelectField
+                label="Display mode"
+                className="sm:col-span-2"
                 value={attachment}
-                onChange={(e) => {
+                choices={[
+                  { value: "extend", label: "Extend" },
+                  { value: "detached", label: "Detached" },
+                  ...draft.outputs
+                    .filter((o) => o !== output && o.enabled)
+                    .map((o) => ({
+                      value: o.display_key,
+                      label: `Duplicate of ${snapshot.displays.find((d) => d.id_key === o.display_key)?.friendly_name ?? "Display"}`,
+                    })),
+                ]}
+                onValueChange={(value) => {
                   try {
                     setDraft(
                       fitDesktop(
                         changeAttachment(
                           draft,
                           displayKey,
-                          e.target.value,
+                          value,
                           snapshot.capabilities,
                         ),
                       ),
                     );
                     setError(null);
-                  } catch (e) {
-                    setError(e instanceof Error ? e.message : String(e));
+                  } catch (error) {
+                    setError(
+                      error instanceof Error ? error.message : String(error),
+                    );
                   }
                 }}
-              >
-                <option value="extend">Extend</option>
-                <option value="detached">Detached</option>
-                {draft.outputs
-                  .filter((o) => o !== output && o.enabled)
-                  .map((o) => (
-                    <option key={o.display_key} value={o.display_key}>
-                      Duplicate of{" "}
-                      {snapshot.displays.find((d) => d.id_key === o.display_key)
-                        ?.friendly_name ?? "Display"}
-                    </option>
-                  ))}
-              </select>
-            </label>
-            {duplicated && (
-              <p className="text-sm text-muted-foreground sm:col-span-2">
-                These monitors mirror the same desktop:{" "}
-                {members
-                  .map(
-                    (member) =>
-                      snapshot.displays.find(
-                        (d) => d.id_key === member.display_key,
-                      )?.friendly_name ?? "Display",
-                  )
-                  .join(", ")}
-                . Resolution and scaling are shared, with choices supported by
-                every monitor. Refresh rate, orientation and HDR stay per
-                monitor.
-              </p>
-            )}
-            <label className="grid gap-1 text-sm">
-              Resolution
-              <select
-                className={selectClass}
-                aria-label="Resolution"
+              />
+              {duplicated && (
+                <p className="rounded-md border bg-muted/20 p-3 text-xs leading-relaxed text-muted-foreground sm:col-span-2">
+                  Mirrors{" "}
+                  {members
+                    .filter((member) => member !== output)
+                    .map(
+                      (member) =>
+                        snapshot.displays.find(
+                          (d) => d.id_key === member.display_key,
+                        )?.friendly_name ?? "Display",
+                    )
+                    .join(", ")}
+                  . Resolution and scaling are shared. Refresh rate, orientation
+                  and HDR stay per monitor.
+                </p>
+              )}
+              <SelectField
+                label="Resolution"
                 value={resolutionKey}
+                choices={resolutionChoices}
                 disabled={!resolutions.length}
-                onChange={(e) => {
+                onValueChange={(value) => {
                   const resolution = resolutions.find(
-                    (r) => `${r.width}x${r.height}` === e.target.value,
+                    (r) => `${r.width}x${r.height}` === value,
                   )!;
                   change({
                     resolution:
@@ -241,63 +259,44 @@ export function DisplayProperties({
                         : { ...resolution },
                   });
                 }}
-              >
-                {!resolutions.some(
-                  (r) => `${r.width}x${r.height}` === resolutionKey,
-                ) && (
-                  <option value={resolutionKey}>
-                    {dimensions.width} × {dimensions.height} (current)
-                  </option>
-                )}
-                {resolutions.map((r) => (
-                  <option
-                    key={`${r.width}x${r.height}`}
-                    value={`${r.width}x${r.height}`}
-                  >
-                    {r.width} × {r.height}
-                  </option>
+              />
+              <RefreshRateField
+                output={output}
+                cap={cap}
+                onChange={(rate) => change({ refresh_rate_mhz: rate })}
+              />
+              {members
+                .filter((member) => member !== output)
+                .map((member) => (
+                  <div key={member.display_key} className="sm:col-span-2">
+                    <RefreshRateField
+                      output={member}
+                      cap={snapshot.capabilities.find((c) =>
+                        capabilityMatches(member, c),
+                      )}
+                      label={`Refresh rate — ${snapshot.displays.find((d) => d.id_key === member.display_key)?.friendly_name ?? "Display"}`}
+                      onChange={(rate) =>
+                        change({ refresh_rate_mhz: rate }, member.display_key)
+                      }
+                    />
+                  </div>
                 ))}
-              </select>
-            </label>
-            <RefreshRateField
-              output={output}
-              cap={cap}
-              onChange={(rate) => change({ refresh_rate_mhz: rate })}
-            />
-            {members
-              .filter((member) => member !== output)
-              .map((member) => (
-                <div key={member.display_key} className="sm:col-span-2">
-                  <RefreshRateField
-                    output={member}
-                    cap={snapshot.capabilities.find((c) =>
-                      capabilityMatches(member, c),
-                    )}
-                    label={`Refresh rate — ${snapshot.displays.find((d) => d.id_key === member.display_key)?.friendly_name ?? "Display"}`}
-                    onChange={(rate) =>
-                      change({ refresh_rate_mhz: rate }, member.display_key)
-                    }
-                  />
-                </div>
-              ))}
-            {!validMode && (
-              <p
-                role="alert"
-                className="text-sm text-destructive sm:col-span-2"
-              >
-                {duplicated
-                  ? "Select a supported refresh rate for each monitor at the shared resolution."
-                  : "Select a refresh rate supported at this resolution."}
-              </p>
-            )}
-            <label className="grid gap-1 text-sm">
-              Orientation
-              <select
-                className={selectClass}
-                aria-label="Orientation"
+              {!validMode && (
+                <p
+                  role="alert"
+                  className="text-xs text-danger-text sm:col-span-2"
+                >
+                  {duplicated
+                    ? "Select a supported refresh rate for each monitor at the shared resolution."
+                    : "Select a refresh rate supported at this resolution."}
+                </p>
+              )}
+              <SelectField
+                label="Orientation"
                 value={output.rotation ?? "landscape"}
-                onChange={(e) => {
-                  const rotation = e.target.value as OutputConfig["rotation"];
+                choices={rotations.map(([value, label]) => ({ value, label }))}
+                onValueChange={(value) => {
+                  const rotation = value as OutputConfig["rotation"];
                   change({
                     rotation,
                     resolution:
@@ -306,105 +305,88 @@ export function DisplayProperties({
                         : { ...dimensions },
                   });
                 }}
-              >
-                {rotations.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              Scaling
-              <select
-                className={selectClass}
-                aria-label="Scaling"
-                value={output.scale_percent ?? "preserve"}
+              />
+              <SelectField
+                label="Scaling"
+                value={String(output.scale_percent ?? "preserve")}
+                choices={scaleChoices}
                 disabled={!scales.length}
-                onChange={(e) =>
+                onValueChange={(value) =>
                   change({
-                    scale_percent:
-                      e.target.value === "preserve"
-                        ? null
-                        : Number(e.target.value),
+                    scale_percent: value === "preserve" ? null : Number(value),
                   })
                 }
-              >
-                {preserveScaling && (
-                  <option value="preserve">Preserve scaling</option>
-                )}
-                {output.scale_percent != null &&
-                  !scales.includes(output.scale_percent) && (
-                    <option value={output.scale_percent}>
-                      {output.scale_percent}% (current)
-                    </option>
-                  )}
-                {scales.map((s) => (
-                  <option key={s} value={s}>
-                    {s}%
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              HDR
-              <select
-                className={selectClass}
-                aria-label="HDR"
+              />
+              <SelectField
+                label="HDR"
                 value={
                   output.hdr_enabled == null
                     ? "preserve"
                     : String(output.hdr_enabled)
                 }
+                choices={[
+                  { value: "preserve", label: "Preserve HDR" },
+                  { value: "true", label: "On" },
+                  { value: "false", label: "Off" },
+                ]}
                 disabled={!cap?.hdr_supported}
-                onChange={(e) =>
+                onValueChange={(value) =>
                   change({
-                    hdr_enabled:
-                      e.target.value === "preserve"
-                        ? null
-                        : e.target.value === "true",
+                    hdr_enabled: value === "preserve" ? null : value === "true",
                   })
                 }
-              >
-                <option value="preserve">Preserve HDR</option>
-                <option value="true">On</option>
-                <option value="false">Off</option>
-              </select>
-            </label>
-            <label className="flex min-h-9 items-center gap-2 text-sm sm:col-span-2">
-              <input
-                type="checkbox"
-                className="m-0 h-4 w-4 shrink-0 accent-primary"
-                checked={output.primary}
-                disabled={!output.enabled || output.primary}
-                onChange={() => change({ primary: true })}
               />
-              Primary display
-            </label>
-          </fieldset>
-          {!cap && (
-            <p className="text-sm text-muted-foreground">
-              Live capabilities are unavailable. Reconnect the monitor before
-              applying new properties.
-            </p>
-          )}
-          {[
-            cap?.modes_unavailable_reason,
-            cap?.hdr_unavailable_reason,
-            cap?.scaling_unavailable_reason,
-          ]
-            .filter(Boolean)
-            .map((reason) => (
-              <p key={reason} className="mt-2 text-xs text-muted-foreground">
-                {reason}
+              <label className="flex min-h-9 items-center gap-2.5 self-end text-sm">
+                <Checkbox
+                  checked={output.primary}
+                  disabled={!output.enabled || output.primary}
+                  onCheckedChange={() => change({ primary: true })}
+                />
+                Primary display
+              </label>
+            </fieldset>
+            {draft.outputs.some((o) => {
+              const before = initial.outputs.find(
+                (p) => p.display_key === o.display_key,
+              );
+              return (
+                before &&
+                (before.position.x !== o.position.x ||
+                  before.position.y !== o.position.y)
+              );
+            }) && (
+              <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
+                Monitor positions will adjust to keep display edges joined and
+                the primary display at the desktop origin.
               </p>
-            ))}
-          {error && (
-            <p role="alert" className="mt-2 text-sm text-destructive">
-              {error}
-            </p>
-          )}
-          <div className="mt-5 flex justify-end gap-2 border-t pt-4">
+            )}
+            {!cap && (
+              <p className="mt-4 text-xs text-muted-foreground">
+                Live capabilities are unavailable. Reconnect the monitor before
+                applying new properties.
+              </p>
+            )}
+            {[
+              cap?.modes_unavailable_reason,
+              cap?.hdr_unavailable_reason,
+              cap?.scaling_unavailable_reason,
+            ]
+              .filter(Boolean)
+              .map((reason) => (
+                <p
+                  key={reason}
+                  className="mt-3 text-xs leading-relaxed text-muted-foreground"
+                >
+                  {reason}
+                </p>
+              ))}
+            {error && (
+              <p role="alert" className="mt-4 text-sm text-danger-text">
+                {error}
+              </p>
+            )}
+          </div>
+          <div className="flex shrink-0 justify-end gap-2 border-t bg-muted/10 px-5 py-4">
             <Button variant="outline" disabled={locked} onClick={onClose}>
               Cancel
             </Button>

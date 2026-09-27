@@ -14,7 +14,7 @@ export const DEFAULT_PROFILE_SHORTCUT_BASE = "Ctrl+Shift";
 export const REPO_URL = "https://github.com/Nuzair46/Monarch";
 
 export const VIEW_OPTIONS = [
-  { id: "main", label: "Main" },
+  { id: "main", label: "Displays" },
   { id: "profiles", label: "Profiles" },
   { id: "settings", label: "Settings" },
 ] satisfies Array<{ id: View; label: string }>;

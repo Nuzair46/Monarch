@@ -73,7 +73,7 @@ export function MonitorArrangement({
   return (
     <svg
       ref={svg}
-      className="h-80 w-full touch-none select-none rounded-md border bg-muted/20"
+      className="h-72 w-full touch-none select-none rounded-md border bg-muted/10 sm:h-80 xl:h-[360px]"
       viewBox={bounds}
       aria-label={label}
       onPointerMove={(event) => {
@@ -153,8 +153,8 @@ export function MonitorArrangement({
             y={monitor.y}
             width={monitor.width}
             height={monitor.height}
-            className="fill-background stroke-foreground/40 group-focus-visible:stroke-primary"
-            strokeWidth="2"
+            className="fill-muted/35 stroke-foreground/35 transition-colors group-hover:fill-muted/55 group-focus-visible:stroke-primary"
+            strokeWidth="1.5"
             vectorEffect="non-scaling-stroke"
           />
           <text
@@ -163,7 +163,7 @@ export function MonitorArrangement({
             textAnchor="middle"
             dominantBaseline="central"
             fontSize={Math.min(monitor.width, monitor.height) * 0.2}
-            className="pointer-events-none fill-foreground"
+            className="pointer-events-none fill-foreground font-mono"
           >
             {monitor.label}
           </text>
