@@ -7,7 +7,7 @@ use windows::Win32::Devices::Display::{
     SetDisplayConfig, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_ROTATION_IDENTITY,
     DISPLAYCONFIG_SCALING_PREFERRED, DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED,
     SDC_ALLOW_CHANGES, SDC_ALLOW_PATH_ORDER_CHANGES, SDC_APPLY, SDC_TOPOLOGY_SUPPLIED,
-    SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
 };
 
 use super::apply::wait_for_requested_outputs;
@@ -28,13 +28,13 @@ pub(super) fn recover_layout(
     // A topology-only request must contain one chosen path per target, no mode table, and
     // invalid source/target mode indices. Try Windows' saved modes for this exact topology.
     // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setdisplayconfig
-    let database_status = unsafe {
-        SetDisplayConfig(
-            Some(paths.as_slice()),
-            None,
-            SDC_APPLY | SDC_TOPOLOGY_SUPPLIED | SDC_ALLOW_PATH_ORDER_CHANGES,
-        )
-    };
+    let database_flags = SDC_TOPOLOGY_SUPPLIED | SDC_ALLOW_PATH_ORDER_CHANGES;
+    let mut database_status =
+        unsafe { SetDisplayConfig(Some(paths.as_slice()), None, SDC_VALIDATE | database_flags) };
+    if database_status == 0 {
+        database_status =
+            unsafe { SetDisplayConfig(Some(paths.as_slice()), None, SDC_APPLY | database_flags) };
+    }
     let database_result = if database_status == 0 {
         wait_for_requested_outputs(desired)
     } else {
@@ -47,17 +47,17 @@ pub(super) fn recover_layout(
         Err(database_error) => {
             // The database may only know the reduced desktop. With unspecified modes, Windows
             // can compute a working configuration for the explicit complete target set instead.
-            let best_mode_status = unsafe {
-                SetDisplayConfig(
-                    Some(paths.as_slice()),
-                    None,
-                    SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES,
-                )
-            };
+            let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES;
+            let mut best_mode_status =
+                unsafe { SetDisplayConfig(Some(paths.as_slice()), None, SDC_VALIDATE | flags) };
+            if best_mode_status == 0 {
+                best_mode_status =
+                    unsafe { SetDisplayConfig(Some(paths.as_slice()), None, SDC_APPLY | flags) };
+            }
             if best_mode_status != 0 {
                 return Err(ManagerError::Backend(format!(
-                "display reconnect failed: {database_error}; best-mode status {best_mode_status}"
-            )));
+                    "display reconnect failed: {database_error}; best-mode status {best_mode_status}"
+                )));
             }
         }
     }

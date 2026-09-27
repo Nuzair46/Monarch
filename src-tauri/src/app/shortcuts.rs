@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{Mutex, OnceLock};
 
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -21,7 +22,18 @@ struct ShortcutBinding {
     label: String,
 }
 
+fn sync_shortcuts_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn sync_global_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    // Serialize concurrent syncs: two racing callers can otherwise interleave
+    // unregister_all/on_shortcut and leave zero shortcuts registered until the next sync.
+    // Blocking lock (not try_lock) so the last caller always converges on the latest state.
+    let _sync_guard = sync_shortcuts_lock()
+        .lock()
+        .map_err(|_| "shortcut sync lock poisoned".to_string())?;
     let bindings = collect_bindings(app)?;
     validate_unique_shortcuts(&bindings)?;
 
@@ -35,22 +47,24 @@ pub fn sync_global_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
         let action = binding.action.clone();
         let label = binding.label.clone();
 
-        if let Err(err) = manager.on_shortcut(shortcut_string.as_str(), move |app_handle, _, event| {
-            if event.state != ShortcutState::Pressed {
-                return;
-            }
+        if let Err(err) =
+            manager.on_shortcut(shortcut_string.as_str(), move |app_handle, _, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
 
-            let app_handle = app_handle.clone();
-            let action = action.clone();
-            std::thread::spawn(move || match action {
-                ShortcutAction::ApplyProfile(name) => {
-                    handle_profile_apply_external_action(&app_handle, &name)
-                }
-                ShortcutAction::ToggleDisplay(display_key) => {
-                    handle_toggle_display_external_action(&app_handle, &display_key)
-                }
-            });
-        }) {
+                let app_handle = app_handle.clone();
+                let action = action.clone();
+                std::thread::spawn(move || match action {
+                    ShortcutAction::ApplyProfile(name) => {
+                        handle_profile_apply_external_action(&app_handle, &name)
+                    }
+                    ShortcutAction::ToggleDisplay(display_key) => {
+                        handle_toggle_display_external_action(&app_handle, &display_key)
+                    }
+                });
+            })
+        {
             let _ = manager.unregister_all();
             return Err(format!(
                 "failed to register global shortcut '{shortcut_string}' for {label}: {err}"
@@ -91,17 +105,18 @@ fn collect_bindings<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<ShortcutBindin
             Some(trimmed.to_string())
         }
     });
-    let display_toggle_shortcut_base = settings
-        .display_toggle_shortcut_base
-        .clone()
-        .and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
+    let display_toggle_shortcut_base =
+        settings
+            .display_toggle_shortcut_base
+            .clone()
+            .and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
     let profile_shortcuts = settings.profile_shortcuts.clone();
     let display_toggle_shortcuts = settings.display_toggle_shortcuts.clone();
 

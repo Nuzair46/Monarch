@@ -5,8 +5,10 @@ use std::ffi::OsStr;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus};
+use std::time::{Duration, Instant};
 
+use crate::diagnostics;
 use monarch::{Layout, ManagerError};
 use windows::core::BOOL;
 use windows::core::{w, PCWSTR};
@@ -17,7 +19,8 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
     DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
     DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION,
-    SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    SDC_PATH_PERSIST_IF_REQUIRED, SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND,
+    SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
 use windows::Win32::System::Com::{
@@ -98,7 +101,7 @@ pub(super) fn wait_for_requested_outputs(
     // Some drivers publish their new topology a little after SetDisplayConfig succeeds.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let snapshot = super::enumerate::query_active_topology()?;
+        let snapshot = super::enumerate::query_active_only_topology()?;
         match verify_requested_outputs(desired, &snapshot.layout) {
             Ok(()) => return Ok(snapshot),
             Err(error) if std::time::Instant::now() >= deadline => return Err(error),
@@ -138,43 +141,101 @@ pub fn apply_layout_against_snapshot(
     }
     reorder_paths_for_desired_priority(&mut next_paths, &desired_outputs);
 
-    unsafe {
-        // Try an exact apply first to minimize Windows "helpful" topology/mode adjustments that
-        // can disturb remaining displays. Fall back to ALLOW_CHANGES for compatibility.
-        let exact_flags = SDC_APPLY
-            | SDC_USE_SUPPLIED_DISPLAY_CONFIG
-            | SDC_SAVE_TO_DATABASE
-            | SDC_NO_OPTIMIZATION;
-        let mut status = SetDisplayConfig(
-            Some(next_paths.as_slice()),
-            Some(next_modes.as_slice()),
-            exact_flags,
-        );
-        if status != 0 {
-            status = SetDisplayConfig(
-                Some(next_paths.as_slice()),
-                Some(next_modes.as_slice()),
-                SDC_APPLY
-                    | SDC_USE_SUPPLIED_DISPLAY_CONFIG
-                    | SDC_SAVE_TO_DATABASE
-                    | SDC_ALLOW_CHANGES,
-            );
+    let mut status = 0;
+    for allow_changes in [false, true] {
+        let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG
+            | if allow_changes {
+                SDC_ALLOW_CHANGES
+            } else {
+                Default::default()
+            };
+        // APPLY-only flags must not leak into a validation request.
+        status =
+            unsafe { SetDisplayConfig(Some(&next_paths), Some(&next_modes), SDC_VALIDATE | flags) };
+        if status == 0 {
+            status = unsafe {
+                SetDisplayConfig(
+                    Some(&next_paths),
+                    Some(&next_modes),
+                    SDC_APPLY | flags | SDC_SAVE_TO_DATABASE | SDC_NO_OPTIMIZATION,
+                )
+            };
         }
-
-        if status != 0 {
-            return Err(ManagerError::Backend(format!(
-                "SetDisplayConfig failed: {}",
-                status
-            )));
+        if status == 0 {
+            break;
         }
+        diagnostics::log(format!(
+            "apply:sdc_failed:{status}:allow_changes={allow_changes}"
+        ));
+    }
+    if status != 0 {
+        return Err(ManagerError::Backend(format!(
+            "SetDisplayConfig failed: {status}"
+        )));
     }
 
-    let next_snapshot = wait_for_requested_outputs(desired)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let next_snapshot = loop {
+        let observed = super::enumerate::query_active_only_topology().and_then(|snapshot| {
+            monarch::verification::verify_applied_layout(desired, &snapshot.layout)?;
+            Ok(snapshot)
+        });
+        match observed {
+            Ok(snapshot) => break snapshot,
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
     best_effort_reload_color_calibration();
     best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
     best_effort_restore_wallpapers(&next_snapshot, &saved_wallpapers);
     best_effort_restore_wallpaper_position(saved_wallpaper_position);
     Ok(next_snapshot)
+}
+
+/// Replay the saved extended topology. Validate first; the caller must still observe
+/// the requested active outputs, since successful application may be a no-op.
+pub(super) fn try_topology_extend() -> i32 {
+    let flags = SDC_TOPOLOGY_EXTEND | SDC_PATH_PERSIST_IF_REQUIRED;
+    let validation = unsafe { SetDisplayConfig(None, None, SDC_VALIDATE | flags) };
+    if validation != 0 {
+        diagnostics::log(format!("apply:extend_validation_failed:{validation}"));
+        return validation;
+    }
+    let status = unsafe { SetDisplayConfig(None, None, SDC_APPLY | flags) };
+    diagnostics::log(format!("apply:sdc_status:{status}:topology_extend"));
+    status
+}
+
+/// Drive the same shell path Win+P uses. Escalation of last resort, decided by the caller when
+/// the CCD extend did not bring the display back.
+pub(super) fn run_display_switch_extend() -> Result<(), ManagerError> {
+    let display_switch_child = Command::new("DisplaySwitch.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .arg("/extend")
+        .spawn()
+        .map_err(|err| {
+            ManagerError::Backend(format!("DisplaySwitch /extend launch failed: {err}"))
+        })?;
+
+    let Some(display_switch_status) = wait_child_with_timeout(
+        display_switch_child,
+        "DisplaySwitch.exe",
+        Duration::from_secs(10),
+    ) else {
+        return Err(ManagerError::Backend(
+            "DisplaySwitch /extend timed out".to_string(),
+        ));
+    };
+
+    if !display_switch_status.success() {
+        return Err(ManagerError::Backend(format!(
+            "DisplaySwitch /extend failed with exit code {:?}",
+            display_switch_status.code()
+        )));
+    }
+
+    Ok(())
 }
 
 pub(super) fn reapply_color_calibration_for_active_with_cached_sdr(
@@ -292,14 +353,42 @@ fn best_effort_reload_color_calibration() {
 
     // Fallback: trigger Windows' built-in calibration loader task (may fail under standard user
     // task permissions on some machines; that's fine).
-    let _ = Command::new("schtasks.exe")
+    if let Ok(child) = Command::new("schtasks.exe")
         .creation_flags(CREATE_NO_WINDOW)
         .args([
             "/Run",
             "/TN",
             r"\Microsoft\Windows\WindowsColorSystem\Calibration Loader",
         ])
-        .status();
+        .spawn()
+    {
+        let _ = wait_child_with_timeout(child, "schtasks.exe", Duration::from_secs(5));
+    }
+}
+
+/// Poll a child process in 100ms steps until it exits or the timeout elapses. On timeout the
+/// child is killed and `None` is returned, so a wedged helper process can never block an apply
+/// (and with it the global state mutex) indefinitely.
+fn wait_child_with_timeout(mut child: Child, name: &str, timeout: Duration) -> Option<ExitStatus> {
+    let poll_step = Duration::from_millis(100);
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {}
+            Err(err) => {
+                diagnostics::log(format!("child_wait:error:{name}:{err}"));
+                let _ = child.kill();
+                return None;
+            }
+        }
+        if Instant::now() >= deadline {
+            diagnostics::log(format!("child_wait:timeout:{name}"));
+            let _ = child.kill();
+            return None;
+        }
+        std::thread::sleep(poll_step);
+    }
 }
 
 fn capture_active_gamma_ramps(snapshot: &TopologySnapshot) -> HashMap<(u64, u32), GammaRampWords> {
@@ -475,6 +564,12 @@ fn apply_desired_source_mode(
     let Some(output) = desired_output.copied() else {
         return;
     };
+    if output.resolution.width == 0 || output.resolution.height == 0 {
+        // Geometry sentinel (a seeded, never-yet-active display): writing 0x0 into the source
+        // mode would make SetDisplayConfig fail with 87 or stack the display on the primary.
+        // Leave the snapshot's real source mode untouched and let Windows place it.
+        return;
+    }
 
     let mode_index = unsafe { path.sourceInfo.Anonymous.modeInfoIdx } as usize;
     let Some(mode) = modes.get_mut(mode_index) else {
@@ -764,6 +859,7 @@ mod tests {
             },
             layout: layout(targets),
             displays: Vec::new(),
+            attachable: Vec::new(),
         }
     }
 

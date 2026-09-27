@@ -1,6 +1,6 @@
 [package]
 name = "monarch-desktop"
-version = "1.5.2-restore.1"
+version = "1.5.1"
 description = "Monarch - Display Output Manager"
 authors = ["Codex"]
 edition = "2021"
@@ -26,6 +26,7 @@ windows = { version = "0.60", features = [
   "Win32_Devices_Display",
   "Win32_Graphics_Gdi",
   "Win32_System_Com",
+  "Win32_System_LibraryLoader",
   "Win32_System_Threading",
   "Win32_UI_ColorSystem",
   "Win32_UI_Shell",

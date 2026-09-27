@@ -61,4 +61,5 @@ export type AppSnapshot = {
 export type ConfirmationEvent =
   | { kind: "applied"; timeout_ms: number }
   | { kind: "confirmed" }
-  | { kind: "reverted"; reason: "manual" | "timeout" | "error" };
+  | { kind: "reverted"; reason: "manual" | "timeout" | "error" }
+  | { kind: "rollback_failed"; message: string };

@@ -247,6 +247,12 @@ function App() {
         toast.success("Layout confirmed.");
       }
 
+      if (payload.kind === "rollback_failed") {
+        toast.error("Could not restore the previous layout", {
+          description: `${payload.message} Try Revert again, or use Windows Display Settings.`,
+        });
+      }
+
       if (payload.kind === "reverted") {
         toast("Layout reverted", {
           description:

@@ -52,6 +52,8 @@ where
 {
     pub fn new(backend: B, store: S) -> Result<Self, ManagerError> {
         let mut config = store.load()?;
+        let current_layout = backend.get_layout()?;
+        let current_displays = backend.list_displays().unwrap_or_default();
         let mut should_persist = false;
         if config
             .settings
@@ -79,13 +81,22 @@ where
         let confirmation_timeout = Duration::from_secs(config.settings.revert_timeout_secs.max(1));
 
         if config.last_known_good_layout.is_none() || config.last_restorable_layout.is_none() {
-            let current_layout = backend.get_layout()?;
             if config.last_known_good_layout.is_none() {
                 config.last_known_good_layout = Some(current_layout.clone());
             }
             if config.last_restorable_layout.is_none() {
-                config.last_restorable_layout = Some(current_layout);
+                config.last_restorable_layout = Some(current_layout.clone());
             }
+            should_persist = true;
+        }
+        if sync_display_fingerprints(&mut config, &current_displays) {
+            should_persist = true;
+        }
+        if migrate_saved_layout_ids_with_fingerprints(
+            &mut config,
+            &current_layout,
+            &current_displays,
+        ) {
             should_persist = true;
         }
         if should_persist {
@@ -121,8 +132,18 @@ where
         self.backend.reapply_color_calibration()
     }
 
+    pub fn invalidate_backend_cache(&self) -> Result<(), ManagerError> {
+        self.backend.invalidate_cache()
+    }
+
     pub fn has_pending_confirmation(&self) -> bool {
         self.pending_confirmation.is_some()
+    }
+
+    pub fn pending_confirmation_started_at(&self) -> Option<Instant> {
+        self.pending_confirmation
+            .as_ref()
+            .map(|pending| pending.applied_at)
     }
 
     pub fn pending_confirmation_remaining(&self) -> Option<Duration> {
@@ -278,16 +299,83 @@ where
         target_layout.ensure_valid()?;
         normalize_primary(&mut target_layout);
 
-        let mut current_layout = self.backend.get_layout()?;
-        normalize_primary(&mut current_layout);
-        target_layout = remap_layout_display_ids(&target_layout, &current_layout);
-        ensure_any_enabled_output_resolves(&target_layout, &current_layout)?;
+        let (target_layout, current_layout) = self.remap_and_resolve_for_apply(target_layout)?;
 
         if current_layout == target_layout {
             return Ok(());
         }
 
         self.apply_layout(target_layout)
+    }
+
+    /// Remap the desired layout onto the current enumeration and strictly validate it. An enabled
+    /// output that does not resolve names a display the backend is not enumerating at all, so
+    /// there is nothing to apply: the backend gets a chance to record why (it must not change the
+    /// topology — nothing it could do would make an absent display appear), and then the layout
+    /// is rejected with an actionable error. Attaching a display that IS enumerated but detached
+    /// needs none of this: it already resolves, and `apply_layout` attaches it.
+    fn remap_and_resolve_for_apply(
+        &self,
+        target_layout: Layout,
+    ) -> Result<(Layout, Layout), ManagerError> {
+        let mut current_layout = self.backend.get_layout()?;
+        normalize_primary(&mut current_layout);
+        let target_layout = remap_layout_display_ids(&target_layout, &current_layout);
+
+        if ensure_all_enabled_outputs_resolve(&target_layout, &current_layout).is_ok() {
+            return Ok((target_layout, current_layout));
+        }
+
+        self.backend.prepare_attach_targets(&target_layout)?;
+        let mut current_layout = self.backend.get_layout()?;
+        normalize_primary(&mut current_layout);
+        let target_layout = remap_layout_display_ids(&target_layout, &current_layout);
+        self.ensure_outputs_resolve_or_report_disconnected(&target_layout, &current_layout)?;
+        Ok((target_layout, current_layout))
+    }
+
+    fn ensure_outputs_resolve_or_report_disconnected(
+        &self,
+        desired: &Layout,
+        current: &Layout,
+    ) -> Result<(), ManagerError> {
+        let current_ids: HashSet<&DisplayId> = current
+            .outputs
+            .iter()
+            .map(|output| &output.display_id)
+            .collect();
+
+        let Some(unresolved) = desired
+            .outputs
+            .iter()
+            .find(|output| output.enabled && !current_ids.contains(&output.display_id))
+        else {
+            return Ok(());
+        };
+
+        let edid_hash = unresolved
+            .display_id
+            .edid_hash
+            .map(|value| format!("{value:016x}"))
+            .unwrap_or_else(|| "-".to_string());
+        let friendly = self
+            .backend
+            .list_displays()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|display| {
+                display.id == unresolved.display_id
+                    || (unresolved.display_id.edid_hash.is_some()
+                        && display.id.edid_hash == unresolved.display_id.edid_hash)
+            })
+            .map(|display| format!("'{}' ", display.friendly_name))
+            .unwrap_or_default();
+        // This is NOT an attach failure: the display is not being enumerated at all (powered off,
+        // unplugged, or reported unavailable). Say so, instead of blaming a rescue that never ran.
+        Err(ManagerError::Validation(format!(
+            "display {friendly}(target_id={}, edid_hash={edid_hash}) is not connected right now: Windows does not report it as an available display. turn it on or reconnect it and try again, or re-save the profile without it",
+            unresolved.display_id.target_id
+        )))
     }
 
     pub fn delete_profile(&mut self, name: &str) -> Result<(), ManagerError> {
@@ -309,13 +397,11 @@ where
             .or_else(|| self.config.last_known_good_layout.clone())
             .ok_or_else(|| ManagerError::NotFound("last restorable layout".to_string()))?;
 
-        let current_layout = self.backend.get_layout()?;
         let mut remapped_target_layout = target_layout;
         remapped_target_layout.ensure_valid()?;
         normalize_primary(&mut remapped_target_layout);
-        let remapped_target_layout =
-            remap_layout_display_ids(&remapped_target_layout, &current_layout);
-        ensure_any_enabled_output_resolves(&remapped_target_layout, &current_layout)?;
+        let (remapped_target_layout, current_layout) =
+            self.remap_and_resolve_for_apply(remapped_target_layout)?;
         self.backend.apply_layout(remapped_target_layout.clone())?;
         self.pending_confirmation = None;
         self.config.last_restorable_layout = Some(current_layout);
@@ -466,16 +552,177 @@ fn resolve_display_id_for_layout_action(
         }
     }
 
-    let mut matches = layout
-        .outputs
-        .iter()
-        .filter(|output| output.display_id.target_id == requested.target_id);
-    let first = matches.next()?;
-    if matches.next().is_none() {
-        return Some(first.display_id.clone());
+    if requested.edid_hash.is_none() {
+        let mut matches = layout
+            .outputs
+            .iter()
+            .filter(|output| output.display_id.target_id == requested.target_id);
+        let first = matches.next()?;
+        if matches.next().is_none() {
+            return Some(first.display_id.clone());
+        }
     }
 
     None
+}
+
+fn fingerprint_for_display(display_id: &DisplayId, friendly_name: Option<&str>) -> Option<String> {
+    let edid_hash = display_id.edid_hash?;
+    let normalized_name = friendly_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    Some(format!("{edid_hash:016x}:{normalized_name}"))
+}
+
+fn sync_display_fingerprints(config: &mut AppConfig, displays: &[DisplayInfo]) -> bool {
+    let mut changed = false;
+    for display in displays {
+        let fingerprint = fingerprint_for_display(&display.id, Some(&display.friendly_name));
+        let next = crate::model::DisplayFingerprint {
+            display_id: display.id.clone(),
+            friendly_name: display.friendly_name.clone(),
+            edid_fingerprint: fingerprint,
+        };
+
+        if let Some(existing) = config
+            .display_fingerprints
+            .iter_mut()
+            .find(|candidate| candidate.display_id == next.display_id)
+        {
+            if existing != &next {
+                *existing = next;
+                changed = true;
+            }
+        } else {
+            config.display_fingerprints.push(next);
+            changed = true;
+        }
+    }
+
+    if changed {
+        config
+            .display_fingerprints
+            .sort_by(|left, right| left.display_id.cmp(&right.display_id));
+    }
+    changed
+}
+
+fn migrate_saved_layout_ids_with_fingerprints(
+    config: &mut AppConfig,
+    current_layout: &Layout,
+    current_displays: &[DisplayInfo],
+) -> bool {
+    let mut changed = false;
+    let mut remap_profile_layout = |layout: &mut Layout| {
+        let remapped = remap_layout_display_ids_with_fingerprints(
+            layout,
+            current_layout,
+            current_displays,
+            &config.display_fingerprints,
+        );
+        if &remapped != layout {
+            *layout = remapped;
+            changed = true;
+        }
+    };
+
+    for profile in &mut config.profiles {
+        remap_profile_layout(&mut profile.layout);
+    }
+
+    if let Some(layout) = &mut config.last_known_good_layout {
+        remap_profile_layout(layout);
+    }
+    if let Some(layout) = &mut config.last_restorable_layout {
+        remap_profile_layout(layout);
+    }
+
+    changed
+}
+
+fn remap_layout_display_ids_with_fingerprints(
+    desired: &Layout,
+    current: &Layout,
+    current_displays: &[DisplayInfo],
+    fingerprints: &[crate::model::DisplayFingerprint],
+) -> Layout {
+    let mut remapped = remap_layout_display_ids(desired, current);
+    let current_ids: HashSet<DisplayId> = current
+        .outputs
+        .iter()
+        .map(|output| output.display_id.clone())
+        .collect();
+    let mut used: HashSet<DisplayId> = remapped
+        .outputs
+        .iter()
+        .filter(|output| current_ids.contains(&output.display_id))
+        .map(|output| output.display_id.clone())
+        .collect();
+
+    let friendly_by_id: HashMap<DisplayId, String> = current_displays
+        .iter()
+        .map(|display| (display.id.clone(), display.friendly_name.clone()))
+        .collect();
+    let fingerprint_by_id: HashMap<DisplayId, String> = fingerprints
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .edid_fingerprint
+                .as_ref()
+                .map(|fingerprint| (entry.display_id.clone(), fingerprint.clone()))
+        })
+        .collect();
+
+    let mut current_by_fingerprint: HashMap<String, Vec<DisplayId>> = HashMap::new();
+    for output in &current.outputs {
+        let fingerprint = fingerprint_by_id
+            .get(&output.display_id)
+            .cloned()
+            .or_else(|| {
+                let friendly = friendly_by_id.get(&output.display_id).map(String::as_str);
+                fingerprint_for_display(&output.display_id, friendly)
+            });
+        if let Some(fingerprint) = fingerprint {
+            current_by_fingerprint
+                .entry(fingerprint)
+                .or_default()
+                .push(output.display_id.clone());
+        }
+    }
+
+    for output in &mut remapped.outputs {
+        if current_ids.contains(&output.display_id) {
+            continue;
+        }
+
+        let fingerprint = fingerprint_by_id
+            .get(&output.display_id)
+            .cloned()
+            .or_else(|| fingerprint_for_display(&output.display_id, None));
+        let Some(fingerprint) = fingerprint else {
+            continue;
+        };
+        let Some(candidates) = current_by_fingerprint.get(&fingerprint) else {
+            continue;
+        };
+
+        let available: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| !used.contains(*candidate))
+            .cloned()
+            .collect();
+        if available.len() != 1 {
+            continue;
+        }
+
+        let replacement = available[0].clone();
+        used.insert(replacement.clone());
+        output.display_id = replacement;
+    }
+
+    remapped
 }
 
 fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
@@ -520,21 +767,23 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
                 current_by_edid.get(&edid_hash).cloned().unwrap_or_default(),
                 &used,
             );
-            if candidates.len() == 1 {
-                replacement = Some(candidates[0].display_id.clone());
-            }
+            replacement =
+                choose_remap_candidate(&candidates).map(|candidate| candidate.display_id.clone());
         }
 
-        if replacement.is_none() {
+        if replacement.is_none() && output.display_id.edid_hash.is_none() {
             // Deterministic fallback for legacy profiles created before EDID hashes were
-            // persisted: only remap by target id when there is exactly one unused candidate.
+            // persisted: remap by target id with the same deterministic preference, but never
+            // guess across adapters (iGPU/dGPU pairs reuse the same target id numbering, so a
+            // cross-adapter pick could land on the wrong physical monitor and get persisted).
             let candidates = unique_unused_candidates_by_target_id(
                 output.display_id.target_id,
                 &current.outputs,
                 &used,
             );
-            if candidates.len() == 1 {
-                replacement = Some(candidates[0].display_id.clone());
+            if candidates_share_one_adapter(&candidates) {
+                replacement = choose_remap_candidate(&candidates)
+                    .map(|candidate| candidate.display_id.clone());
             }
         }
 
@@ -547,7 +796,7 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
     remapped
 }
 
-fn ensure_any_enabled_output_resolves(
+fn ensure_all_enabled_outputs_resolve(
     desired: &Layout,
     current: &Layout,
 ) -> Result<(), ManagerError> {
@@ -557,18 +806,58 @@ fn ensure_any_enabled_output_resolves(
         .map(|output| &output.display_id)
         .collect();
 
-    let any_enabled_resolved = desired
+    if let Some(unresolved) = desired
         .outputs
         .iter()
-        .any(|output| output.enabled && current_ids.contains(&output.display_id));
-
-    if !any_enabled_resolved {
+        .find(|output| output.enabled && !current_ids.contains(&output.display_id))
+    {
+        let edid_hash = unresolved
+            .display_id
+            .edid_hash
+            .map(|value| format!("{value:016x}"))
+            .unwrap_or_else(|| "-".to_string());
         return Err(ManagerError::Validation(format!(
-            "profile/layout does not match any currently-known enabled display on this system"
+            "profile/layout references an unknown display (target_id={}, edid_hash={edid_hash}). re-save the profile on this system",
+            unresolved.display_id.target_id
         )));
     }
 
     Ok(())
+}
+
+fn candidates_share_one_adapter(candidates: &[&crate::model::OutputConfig]) -> bool {
+    let mut adapters = candidates
+        .iter()
+        .map(|candidate| candidate.display_id.adapter_luid);
+    let Some(first) = adapters.next() else {
+        return true;
+    };
+    adapters.all(|adapter| adapter == first)
+}
+
+fn choose_remap_candidate<'a>(
+    candidates: &[&'a crate::model::OutputConfig],
+) -> Option<&'a crate::model::OutputConfig> {
+    if candidates.is_empty() {
+        return None;
+    }
+    if candidates.len() == 1 {
+        return Some(candidates[0]);
+    }
+
+    // Deterministic tie-break for duplicate identities (e.g. a stale cached entry plus the same
+    // physical monitor re-enumerated under a new adapter LUID after resume/reboot): prefer the
+    // single enabled candidate. Two active identical twins stay ambiguous and are left unmapped.
+    let enabled: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.enabled)
+        .collect();
+    if enabled.len() == 1 {
+        return Some(enabled[0]);
+    }
+
+    None
 }
 
 fn unique_unused_candidates<'a>(
@@ -595,13 +884,12 @@ fn unique_unused_candidates_by_target_id<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
     use super::*;
     use crate::{
         model::{OutputConfig, Position, Resolution},
         MemoryConfigStore, MockBackend,
     };
+    use std::cell::Cell;
 
     fn sample_display_id(target_id: u32) -> DisplayId {
         sample_display_id_on_adapter(1, target_id)
@@ -690,6 +978,65 @@ mod tests {
         (manager, backend, store)
     }
 
+    /// Mock wrapper that counts `prepare_attach_targets` and `apply_layout` calls (the latter is
+    /// the core-visible proxy for "the topology was touched") and can simulate apply failures.
+    #[derive(Clone)]
+    struct CountingBackend {
+        inner: MockBackend,
+        prepare_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        apply_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fail_apply: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CountingBackend {
+        fn new(inner: MockBackend) -> Self {
+            Self {
+                inner,
+                prepare_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                apply_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                fail_apply: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+
+        fn prepare_calls(&self) -> usize {
+            self.prepare_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn apply_calls(&self) -> usize {
+            self.apply_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn set_fail_apply(&self, fail: bool) {
+            self.fail_apply
+                .store(fail, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl DisplayBackend for CountingBackend {
+        fn list_displays(&self) -> Result<Vec<DisplayInfo>, ManagerError> {
+            self.inner.list_displays()
+        }
+
+        fn get_layout(&self) -> Result<Layout, ManagerError> {
+            self.inner.get_layout()
+        }
+
+        fn apply_layout(&self, layout: Layout) -> Result<(), ManagerError> {
+            self.apply_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_apply.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ManagerError::Backend("simulated apply failure".to_string()));
+            }
+            self.inner.apply_layout(layout)
+        }
+
+        fn prepare_attach_targets(&self, _desired: &Layout) -> Result<(), ManagerError> {
+            self.prepare_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     struct FailOnceBackend {
         inner: MockBackend,
         fail_next_apply: Cell<bool>,
@@ -770,6 +1117,91 @@ mod tests {
             store.snapshot().unwrap().last_known_good_layout,
             Some(original)
         );
+    }
+
+    #[test]
+    fn watchdog_retries_backend_failure_and_restores_the_original_layout() {
+        let original = sample_layout();
+        let backend = FailOnceBackend {
+            inner: MockBackend::new(sample_displays(), original.clone()).unwrap(),
+            fail_next_apply: Cell::new(false),
+        };
+        let mut manager =
+            MonarchDisplayManager::new(backend, MemoryConfigStore::default()).unwrap();
+        manager.set_confirmation_timeout(Duration::ZERO);
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        manager.backend.fail_next_apply.set(true);
+        let token = manager.pending_confirmation_started_at().unwrap();
+        let mut retries = Vec::new();
+        let reverted = crate::watchdog::run_confirmation_watchdog(
+            || crate::watchdog::poll_confirmation(&mut manager, token),
+            |delay| retries.push(delay),
+        )
+        .unwrap();
+        assert!(reverted);
+        assert_eq!(retries, vec![Duration::from_millis(250)]);
+        assert_eq!(manager.get_layout().unwrap(), original);
+        assert!(!manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn watchdog_retries_persistence_and_does_not_claim_a_failed_rollback() {
+        let original = sample_layout();
+        let store = FailOnceStore {
+            inner: MemoryConfigStore::default(),
+            fail_next_save: Cell::new(false),
+        };
+        let backend = MockBackend::new(sample_displays(), original.clone()).unwrap();
+        let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
+        manager.set_confirmation_timeout(Duration::ZERO);
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        manager.store.fail_next_save.set(true);
+        let token = manager.pending_confirmation_started_at().unwrap();
+        assert!(crate::watchdog::run_confirmation_watchdog(
+            || crate::watchdog::poll_confirmation(&mut manager, token),
+            |_| {},
+        )
+        .unwrap());
+        assert_eq!(
+            manager.store.load().unwrap().last_known_good_layout,
+            Some(original)
+        );
+
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        let token = manager.pending_confirmation_started_at().unwrap();
+        let mut attempts = 0;
+        let result = crate::watchdog::run_confirmation_watchdog(
+            || {
+                attempts += 1;
+                manager.store.fail_next_save.set(true);
+                crate::watchdog::poll_confirmation(&mut manager, token)
+            },
+            |_| {},
+        );
+        assert!(result.is_err());
+        assert_eq!(attempts, 4);
+        assert!(manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn old_watchdog_does_not_revert_a_new_pending_change() {
+        let (mut manager, backend, _) = build_manager();
+        manager.set_confirmation_timeout(Duration::ZERO);
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        let old_token = manager.pending_confirmation_started_at().unwrap();
+        manager.confirm_current_layout().unwrap();
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        // Set a distinct time explicitly so the test does not depend on clock resolution.
+        manager.pending_confirmation.as_mut().unwrap().applied_at =
+            old_token + Duration::from_secs(1);
+        let current = backend.current_layout().unwrap();
+        assert!(!crate::watchdog::run_confirmation_watchdog(
+            || crate::watchdog::poll_confirmation(&mut manager, old_token),
+            |_| {},
+        )
+        .unwrap());
+        assert_eq!(backend.current_layout().unwrap(), current);
+        assert!(manager.has_pending_confirmation());
     }
 
     #[test]
@@ -984,6 +1416,647 @@ mod tests {
             .outputs
             .iter()
             .all(|output| output.display_id.adapter_luid == 9));
+        assert!(!manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn apply_profile_does_not_fallback_to_wrong_target_when_edid_is_known() {
+        let display_one = DisplayInfo {
+            id: DisplayId {
+                adapter_luid: 9,
+                target_id: 1,
+                edid_hash: Some(1),
+            },
+            friendly_name: "Left".to_string(),
+            is_active: true,
+            is_primary: true,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            refresh_rate_mhz: 60_000,
+        };
+        let display_three_reusing_target = DisplayInfo {
+            id: DisplayId {
+                adapter_luid: 9,
+                target_id: 2,
+                edid_hash: Some(3),
+            },
+            friendly_name: "Ultrawide".to_string(),
+            is_active: false,
+            is_primary: false,
+            resolution: Resolution {
+                width: 3440,
+                height: 1440,
+            },
+            refresh_rate_mhz: 144_000,
+        };
+        let backend = MockBackend::new(
+            vec![display_one.clone(), display_three_reusing_target.clone()],
+            Layout {
+                outputs: vec![
+                    OutputConfig {
+                        display_id: display_one.id.clone(),
+                        enabled: true,
+                        position: Position { x: 0, y: 0 },
+                        resolution: display_one.resolution.clone(),
+                        refresh_rate_mhz: display_one.refresh_rate_mhz,
+                        primary: true,
+                    },
+                    OutputConfig {
+                        display_id: display_three_reusing_target.id.clone(),
+                        enabled: false,
+                        position: Position { x: 1920, y: 0 },
+                        resolution: display_three_reusing_target.resolution.clone(),
+                        refresh_rate_mhz: display_three_reusing_target.refresh_rate_mhz,
+                        primary: false,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "work".to_string(),
+                layout: Layout {
+                    outputs: vec![
+                        OutputConfig {
+                            display_id: DisplayId {
+                                adapter_luid: 1,
+                                target_id: 1,
+                                edid_hash: Some(1),
+                            },
+                            enabled: true,
+                            position: Position { x: 0, y: 0 },
+                            resolution: Resolution {
+                                width: 1920,
+                                height: 1080,
+                            },
+                            refresh_rate_mhz: 60_000,
+                            primary: true,
+                        },
+                        OutputConfig {
+                            display_id: DisplayId {
+                                adapter_luid: 1,
+                                target_id: 2,
+                                edid_hash: Some(2),
+                            },
+                            enabled: true,
+                            position: Position { x: 1920, y: 0 },
+                            resolution: Resolution {
+                                width: 1920,
+                                height: 1080,
+                            },
+                            refresh_rate_mhz: 60_000,
+                            primary: false,
+                        },
+                    ],
+                },
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
+
+        let err = manager.apply_profile("work").unwrap_err();
+        assert!(matches!(
+            err,
+            ManagerError::Validation(message)
+                if message.contains("is not connected right now")
+        ));
+    }
+
+    fn duplicate_edid_current_state() -> (Vec<DisplayInfo>, Layout, DisplayId, DisplayId) {
+        let primary_id = DisplayId {
+            adapter_luid: 9,
+            target_id: 1,
+            edid_hash: Some(1),
+        };
+        let stale_id = DisplayId {
+            adapter_luid: 1,
+            target_id: 2,
+            edid_hash: Some(2),
+        };
+        let fresh_id = DisplayId {
+            adapter_luid: 9,
+            target_id: 2,
+            edid_hash: Some(2),
+        };
+
+        let displays = vec![
+            DisplayInfo {
+                id: primary_id.clone(),
+                friendly_name: "Primary".to_string(),
+                is_active: true,
+                is_primary: true,
+                resolution: Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                refresh_rate_mhz: 60_000,
+            },
+            DisplayInfo {
+                id: stale_id.clone(),
+                friendly_name: "Secondary".to_string(),
+                is_active: false,
+                is_primary: false,
+                resolution: Resolution {
+                    width: 2560,
+                    height: 1440,
+                },
+                refresh_rate_mhz: 144_000,
+            },
+            DisplayInfo {
+                id: fresh_id.clone(),
+                friendly_name: "Secondary".to_string(),
+                is_active: true,
+                is_primary: false,
+                resolution: Resolution {
+                    width: 2560,
+                    height: 1440,
+                },
+                refresh_rate_mhz: 144_000,
+            },
+        ];
+        let layout = Layout {
+            outputs: vec![
+                OutputConfig {
+                    display_id: primary_id,
+                    enabled: true,
+                    position: Position { x: 0, y: 0 },
+                    resolution: Resolution {
+                        width: 1920,
+                        height: 1080,
+                    },
+                    refresh_rate_mhz: 60_000,
+                    primary: true,
+                },
+                OutputConfig {
+                    display_id: stale_id.clone(),
+                    enabled: false,
+                    position: Position { x: 1920, y: 0 },
+                    resolution: Resolution {
+                        width: 2560,
+                        height: 1440,
+                    },
+                    refresh_rate_mhz: 144_000,
+                    primary: false,
+                },
+                OutputConfig {
+                    display_id: fresh_id.clone(),
+                    enabled: true,
+                    position: Position { x: 1920, y: 0 },
+                    resolution: Resolution {
+                        width: 2560,
+                        height: 1440,
+                    },
+                    refresh_rate_mhz: 144_000,
+                    primary: false,
+                },
+            ],
+        };
+
+        (displays, layout, stale_id, fresh_id)
+    }
+
+    fn profile_output(display_id: DisplayId, x: i32, primary: bool) -> OutputConfig {
+        OutputConfig {
+            display_id,
+            enabled: true,
+            position: Position { x, y: 0 },
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            refresh_rate_mhz: 60_000,
+            primary,
+        }
+    }
+
+    #[test]
+    fn apply_profile_prefers_active_candidate_among_duplicate_edid_entries() {
+        let (displays, layout, stale_id, fresh_id) = duplicate_edid_current_state();
+        let backend = MockBackend::new(displays, layout).unwrap();
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "dual".to_string(),
+                layout: Layout {
+                    outputs: vec![
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 5,
+                                target_id: 1,
+                                edid_hash: Some(1),
+                            },
+                            0,
+                            true,
+                        ),
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 5,
+                                target_id: 2,
+                                edid_hash: Some(2),
+                            },
+                            1920,
+                            false,
+                        ),
+                    ],
+                },
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
+
+        manager.apply_profile("dual").unwrap();
+
+        let applied = backend.current_layout().unwrap();
+        let secondary = applied
+            .outputs
+            .iter()
+            .find(|output| output.display_id.edid_hash == Some(2))
+            .expect("expected remapped secondary output");
+        assert_eq!(secondary.display_id, fresh_id);
+        assert!(secondary.enabled);
+        assert!(!applied
+            .outputs
+            .iter()
+            .any(|output| output.display_id == stale_id));
+    }
+
+    #[test]
+    fn apply_profile_hashless_fallback_does_not_guess_across_adapters() {
+        // Two candidates share target_id 2 but live on different adapters (stale LUID entry vs
+        // fresh one). The hash-less fallback must not guess between them: iGPU/dGPU pairs reuse
+        // target id numbering, so a cross-adapter pick could hit the wrong physical monitor.
+        let (displays, layout, _, _) = duplicate_edid_current_state();
+        let backend = MockBackend::new(displays, layout).unwrap();
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "legacy".to_string(),
+                layout: Layout {
+                    outputs: vec![
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 5,
+                                target_id: 1,
+                                edid_hash: None,
+                            },
+                            0,
+                            true,
+                        ),
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 5,
+                                target_id: 2,
+                                edid_hash: None,
+                            },
+                            1920,
+                            false,
+                        ),
+                    ],
+                },
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
+
+        let err = manager.apply_profile("legacy").unwrap_err();
+        assert!(matches!(
+            err,
+            ManagerError::Validation(message)
+                if message.contains("is not connected right now")
+        ));
+    }
+
+    #[test]
+    fn apply_profile_still_bails_for_two_active_twin_candidates() {
+        let primary_id = DisplayId {
+            adapter_luid: 9,
+            target_id: 1,
+            edid_hash: Some(1),
+        };
+        let twin_left_id = DisplayId {
+            adapter_luid: 9,
+            target_id: 2,
+            edid_hash: Some(7),
+        };
+        let twin_right_id = DisplayId {
+            adapter_luid: 9,
+            target_id: 3,
+            edid_hash: Some(7),
+        };
+        let twin_display = |id: &DisplayId| DisplayInfo {
+            id: id.clone(),
+            friendly_name: "Twin".to_string(),
+            is_active: true,
+            is_primary: false,
+            resolution: Resolution {
+                width: 2560,
+                height: 1440,
+            },
+            refresh_rate_mhz: 144_000,
+        };
+        let displays = vec![
+            DisplayInfo {
+                id: primary_id.clone(),
+                friendly_name: "Primary".to_string(),
+                is_active: true,
+                is_primary: true,
+                resolution: Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                refresh_rate_mhz: 60_000,
+            },
+            twin_display(&twin_left_id),
+            twin_display(&twin_right_id),
+        ];
+        let twin_output = |id: &DisplayId, x: i32| OutputConfig {
+            display_id: id.clone(),
+            enabled: true,
+            position: Position { x, y: 0 },
+            resolution: Resolution {
+                width: 2560,
+                height: 1440,
+            },
+            refresh_rate_mhz: 144_000,
+            primary: false,
+        };
+        let layout = Layout {
+            outputs: vec![
+                OutputConfig {
+                    display_id: primary_id,
+                    enabled: true,
+                    position: Position { x: 0, y: 0 },
+                    resolution: Resolution {
+                        width: 1920,
+                        height: 1080,
+                    },
+                    refresh_rate_mhz: 60_000,
+                    primary: true,
+                },
+                twin_output(&twin_left_id, 1920),
+                twin_output(&twin_right_id, 4480),
+            ],
+        };
+        let backend = MockBackend::new(displays, layout).unwrap();
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "twins".to_string(),
+                layout: Layout {
+                    outputs: vec![
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 5,
+                                target_id: 1,
+                                edid_hash: Some(1),
+                            },
+                            0,
+                            true,
+                        ),
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 5,
+                                target_id: 9,
+                                edid_hash: Some(7),
+                            },
+                            1920,
+                            false,
+                        ),
+                    ],
+                },
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
+
+        let err = manager.apply_profile("twins").unwrap_err();
+        assert!(matches!(
+            err,
+            ManagerError::Validation(message)
+                if message.contains("is not connected right now")
+        ));
+    }
+
+    #[test]
+    fn apply_profile_hashless_legacy_output_remaps_to_seeded_inactive_display() {
+        // Field case (Guido's TV): a legacy profile entry saved without edid_hash by an old
+        // build, while the detached TV exists only as an ALL_PATHS-seeded inactive display
+        // under the current adapter LUID. The hash-less target_id fallback must accept the
+        // seeded candidate (Some(hash) on the candidate, None on the request) and remap.
+        let primary_id = DisplayId {
+            adapter_luid: 9,
+            target_id: 1,
+            edid_hash: Some(1),
+        };
+        let seeded_tv_id = DisplayId {
+            adapter_luid: 9,
+            target_id: 4352,
+            edid_hash: Some(77),
+        };
+        let displays = vec![
+            DisplayInfo {
+                id: primary_id.clone(),
+                friendly_name: "Primary".to_string(),
+                is_active: true,
+                is_primary: true,
+                resolution: Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                refresh_rate_mhz: 60_000,
+            },
+            DisplayInfo {
+                id: seeded_tv_id.clone(),
+                friendly_name: "TV".to_string(),
+                is_active: false,
+                is_primary: false,
+                resolution: Resolution {
+                    width: 0,
+                    height: 0,
+                },
+                refresh_rate_mhz: 60_000,
+            },
+        ];
+        let layout = Layout {
+            outputs: vec![
+                OutputConfig {
+                    display_id: primary_id,
+                    enabled: true,
+                    position: Position { x: 0, y: 0 },
+                    resolution: Resolution {
+                        width: 1920,
+                        height: 1080,
+                    },
+                    refresh_rate_mhz: 60_000,
+                    primary: true,
+                },
+                OutputConfig {
+                    display_id: seeded_tv_id.clone(),
+                    enabled: false,
+                    position: Position { x: 0, y: 0 },
+                    resolution: Resolution {
+                        width: 0,
+                        height: 0,
+                    },
+                    refresh_rate_mhz: 60_000,
+                    primary: false,
+                },
+            ],
+        };
+        let backend = MockBackend::new(displays, layout).unwrap();
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "couch".to_string(),
+                layout: Layout {
+                    outputs: vec![
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 1,
+                                target_id: 1,
+                                edid_hash: None,
+                            },
+                            0,
+                            true,
+                        ),
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 1,
+                                target_id: 4352,
+                                edid_hash: None,
+                            },
+                            1920,
+                            false,
+                        ),
+                    ],
+                },
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
+
+        manager.apply_profile("couch").unwrap();
+
+        let applied = backend.current_layout().unwrap();
+        let tv = applied
+            .outputs
+            .iter()
+            .find(|output| output.display_id == seeded_tv_id)
+            .expect("expected TV output remapped to the seeded display");
+        assert!(tv.enabled);
+    }
+
+    #[test]
+    fn apply_profile_does_not_touch_topology_when_display_is_not_connected() {
+        // Field case: after a resume, Windows reported one of the monitors with
+        // targetAvailable=FALSE, so it was not enumerated at all. Applying a profile that wants
+        // it must NOT change the topology — the old code forced a topology extend here, which
+        // attached every connected-inactive display (including a TV the very same profile asks to
+        // detach), stalled 3.5s and failed anyway. An absent display is not an attach failure.
+        let backend =
+            CountingBackend::new(MockBackend::new(sample_displays(), sample_layout()).unwrap());
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "PC".to_string(),
+                layout: Layout {
+                    outputs: vec![
+                        profile_output(sample_display_id(1), 0, true),
+                        // A monitor Windows is not enumerating right now.
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 1,
+                                target_id: 4353,
+                                edid_hash: Some(0xa8c7_f832_281a_39c5),
+                            },
+                            1920,
+                            false,
+                        ),
+                    ],
+                },
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
+
+        let err = manager.apply_profile("PC").unwrap_err();
+        assert!(
+            matches!(&err, ManagerError::Validation(message) if message.contains("is not connected right now")),
+            "expected the not-connected diagnosis, got: {err}"
+        );
+        assert_eq!(
+            backend.apply_calls(),
+            0,
+            "an absent display must never trigger a topology change"
+        );
+        assert!(!manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn apply_profile_calls_prepare_attach_targets_when_outputs_are_unresolved() {
+        let backend =
+            CountingBackend::new(MockBackend::new(sample_displays(), sample_layout()).unwrap());
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "ghost".to_string(),
+                layout: Layout {
+                    outputs: vec![
+                        profile_output(sample_display_id(1), 0, true),
+                        profile_output(
+                            DisplayId {
+                                adapter_luid: 1,
+                                target_id: 9,
+                                edid_hash: Some(99),
+                            },
+                            1920,
+                            false,
+                        ),
+                    ],
+                },
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
+
+        let err = manager.apply_profile("ghost").unwrap_err();
+        assert!(matches!(
+            err,
+            ManagerError::Validation(message)
+                if message.contains("is not connected right now")
+        ));
+        assert_eq!(backend.prepare_calls(), 1);
+    }
+
+    #[test]
+    fn apply_profile_does_not_call_prepare_attach_targets_when_outputs_resolve() {
+        let backend =
+            CountingBackend::new(MockBackend::new(sample_displays(), sample_layout()).unwrap());
+        let store = MemoryConfigStore::default();
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
+
+        manager.save_profile("dual").unwrap();
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        manager.confirm_current_layout().unwrap();
+
+        manager.apply_profile("dual").unwrap();
+
+        assert_eq!(backend.prepare_calls(), 0);
+    }
+
+    #[test]
+    fn rollback_pending_keeps_pending_when_backend_apply_fails() {
+        let backend =
+            CountingBackend::new(MockBackend::new(sample_displays(), sample_layout()).unwrap());
+        let store = MemoryConfigStore::default();
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
+
+        manager.toggle_display(&sample_display_id(2)).unwrap();
+        assert!(manager.has_pending_confirmation());
+
+        backend.set_fail_apply(true);
+        assert!(manager.rollback_pending().is_err());
+        assert!(manager.has_pending_confirmation());
+
+        backend.set_fail_apply(false);
+        manager.rollback_pending().unwrap();
         assert!(!manager.has_pending_confirmation());
     }
 

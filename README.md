@@ -24,19 +24,20 @@
   <a href="#if-something-goes-wrong"><strong>Recovery</strong></a>
 </p>
 
-## Monitor restore fix in this fork
+## Display recovery verification
 
-Version `1.5.2-restore.1` fixes detached monitors being omitted from a restore:
+The display-recovery changes under review address detached monitors being omitted from a restore:
 
 - Discover connected, disabled monitors at startup, even when the saved connection cache is incomplete.
 - Keep all saved connection paths through consecutive detach operations.
 - Reconnect the exact requested monitor set using fresh Windows path data when cached paths fail.
 - Verify the actual active monitor set before reporting success; restore the previous desktop on failure.
-- Retain pending rollback information if recovery or saving configuration fails.
+- Retain pending rollback information if recovery or saving configuration fails, with bounded automatic retries and an explicit failure message.
 - Reopen the running app when its taskbar shortcut is launched after closing to the tray.
 
-Existing profile files remain compatible. The local built application is placed at
-`.local-app/Monarch.exe`; the original executable in Downloads is not replaced.
+These changes still require real Windows hardware verification before release. Verify three-or-more-display profile switching, sequential detach/reattach, application restart, and sleep/hibernate. Check primary display, placement, resolution, refresh rate, and tray/window responsiveness. Record Windows version, GPU/driver, display models and the diagnostic log with the result.
+
+Existing profile files remain compatible.
 
 Run automated checks with `cargo test` and `cargo test --manifest-path src-tauri/Cargo.toml --lib`.
 The desktop suite includes an ignored hardware test that temporarily disables two secondary

@@ -14,6 +14,7 @@ use crate::app::events::{
 };
 use crate::app::state::{format_display_key, MonarchAppState};
 use crate::app::{shortcuts, startup};
+use crate::diagnostics;
 
 type CommandResult<T> = Result<T, String>;
 
@@ -129,6 +130,7 @@ pub async fn toggle_display<R: Runtime>(
     state: State<'_, MonarchAppState>,
     display_key: String,
 ) -> CommandResult<()> {
+    diagnostics::log(format!("ui_cmd:toggle_display:start:{display_key}"));
     let display_id =
         crate::app::state::parse_display_key(&display_key).map_err(|err| err.to_string())?;
 
@@ -178,6 +180,10 @@ pub async fn apply_layout<R: Runtime>(
     state: State<'_, MonarchAppState>,
     layout: LayoutDto,
 ) -> CommandResult<()> {
+    diagnostics::log(format!(
+        "ui_cmd:apply_layout:start:outputs={}",
+        layout.outputs.len()
+    ));
     let layout = dto_to_layout(layout)?;
     let timeout = {
         let mut guard = state
@@ -235,6 +241,7 @@ pub async fn apply_profile<R: Runtime>(
     state: State<'_, MonarchAppState>,
     name: String,
 ) -> CommandResult<()> {
+    diagnostics::log(format!("ui_cmd:apply_profile:start:{name}"));
     let pending_timeout = {
         let mut guard = state
             .0
@@ -288,6 +295,7 @@ pub async fn restore_last_layout<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, MonarchAppState>,
 ) -> CommandResult<()> {
+    diagnostics::log("ui_cmd:restore:start");
     {
         let mut guard = state
             .0
@@ -309,6 +317,7 @@ pub async fn confirm_current_layout<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, MonarchAppState>,
 ) -> CommandResult<()> {
+    diagnostics::log("ui_cmd:confirm");
     {
         let mut guard = state
             .0
@@ -332,6 +341,7 @@ pub async fn rollback_pending<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, MonarchAppState>,
 ) -> CommandResult<()> {
+    diagnostics::log("ui_cmd:rollback");
     {
         let mut guard = state
             .0
