@@ -95,7 +95,12 @@ The Windows planner chooses one route per target, one common source per clone gr
 and distinct sources for extended surfaces. Position, primary and preference changes
 reuse active source formats and target timings, including the original refresh-rate
 rational, rather than reconstructing them from rounded display values. Changed modes
-invalidate only their own old timing. The planner submits the source/target mode table
+invalidate only their own old timing. Requests with an explicit refresh rate supply
+progressive scan-line ordering for the non-interlaced DXGI mode list. Automatic
+mode requests retain 0/0 refresh and unspecified ordering; unchanged targets retain
+their observed ordering. Windows permits unspecified ordering only with automatic
+refresh ([API requirement](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ne-wingdi-displayconfig_scanline_ordering)).
+The planner submits the source/target mode table
 to `SDC_VALIDATE`, then applies without `SDC_ALLOW_CHANGES`. Rejected requests log
 route/mode indices, source rectangles and target timings for diagnosis. Native routing is queried
 again before HDR and DPI setters, and all requested properties (including clone

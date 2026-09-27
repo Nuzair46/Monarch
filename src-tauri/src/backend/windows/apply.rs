@@ -18,9 +18,9 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
     DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_MODE_INFO_TYPE_TARGET,
-    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
-    SDC_VALIDATE,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_APPLY,
+    SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
 use windows::Win32::UI::ColorSystem::{
@@ -485,6 +485,10 @@ pub(super) fn plan_layout(
             path.sourceInfo.Anonymous.modeInfoIdx = index;
             path.targetInfo.refreshRate.Numerator = output.refresh_rate_mhz;
             path.targetInfo.refreshRate.Denominator = 1000;
+            // The enumerated DXGI mode list excludes interlaced modes. A concrete
+            // refresh requires concrete scan-line ordering; recovery paths start
+            // with UNSPECIFIED, which Windows permits only with a 0/0 refresh.
+            path.targetInfo.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
             if let (Some(active), Some(target)) = (active_path, target_mode) {
                 path.targetInfo = active.targetInfo;
                 path.targetInfo.Anonymous.modeInfoIdx = modes.len() as u32;
@@ -524,10 +528,11 @@ pub(super) fn log_rejected_plan(
         modes.len()
     ));
     for path in paths {
-        diagnostics::log(format!("display_config:path:target={:?}:source={}:flags={:#x}:source_mode={}:target_mode={}:rotation={}:refresh={}/{}",
+        diagnostics::log(format!("display_config:path:target={:?}:source={}:flags={:#x}:source_mode={}:target_mode={}:rotation={}:refresh={}/{}:scanline={}:scaling={}",
             path_target_key(path), path.sourceInfo.id, path.flags,
             unsafe {path.sourceInfo.Anonymous.modeInfoIdx}, unsafe {path.targetInfo.Anonymous.modeInfoIdx},
-            path.targetInfo.rotation.0, path.targetInfo.refreshRate.Numerator, path.targetInfo.refreshRate.Denominator));
+            path.targetInfo.rotation.0, path.targetInfo.refreshRate.Numerator, path.targetInfo.refreshRate.Denominator,
+            path.targetInfo.scanLineOrdering.0, path.targetInfo.scaling.0));
     }
     for (index, mode) in modes.iter().enumerate() {
         if mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
@@ -544,13 +549,14 @@ pub(super) fn log_rejected_plan(
         } else if mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET {
             let signal = unsafe { mode.Anonymous.targetMode.targetVideoSignalInfo };
             diagnostics::log(format!(
-                "display_config:target:{index}:id={}:{}x{}:refresh={}/{}:pixel_rate={}",
+                "display_config:target:{index}:id={}:{}x{}:refresh={}/{}:pixel_rate={}:scanline={}",
                 mode.id,
                 signal.activeSize.cx,
                 signal.activeSize.cy,
                 signal.vSyncFreq.Numerator,
                 signal.vSyncFreq.Denominator,
-                signal.pixelRate
+                signal.pixelRate,
+                signal.scanLineOrdering.0
             ));
         }
     }
@@ -887,14 +893,19 @@ mod tests {
     }
 
     fn active_modes() -> TopologySnapshot {
+        active_modes_for(&[1, 2])
+    }
+
+    fn active_modes_for(targets: &[u32]) -> TopologySnapshot {
         use windows::Win32::Devices::Display::*;
-        let mut snapshot = snapshot(&[1, 2]);
+        let mut snapshot = snapshot(targets);
         for (index, path) in snapshot.raw.paths.iter_mut().enumerate() {
             let output = &mut snapshot.layout.outputs[index];
             output.refresh_rate_mhz = 59_940;
             path.targetInfo.targetAvailable = BOOL(1);
             path.targetInfo.rotation = DISPLAYCONFIG_ROTATION_IDENTITY;
             path.targetInfo.scaling = DISPLAYCONFIG_SCALING_IDENTITY;
+            path.targetInfo.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
             path.targetInfo.refreshRate = DISPLAYCONFIG_RATIONAL {
                 Numerator: 60_000,
                 Denominator: 1001,
@@ -928,6 +939,7 @@ mod tests {
                             vSyncFreq: path.targetInfo.refreshRate,
                             activeSize: DISPLAYCONFIG_2DREGION { cx: 1920, cy: 1080 },
                             totalSize: DISPLAYCONFIG_2DREGION { cx: 2200, cy: 1125 },
+                            scanLineOrdering: DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE,
                             ..Default::default()
                         },
                     },
@@ -986,12 +998,17 @@ mod tests {
     }
 
     #[test]
-    fn changing_mode_discards_only_that_targets_old_timing() {
+    fn changing_resolution_refresh_or_rotation_supplies_valid_scanline_ordering() {
         let snapshot = active_modes();
         for change in 0..3 {
             let mut desired = snapshot.layout.clone();
             match change {
-                0 => desired.outputs[0].resolution.width = 1280,
+                0 => {
+                    desired.outputs[0].resolution = Resolution {
+                        width: 1280,
+                        height: 720,
+                    }
+                }
                 1 => desired.outputs[0].refresh_rate_mhz = 60_000,
                 _ => {
                     desired.outputs[0].rotation = Some(monarch::Rotation::Portrait);
@@ -1005,6 +1022,27 @@ mod tests {
             let first = paths.iter().find(|p| p.targetInfo.id == 1).unwrap();
             let second = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
             assert_eq!(unsafe { first.targetInfo.Anonymous.modeInfoIdx }, u32::MAX);
+            assert_eq!(
+                first.targetInfo.scanLineOrdering,
+                DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE
+            );
+            assert_eq!(
+                first.targetInfo.refreshRate.Numerator,
+                desired.outputs[0].refresh_rate_mhz
+            );
+            assert_eq!(first.targetInfo.refreshRate.Denominator, 1000);
+            let source = unsafe {
+                modes[first.sourceInfo.Anonymous.modeInfoIdx as usize]
+                    .Anonymous
+                    .sourceMode
+            };
+            assert_eq!(
+                (source.width, source.height),
+                (
+                    desired.outputs[0].resolution.width,
+                    desired.outputs[0].resolution.height
+                )
+            );
             let target = unsafe {
                 modes[second.targetInfo.Anonymous.modeInfoIdx as usize]
                     .Anonymous
@@ -1025,6 +1063,164 @@ mod tests {
         let (paths, _) = plan_layout(&desired, &snapshot).unwrap();
         let second = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
         assert_eq!(unsafe { second.targetInfo.Anonymous.modeInfoIdx }, u32::MAX);
+        assert_eq!(
+            second.targetInfo.scanLineOrdering,
+            DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE
+        );
+        assert_eq!(
+            (
+                second.targetInfo.refreshRate.Numerator,
+                second.targetInfo.refreshRate.Denominator
+            ),
+            (59_940, 1000)
+        );
+    }
+
+    #[test]
+    fn automatic_mode_keeps_refresh_and_scanline_ordering_unspecified() {
+        use windows::Win32::Devices::Display::DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED;
+        let snapshot = active_modes();
+        let mut desired = snapshot.layout.clone();
+        desired.outputs[1].resolution = Resolution {
+            width: 0,
+            height: 0,
+        };
+        desired.outputs[1].refresh_rate_mhz = 0;
+        let (paths, _) = plan_layout(&desired, &snapshot).unwrap();
+        let second = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
+        assert_eq!(unsafe { second.sourceInfo.Anonymous.modeInfoIdx }, u32::MAX);
+        assert_eq!(unsafe { second.targetInfo.Anonymous.modeInfoIdx }, u32::MAX);
+        assert_eq!(second.targetInfo.refreshRate.Numerator, 0);
+        assert_eq!(second.targetInfo.refreshRate.Denominator, 0);
+        assert_eq!(
+            second.targetInfo.scanLineOrdering,
+            DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED
+        );
+    }
+
+    #[test]
+    fn joining_and_splitting_clones_supply_valid_timings_on_reassigned_sources() {
+        let mut snapshot = active_modes_for(&[1, 2, 3]);
+        // Make the second display's active mode different from the primary's.
+        snapshot.layout.outputs[1].refresh_rate_mhz = 60_000;
+        snapshot.raw.paths[1].targetInfo.refreshRate.Numerator = 60_000;
+        snapshot.raw.paths[1].targetInfo.refreshRate.Denominator = 1000;
+        snapshot.raw.modes[3]
+            .Anonymous
+            .targetMode
+            .targetVideoSignalInfo
+            .vSyncFreq = snapshot.raw.paths[1].targetInfo.refreshRate;
+        let active = snapshot.raw.paths.clone();
+        for path in active {
+            for source in 0..3 {
+                if source != path.sourceInfo.id {
+                    let mut alternative = path;
+                    alternative.flags = 0;
+                    alternative.sourceInfo.id = source;
+                    alternative.sourceInfo.Anonymous.modeInfoIdx = u32::MAX;
+                    alternative.targetInfo.Anonymous.modeInfoIdx = u32::MAX;
+                    snapshot.raw.paths.push(alternative);
+                }
+            }
+        }
+        let mut desired = snapshot.layout.clone();
+        desired.outputs[0].clone_group = Some("pair".into());
+        let id = desired.outputs[1].display_id.clone();
+        desired.outputs[1] = desired.outputs[0].clone();
+        desired.outputs[1].display_id = id;
+        let (paths, modes) = plan_layout(&desired, &snapshot).unwrap();
+        let first = paths.iter().find(|p| p.targetInfo.id == 1).unwrap();
+        let second = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
+        let third = paths.iter().find(|p| p.targetInfo.id == 3).unwrap();
+        assert_eq!(first.sourceInfo.id, second.sourceInfo.id);
+        assert_eq!(unsafe { first.sourceInfo.Anonymous.modeInfoIdx }, unsafe {
+            second.sourceInfo.Anonymous.modeInfoIdx
+        });
+        assert_ne!(first.sourceInfo.id, third.sourceInfo.id);
+        assert_eq!(unsafe { second.targetInfo.Anonymous.modeInfoIdx }, u32::MAX);
+        assert_eq!(
+            second.targetInfo.scanLineOrdering,
+            DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE
+        );
+        assert_eq!(
+            (
+                second.targetInfo.refreshRate.Numerator,
+                second.targetInfo.refreshRate.Denominator
+            ),
+            (59_940, 1000)
+        );
+        assert_ne!(unsafe { third.targetInfo.Anonymous.modeInfoIdx }, u32::MAX);
+        assert_eq!(
+            modes
+                .iter()
+                .filter(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+                .count(),
+            2
+        );
+
+        // Observe the clone, then restore the original extended configuration.
+        let mut cloned = snapshot.clone();
+        cloned.layout = desired;
+        cloned.raw.paths.iter_mut().for_each(|p| p.flags = 0);
+        cloned.raw.paths.extend(paths);
+        cloned.raw.modes = modes;
+        let (paths, modes) = plan_layout(&snapshot.layout, &cloned).unwrap();
+        assert_eq!(
+            paths
+                .iter()
+                .map(|p| p.sourceInfo.id)
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        let second = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
+        assert_eq!(
+            second.targetInfo.scanLineOrdering,
+            DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE
+        );
+        assert_eq!(
+            (
+                second.targetInfo.refreshRate.Numerator,
+                second.targetInfo.refreshRate.Denominator
+            ),
+            (60_000, 1000)
+        );
+        assert_eq!(
+            modes
+                .iter()
+                .filter(|m| m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn unchanged_interlaced_target_keeps_its_observed_scanline_ordering() {
+        use windows::Win32::Devices::Display::DISPLAYCONFIG_SCANLINE_ORDERING_INTERLACED;
+        let mut snapshot = active_modes();
+        snapshot.raw.paths[0].targetInfo.scanLineOrdering =
+            DISPLAYCONFIG_SCANLINE_ORDERING_INTERLACED;
+        snapshot.raw.modes[1]
+            .Anonymous
+            .targetMode
+            .targetVideoSignalInfo
+            .scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_INTERLACED;
+        let (paths, modes) = plan_layout(&snapshot.layout, &snapshot).unwrap();
+        let first = paths.iter().find(|p| p.targetInfo.id == 1).unwrap();
+        assert_eq!(
+            first.targetInfo.scanLineOrdering,
+            DISPLAYCONFIG_SCANLINE_ORDERING_INTERLACED
+        );
+        assert_eq!(
+            unsafe {
+                modes[first.targetInfo.Anonymous.modeInfoIdx as usize]
+                    .Anonymous
+                    .targetMode
+                    .targetVideoSignalInfo
+                    .scanLineOrdering
+            },
+            DISPLAYCONFIG_SCANLINE_ORDERING_INTERLACED
+        );
     }
 
     #[test]
