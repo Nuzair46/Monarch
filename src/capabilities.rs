@@ -24,6 +24,26 @@ pub struct DisplayCapabilities {
 /// Preflight known capabilities. The backend must also validate the complete
 /// request with Windows: detached and cloned targets expose only partial mode lists.
 pub fn validate(layout: &Layout, capabilities: &[DisplayCapabilities]) -> Result<(), ManagerError> {
+    validate_inner(layout, capabilities, None)
+}
+
+/// Check a proposed transition without treating a detached monitor's current
+/// HDR/DPI availability as its capabilities once attached. The backend must call
+/// `validate` again with fresh capabilities after activating the requested paths,
+/// within its recovery transaction and before applying HDR/scaling preferences.
+pub fn validate_transition(
+    layout: &Layout,
+    current: &Layout,
+    capabilities: &[DisplayCapabilities],
+) -> Result<(), ManagerError> {
+    validate_inner(layout, capabilities, Some(current))
+}
+
+fn validate_inner(
+    layout: &Layout,
+    capabilities: &[DisplayCapabilities],
+    current: Option<&Layout>,
+) -> Result<(), ManagerError> {
     layout.ensure_supported()?;
     for output in layout.outputs.iter().filter(|o| o.enabled) {
         let cap = capabilities
@@ -56,6 +76,16 @@ pub fn validate(layout: &Layout, capabilities: &[DisplayCapabilities]) -> Result
             })
         {
             return Err(fail("resolution/refresh combination is unavailable; attach the display to enumerate modes or select a reported mode"));
+        }
+        // Only a live, explicitly detached target may defer these checks. A
+        // missing target or an incomplete mode list alone is not sufficient.
+        if current.is_some_and(|current| {
+            current
+                .outputs
+                .iter()
+                .any(|o| o.display_id == output.display_id && !o.enabled)
+        }) {
+            continue;
         }
         if output.hdr_enabled.is_some()
             && (cap.hdr_enabled.is_none()

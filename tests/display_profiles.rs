@@ -254,3 +254,193 @@ fn an_unobservable_previous_preference_cannot_be_lost_from_the_recovery_journal(
     assert_eq!(backend.current_layout().unwrap(), unknown);
     assert!(store.snapshot().unwrap().pending_recovery.is_none());
 }
+
+#[test]
+fn only_connected_detached_targets_defer_hdr_and_scaling_validation() {
+    let desired = layout();
+    let mut current = desired.clone();
+    current.outputs[2].enabled = false;
+    let mut capabilities = caps(&desired);
+    capabilities[2].hdr_supported = false;
+    capabilities[2].hdr_enabled = None;
+    capabilities[2].scale_percent = None;
+    capabilities[2].scale_percentages.clear();
+
+    assert!(validate_transition(&desired, &current, &capabilities).is_ok());
+    // Once active, unknown capabilities must still fail, rather than silently
+    // dropping the saved preference or treating unknown as HDR off/100% DPI.
+    assert!(validate(&desired, &capabilities).is_err());
+    assert!(validate_transition(&desired, &desired, &capabilities).is_err());
+
+    // Identity and known mode restrictions still apply before activation.
+    let mut wrong_mode = capabilities.clone();
+    wrong_mode[2].modes[0].refresh_rate_mhz = 60_000;
+    assert!(validate_transition(&desired, &current, &wrong_mode).is_err());
+    let mut replaced = capabilities.clone();
+    replaced[2].display_id.identity.edid_serial = Some("replacement".into());
+    assert!(validate_transition(&desired, &current, &replaced).is_err());
+    assert!(validate_transition(&desired, &current, &capabilities[..2]).is_err());
+    current.outputs.pop();
+    assert!(validate_transition(&desired, &current, &capabilities).is_err());
+}
+
+/// Model the Windows boundary: inactive targets cannot report HDR/DPI, topology
+/// activation precedes preference checks, and failed checks restore the capture.
+#[derive(Clone)]
+struct PreferenceBackend {
+    inner: MockBackend,
+    supported: std::rc::Rc<RefCell<Vec<DisplayCapabilities>>>,
+}
+
+impl PreferenceBackend {
+    fn new(current: Layout) -> Self {
+        Self {
+            supported: std::rc::Rc::new(RefCell::new(caps(&current))),
+            inner: MockBackend::new(vec![], current).unwrap(),
+        }
+    }
+}
+
+impl DisplayBackend for PreferenceBackend {
+    fn list_displays(&self) -> Result<Vec<DisplayInfo>, ManagerError> {
+        self.inner.list_displays()
+    }
+
+    fn get_layout(&self) -> Result<Layout, ManagerError> {
+        self.inner.get_layout()
+    }
+
+    fn get_display_capabilities(&self) -> Result<Vec<DisplayCapabilities>, ManagerError> {
+        let current = self.get_layout()?;
+        let mut capabilities = self.supported.borrow().clone();
+        for cap in &mut capabilities {
+            let output = current
+                .outputs
+                .iter()
+                .find(|o| o.display_id == cap.display_id)
+                .unwrap();
+            if output.enabled {
+                cap.hdr_enabled = cap.hdr_enabled.and(output.hdr_enabled);
+                cap.scale_percent = cap.scale_percent.and(output.scale_percent);
+            } else {
+                cap.hdr_supported = false;
+                cap.hdr_enabled = None;
+                cap.scale_percent = None;
+                cap.scale_percentages.clear();
+            }
+        }
+        Ok(capabilities)
+    }
+
+    fn validate_layout(&self, desired: &Layout) -> Result<(), ManagerError> {
+        validate_transition(
+            desired,
+            &self.get_layout()?,
+            &self.get_display_capabilities()?,
+        )
+    }
+
+    fn apply_layout(&self, desired: Layout) -> Result<(), ManagerError> {
+        let previous = self.get_layout()?;
+        transaction::apply_with_recovery(
+            || {
+                let mut activated = desired.clone();
+                for output in &mut activated.outputs {
+                    let old = previous
+                        .outputs
+                        .iter()
+                        .find(|o| o.display_id == output.display_id)
+                        .unwrap();
+                    output.hdr_enabled = output.enabled.then_some(old.hdr_enabled.unwrap_or(false));
+                    output.scale_percent =
+                        output.enabled.then_some(old.scale_percent.unwrap_or(100));
+                }
+                self.inner.apply_layout(activated)?;
+                validate(&desired, &self.get_display_capabilities()?)?;
+                let mut applied = desired.clone();
+                for output in applied.outputs.iter_mut().filter(|o| !o.enabled) {
+                    output.hdr_enabled = None;
+                    output.scale_percent = None;
+                }
+                self.inner.apply_layout(applied)?;
+                verification::verify_applied_layout(&desired, &self.get_layout()?)
+            },
+            || self.inner.apply_layout(previous.clone()),
+        )
+    }
+}
+
+#[test]
+fn profiles_reattach_with_saved_hdr_and_scaling_and_can_revert_after_restart() {
+    for (hdr_supported, hdr) in [(false, false), (true, false), (true, true)] {
+        let mut all = layout();
+        all.outputs[2].hdr_enabled = Some(hdr);
+        all.outputs[2].scale_percent = Some(150);
+        let backend = PreferenceBackend::new(all.clone());
+        backend.supported.borrow_mut()[2].hdr_supported = hdr_supported;
+        let store = MemoryConfigStore::default();
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store.clone()).unwrap();
+
+        manager.save_profile("All monitors").unwrap();
+        manager.toggle_display(&all.outputs[2].display_id).unwrap();
+        manager.confirm_current_layout().unwrap();
+        manager.save_profile("Desk").unwrap();
+        let desk = backend.get_layout().unwrap();
+        assert!(!desk.outputs[2].enabled);
+        assert_eq!(desk.outputs[2].hdr_enabled, None);
+        assert_eq!(desk.outputs[2].scale_percent, None);
+
+        manager.apply_profile("All monitors").unwrap();
+        assert_eq!(backend.get_layout().unwrap(), all);
+        assert!(manager.has_pending_confirmation());
+        manager.confirm_current_layout().unwrap();
+        manager.apply_profile("Desk").unwrap();
+        manager.confirm_current_layout().unwrap();
+
+        manager.set_confirmation_timeout(std::time::Duration::ZERO);
+        manager.apply_profile("All monitors").unwrap();
+        assert!(manager.rollback_if_confirmation_expired().unwrap());
+        assert_eq!(backend.get_layout().unwrap(), desk);
+
+        manager.apply_profile("All monitors").unwrap();
+        drop(manager);
+        let mut restarted = MonarchDisplayManager::new(backend.clone(), store.clone()).unwrap();
+        assert!(restarted.rollback_if_confirmation_expired().unwrap());
+        assert_eq!(backend.get_layout().unwrap(), desk);
+        assert!(store.snapshot().unwrap().pending_recovery.is_none());
+        assert_eq!(restarted.list_profiles()[0].layout, all);
+    }
+}
+
+#[test]
+fn unsupported_preferences_after_reattach_restore_the_previous_profile() {
+    for failure in 0..4 {
+        let mut all = layout();
+        all.outputs[2].hdr_enabled = Some(true);
+        all.outputs[2].scale_percent = Some(150);
+        let backend = PreferenceBackend::new(all.clone());
+        let store = MemoryConfigStore::default();
+        let mut manager = MonarchDisplayManager::new(backend.clone(), store.clone()).unwrap();
+        manager.save_profile("All monitors").unwrap();
+        manager.toggle_display(&all.outputs[2].display_id).unwrap();
+        manager.confirm_current_layout().unwrap();
+        manager.save_profile("Desk").unwrap();
+        let desk = backend.get_layout().unwrap();
+        match failure {
+            0 => backend.supported.borrow_mut()[2].hdr_supported = false,
+            1 => backend.supported.borrow_mut()[2].hdr_enabled = None,
+            2 => backend.supported.borrow_mut()[2].scale_percentages = vec![100],
+            _ => backend.supported.borrow_mut()[2].scale_percent = None,
+        }
+
+        let result = manager.apply_profile("All monitors");
+        assert!(
+            matches!(result, Err(ManagerError::ApplyRestored(_))),
+            "{result:?}"
+        );
+        assert_eq!(backend.get_layout().unwrap(), desk);
+        assert!(!manager.has_pending_confirmation());
+        assert!(store.snapshot().unwrap().pending_recovery.is_none());
+        assert_eq!(manager.list_profiles()[0].layout, all);
+    }
+}
