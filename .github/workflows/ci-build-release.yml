@@ -116,9 +116,10 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: monarch-windows-x64-v2
           workspaces: |
             . -> target
-            src-tauri -> src-tauri/target
+            src-tauri -> target
 
       - name: Install JS dependencies
         run: yarn install --frozen-lockfile
@@ -136,7 +137,7 @@ jobs:
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Build Windows app (MSI)
-        run: yarn build:msi
+        run: yarn build:msi:ci
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
