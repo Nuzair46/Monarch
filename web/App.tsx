@@ -11,7 +11,6 @@ import {
   PendingConfirmationDialog,
 } from "@/app/components/dialogs";
 import { editOutput } from "@/app/display-editor";
-import { DisplayEditor } from "@/app/components/display-editor";
 import { MainTab } from "@/app/components/main-tab";
 import { ProfilesTab } from "@/app/components/profiles-tab";
 import { SettingsTab } from "@/app/components/settings-tab";
@@ -37,12 +36,11 @@ import {
   restoreLastLayout,
   rollbackPending,
   saveProfile,
-  saveProfileLayout,
   toggleDisplay,
   updateSettings,
   type ReleaseUpdateCheckResult,
 } from "./tauri";
-import type { Layout, AppSettings, AppSnapshot, DisplayInfo } from "./types";
+import type { AppSettings, AppSnapshot, DisplayInfo } from "./types";
 
 function normalizeShortcutBaseForCompare(
   value: string | null | undefined,
@@ -51,10 +49,6 @@ function normalizeShortcutBaseForCompare(
 }
 
 function App() {
-  const [editing, setEditing] = useState<{
-    name: string | null;
-    layout: Layout;
-  } | null>(null);
   const [view, setView] = useState<View>("main");
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -573,9 +567,7 @@ function App() {
           displayShortcutBase={
             snapshot?.settings.display_toggle_shortcut_base ?? null
           }
-          onEdit={() =>
-            snapshot && setEditing({ name: null, layout: snapshot.layout })
-          }
+          onApplyLayout={(layout) => runAction(() => applyLayout(layout))}
           onRestoreLastLayout={() => {
             void runAction(restoreLastLayout, "Restored last layout");
           }}
@@ -605,10 +597,6 @@ function App() {
           onNewProfileNameChange={setNewProfileName}
           onSaveCurrentLayout={() => {
             void handleSaveCurrentLayout();
-          }}
-          onEditProfile={(name) => {
-            const profile = snapshot?.profiles.find((p) => p.name === name);
-            if (profile) setEditing({ name, layout: profile.layout });
           }}
           onApplyProfile={(name) => {
             void runAction(() => applyProfile(name), "Profile applied");
@@ -667,30 +655,6 @@ function App() {
             void handleConfirmDisplayToggle();
           }}
         />
-
-        {editing && snapshot && (
-          <DisplayEditor
-            key={editing.name ?? "current"}
-            initial={editing.layout}
-            name={editing.name}
-            snapshot={snapshot}
-            busy={actionBusy}
-            onClose={() => setEditing(null)}
-            onSave={(layout) => {
-              void runAction(
-                () => saveProfileLayout(editing.name!, layout),
-                "Profile saved",
-              ).then((ok) => {
-                if (ok) setEditing(null);
-              });
-            }}
-            onApply={(layout) => {
-              void runAction(() => applyLayout(layout)).then((ok) => {
-                if (ok) setEditing(null);
-              });
-            }}
-          />
-        )}
 
         <DeleteProfileDialog
           pendingProfileDelete={pendingProfileDelete}

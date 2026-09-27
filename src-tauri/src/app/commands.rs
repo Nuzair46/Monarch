@@ -74,6 +74,7 @@ pub struct PendingConfirmationDto {
 
 #[derive(Clone, Serialize)]
 pub struct AppSnapshotDto {
+    pub cursor_status: monarch::cursor::CursorStatus,
     pub generation: u64,
     pub displays: Vec<DisplayInfoDto>,
     pub layout: LayoutDto,
@@ -97,19 +98,6 @@ pub async fn get_display_capabilities(
 ) -> CommandResult<Vec<DisplayCapabilitiesDto>> {
     state.controller.refresh(false);
     Ok(state.controller.snapshot()?.capabilities)
-}
-
-#[tauri::command]
-pub async fn save_profile_layout<R: Runtime>(
-    app: AppHandle<R>,
-    name: String,
-    layout: LayoutDto,
-) -> CommandResult<()> {
-    execute(
-        &app,
-        Operation::SaveProfileLayout(name, dto_to_layout(layout)?),
-    )
-    .await
 }
 
 #[tauri::command]
@@ -216,6 +204,7 @@ where
         .collect::<Vec<_>>();
     let layout = layout_to_dto(&observed.layout);
     let mut snapshot = AppSnapshotDto {
+        cursor_status: super::cursor::status(),
         generation,
         displays,
         layout,

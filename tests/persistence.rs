@@ -86,11 +86,38 @@ fn missing_primary_does_not_resurrect_an_orphaned_backup() {
 
 #[test]
 fn older_and_future_schemas_reset_instead_of_migrating_or_blocking_startup() {
-    for version in [0, 1, u32::MAX] {
+    for version in [0, 1, 2, u32::MAX] {
         let mut config = saved_config();
         config.schema_version = version;
         assert_startup_resets(serde_json::to_value(config).unwrap());
     }
+}
+
+#[test]
+fn a_valid_one_x_configuration_starts_fresh_without_importing_profiles() {
+    let mut legacy = serde_json::to_value(saved_config()).unwrap();
+    legacy["schema_version"] = serde_json::json!(2);
+    fn remove_new_fields(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for key in [
+                    "hdr_enabled",
+                    "scale_percent",
+                    "clone_group",
+                    "cursor_correction_enabled",
+                    "cursor_calibrations",
+                ] {
+                    fields.remove(key);
+                }
+                fields.values_mut().for_each(remove_new_fields);
+            }
+            serde_json::Value::Array(values) => values.iter_mut().for_each(remove_new_fields),
+            _ => {}
+        }
+    }
+    remove_new_fields(&mut legacy);
+    assert!(serde_json::from_value::<AppConfig>(legacy.clone()).is_ok());
+    assert_startup_resets(legacy);
 }
 
 #[test]
@@ -287,85 +314,4 @@ fn layout() -> Layout {
             })
             .collect(),
     }
-}
-
-#[test]
-fn valid_v2_migration_preserves_every_record_and_original_bytes() {
-    let dir = TempDir::new();
-    let store = dir.store();
-    let expected = saved_config();
-    let mut v2 = serde_json::to_value(&expected).unwrap();
-    v2["schema_version"] = serde_json::json!(2);
-    fn strip(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(map) => {
-                for key in [
-                    "hdr_enabled",
-                    "scale_percent",
-                    "clone_group",
-                    "cursor_correction_enabled",
-                    "cursor_calibrations",
-                ] {
-                    map.remove(key);
-                }
-                for child in map.values_mut() {
-                    strip(child);
-                }
-            }
-            serde_json::Value::Array(values) => {
-                for child in values {
-                    strip(child);
-                }
-            }
-            _ => {}
-        }
-    }
-    strip(&mut v2);
-    let bytes = serde_json::to_vec_pretty(&v2).unwrap();
-    fs::write(store.path(), &bytes).unwrap();
-    assert_eq!(store.load().unwrap(), expected);
-    assert_eq!(
-        fs::read(store.path().with_extension("json.v2.bak")).unwrap(),
-        bytes
-    );
-    assert_eq!(store.load().unwrap(), expected);
-}
-
-#[test]
-fn failed_migration_backup_does_not_replace_v2_config() {
-    let dir = TempDir::new();
-    let store = dir.store();
-    let mut old = saved_config();
-    old.schema_version = 2;
-    let mut value = serde_json::to_value(&old).unwrap();
-    fn strip(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(map) => {
-                for key in [
-                    "hdr_enabled",
-                    "scale_percent",
-                    "clone_group",
-                    "cursor_correction_enabled",
-                    "cursor_calibrations",
-                ] {
-                    map.remove(key);
-                }
-                for child in map.values_mut() {
-                    strip(child);
-                }
-            }
-            serde_json::Value::Array(values) => {
-                for child in values {
-                    strip(child);
-                }
-            }
-            _ => {}
-        }
-    }
-    strip(&mut value);
-    let bytes = serde_json::to_vec(&value).unwrap();
-    fs::write(store.path(), &bytes).unwrap();
-    fs::create_dir(store.path().with_extension("json.v2.bak")).unwrap();
-    assert!(store.load().is_err());
-    assert_eq!(fs::read(store.path()).unwrap(), bytes);
 }

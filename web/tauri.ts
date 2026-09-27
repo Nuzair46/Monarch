@@ -248,11 +248,3 @@ export async function getDisplayCapabilities(): Promise<DisplayCapabilities[]> {
     ? mock.getDisplayCapabilities()
     : invoke("get_display_capabilities");
 }
-export async function saveProfileLayout(
-  name: string,
-  layout: Layout,
-): Promise<void> {
-  return useWebMock
-    ? mock.saveProfileLayout(name, layout)
-    : invoke("save_profile_layout", { name, layout });
-}

@@ -76,6 +76,26 @@ pub struct Mapping {
     pub surfaces: Vec<Surface>,
     pub desktop: Rect,
     boundaries: Vec<Boundary>,
+    pub issues: Vec<CalibrationIssue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CalibrationIssue {
+    pub display_key: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CursorStatus {
+    pub platform_supported: bool,
+    pub enabled: bool,
+    pub running: bool,
+    pub calibrated_monitors: usize,
+    pub boundaries: usize,
+    pub corrected_crossings: u64,
+    pub input_events: u64,
+    pub pause_reason: Option<String>,
+    pub issues: Vec<CalibrationIssue>,
 }
 #[derive(Clone, Copy)]
 pub struct InputContext {
@@ -89,10 +109,45 @@ impl InputContext {
         !self.injected && !self.control_down && !self.confined && self.input_desktop_available
     }
 }
+
+/// The same event sequence state used by the native hook. A corrected position
+/// becomes the next origin only after Windows accepts the cursor movement.
+#[derive(Default)]
+pub struct MotionTracker {
+    previous: Option<Point>,
+}
+impl MotionTracker {
+    pub fn reset(&mut self) {
+        self.previous = None;
+    }
+    pub fn movement(
+        &mut self,
+        mapping: &Mapping,
+        proposed: Point,
+        context: InputContext,
+    ) -> Option<Point> {
+        if !context.allows_correction() {
+            self.reset();
+            return None;
+        }
+        self.previous
+            .replace(proposed)
+            .and_then(|previous| mapping.map_motion(previous, proposed, context))
+    }
+    pub fn accepted(&mut self, corrected: Point) {
+        self.previous = Some(corrected);
+    }
+}
 impl Mapping {
     pub fn build(layout: &Layout, calibrations: &[Calibration]) -> Self {
-        if layout.ensure_supported().is_err() {
-            return Self::default();
+        if let Err(error) = layout.ensure_supported() {
+            return Self {
+                issues: vec![CalibrationIssue {
+                    display_key: None,
+                    message: error.to_string(),
+                }],
+                ..Self::default()
+            };
         }
         let mut outputs: Vec<_> = layout
             .outputs
@@ -162,6 +217,12 @@ impl Mapping {
                 .find(|o| calibration(&o.display_id).is_some_and(|c| c.clone_representative))
                 .unwrap_or(members[0]);
             let Some(cal) = calibration(&representative.display_id) else {
+                result.issues.push(CalibrationIssue {
+                    display_key: Some(identity::display_key(&representative.display_id)),
+                    message:
+                        "Enter valid physical dimensions and enable this monitor’s calibration."
+                            .into(),
+                });
                 continue;
             };
             let (w, h) = if matches!(
@@ -208,6 +269,14 @@ impl Mapping {
                     .then_some(i)
             })
             .collect();
+        for i in &overlaps {
+            result.issues.push(CalibrationIssue {
+                display_key: Some(identity::display_key(&result.surfaces[*i].display_id)),
+                message:
+                    "Physical monitor rectangles overlap. Drag them apart so their edges meet."
+                        .into(),
+            });
+        }
         result.surfaces = result
             .surfaces
             .into_iter()
@@ -240,7 +309,30 @@ impl Mapping {
                 }
             }
         }
+        for (index, surface) in result.surfaces.iter().enumerate() {
+            if !result.boundaries.iter().any(|b| b.from == index) {
+                result.issues.push(CalibrationIssue {
+                    display_key: Some(identity::display_key(&surface.display_id)),
+                    message: "No adjoining calibrated monitor. Drag the physical edges together."
+                        .into(),
+                });
+            }
+        }
         result
+    }
+
+    pub fn boundary_count(&self) -> usize {
+        self.boundaries.len() / 2
+    }
+
+    pub fn status(&self, enabled: bool) -> CursorStatus {
+        CursorStatus {
+            enabled,
+            calibrated_monitors: self.surfaces.len(),
+            boundaries: self.boundary_count(),
+            issues: self.issues.clone(),
+            ..CursorStatus::default()
+        }
     }
     pub fn map_motion(
         &self,
@@ -305,7 +397,22 @@ impl Mapping {
                         _ => physical_x >= p[0] && physical_x < p[0] + p[2],
                     }
                 });
-            let candidate = candidates.next()?;
+            let Some(candidate) = candidates.next() else {
+                // A fast move may cross a valid boundary and then run beyond the
+                // desktop. Keep the corrected physical height at the final edge.
+                return corrected.then(|| Point {
+                    x: end
+                        .0
+                        .round()
+                        .clamp(f64::from(rect.left), f64::from(rect.right - 1))
+                        as i32,
+                    y: end
+                        .1
+                        .round()
+                        .clamp(f64::from(rect.top), f64::from(rect.bottom - 1))
+                        as i32,
+                });
+            };
             if candidates.next().is_some() {
                 return None;
             }

@@ -55,11 +55,17 @@ It uses Windows display topology APIs (`DisplayConfig`) to change which outputs 
 4. Click `Attach` later to bring the display back
 5. Use `Save Current Layout` in `Profiles` to store common setups
 
-## Editing displays and profiles
+## Editing displays
 
-Choose **Edit displays** on the main tab, or **Edit** beside a saved profile. **Save**
-updates the profile without changing the desktop. **Apply** previews changes through
-the usual confirmation timer and reverts all captured settings on timeout.
+Monarch 2.0 starts with a fresh configuration. Settings and profiles from 1.x are
+not supported or migrated; recreate profiles from your current desktop.
+
+Drag monitors in **Layout Preview** to arrange them. Click a monitor in the
+**Monitors** list to open its properties, including separate **Resolution** and
+**Refresh rate** controls. Changes stay in the draft until **Save layout**, which
+uses the confirmation timer and restores captured settings if you revert or time out.
+**Discard changes** restores the preview without changing Windows. Arrow keys move
+a focused monitor; Shift makes larger adjustments.
 
 Mode lists come from Windows. Unsupported HDR or scaling controls explain why they
 are unavailable. Detached or duplicated monitors may expose only their preferred
@@ -67,13 +73,22 @@ and observed modes; extend the monitor first to enumerate additional modes.
 **Duplicate of…** copies the selected display's source settings. If Windows rejects
 the combination, choose compatible settings explicitly. **Extend** places the member
 beside the remaining desktop. **Detached** keeps the other group members active.
+Profiles save the current confirmed layout and can be applied or deleted; they have
+no separate editor.
 
-In **Settings → Cursor alignment**, calibrate panel dimensions and physical X/Y
-positions in millimeters, then enable **Align cursor across monitors**. Dimensions
-are prefilled from valid EDID data where available. Put adjoining physical edges at
-the same coordinate. Calibration is global across profiles, and duplicated desktops
-have one selectable physical representative. Hold **Ctrl** to bypass correction.
-The tray also has an alignment toggle. This setting starts off.
+In **Settings → Cursor alignment**, confirm the panel dimensions and drag the
+physical monitors to match your desk. Valid EDID dimensions prefill active monitors;
+unknown dimensions must be measured manually. **Match Windows arrangement** places
+adjoining edges using each panel's physical size. Close any gaps and overlaps, then
+enable **Align cursor across monitors** and save. Calibration is global, and cloned
+desktops have one selectable physical representative. Hold **Ctrl** to bypass
+correction. The tray also has an alignment toggle. Alignment starts off.
+
+The status shows whether correction is active, why it is paused, and how many
+crossings have been corrected this session. Move across an edge to check the counter.
+For equal-size 2560×1080 and 3440×1440 panels, crossing at half height maps y=540 to
+y=720 even when both Windows scaling settings are 100%. Interior pointer speed stays
+unchanged. Physical offsets and unequal panel sizes change that mapping.
 
 Real-device verification scenarios are listed in the [Windows hardware checklist](docs/windows-hardware-checklist.md).
 

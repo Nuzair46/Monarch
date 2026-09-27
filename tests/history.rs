@@ -81,3 +81,13 @@ fn active_geometry_always_wins_over_history() {
     history.complete_inventory(&mut current);
     assert_eq!(current, original);
 }
+
+#[test]
+fn version_one_geometry_is_not_reused_by_monarch_two() {
+    let mut history = GeometryHistory::default();
+    history.remember(&observed("old-panel"));
+    let mut old = serde_json::to_value(history).unwrap();
+    old["version"] = serde_json::json!(1);
+    let old: GeometryHistory = serde_json::from_value(old).unwrap();
+    assert!(!old.is_valid());
+}

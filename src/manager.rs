@@ -328,57 +328,6 @@ where
         self.commit_config(next)
     }
 
-    /// Persist a draft without querying or changing live displays. Disconnected
-    /// monitors are intentionally retained; capabilities are checked at Apply.
-    pub fn save_profile_layout(
-        &mut self,
-        name: String,
-        mut layout: Layout,
-    ) -> Result<(), ManagerError> {
-        self.ensure_no_pending_confirmation()?;
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(ManagerError::Validation(
-                "profile name cannot be empty".into(),
-            ));
-        }
-        let observed = self.backend.snapshot()?;
-        for output in &mut layout.outputs {
-            if let IdentityResolution::Resolved(mut current) =
-                resolve(&output.display_id, &observed.layout)
-            {
-                crate::identity::preserve_evidence(&output.display_id, &mut current);
-                output.display_id = current;
-            }
-            if let Some(previous) = self
-                .config
-                .profiles
-                .iter()
-                .find(|p| p.name == name)
-                .and_then(|p| {
-                    p.layout.outputs.iter().find(|o| {
-                        o.display_id.endpoint() == output.display_id.endpoint()
-                            && o.display_id.edid_hash == output.display_id.edid_hash
-                    })
-                })
-            {
-                crate::identity::preserve_evidence(&previous.display_id, &mut output.display_id);
-            }
-        }
-        layout.normalize_clone_groups();
-        layout.ensure_supported()?;
-        normalize_primary(&mut layout);
-        let mut next = self.config.clone();
-        sync_display_fingerprints(&mut next, &observed.displays);
-        next.profiles.retain(|p| p.name != name);
-        next.profiles.push(Profile {
-            name: name.into(),
-            layout,
-        });
-        next.profiles.sort_by(|a, b| a.name.cmp(&b.name));
-        self.commit_config(next)
-    }
-
     pub fn get_display_capabilities(
         &self,
     ) -> Result<Vec<crate::capabilities::DisplayCapabilities>, ManagerError> {

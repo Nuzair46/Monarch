@@ -63,11 +63,6 @@ impl ConfigStore for FileConfigStore {
                 {
                     return Ok(config);
                 }
-                if let Some(config) = migrate_v2(&bytes) {
-                    atomic_write(&self.path.with_extension("json.v2.bak"), &bytes)?;
-                    self.save(&config)?;
-                    return Ok(config);
-                }
                 self.reset()?;
                 Ok(AppConfig::default())
             }
@@ -208,48 +203,4 @@ impl ConfigStore for MemoryConfigStore {
         *guard = config.clone();
         Ok(())
     }
-}
-
-/// Only a structurally valid v2 configuration is migrated. Serde still rejects
-/// unknown fields and missing required old fields before compatible defaults apply.
-fn migrate_v2(bytes: &[u8]) -> Option<AppConfig> {
-    let mut config: AppConfig = serde_json::from_slice(bytes).ok()?;
-    if config.schema_version != 2 {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let settings = value.get("settings")?.as_object()?;
-    if settings.contains_key("cursor_correction_enabled")
-        || settings.contains_key("cursor_calibrations")
-    {
-        return None;
-    }
-    let layouts = value
-        .get("profiles")?
-        .as_array()?
-        .iter()
-        .filter_map(|p| p.get("layout"))
-        .chain(
-            [
-                "last_known_good_layout",
-                "last_restorable_layout",
-                "pending_recovery",
-            ]
-            .into_iter()
-            .filter_map(|key| value.get(key))
-            .filter(|l| !l.is_null()),
-        );
-    for layout in layouts {
-        for output in layout.get("outputs")?.as_array()? {
-            let fields = output.as_object()?;
-            if ["hdr_enabled", "scale_percent", "clone_group"]
-                .iter()
-                .any(|key| fields.contains_key(*key))
-            {
-                return None;
-            }
-        }
-    }
-    config.schema_version = crate::model::CONFIG_SCHEMA_VERSION;
-    config.is_supported().then_some(config)
 }

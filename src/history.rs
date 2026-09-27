@@ -11,7 +11,7 @@ pub struct GeometryHistory {
 impl Default for GeometryHistory {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             layout: Layout::default(),
         }
     }
@@ -19,7 +19,7 @@ impl Default for GeometryHistory {
 
 impl GeometryHistory {
     pub fn is_valid(&self) -> bool {
-        self.version == 1
+        self.version == 2
             && self.layout.outputs.len() <= 128
             && self.layout.outputs.iter().all(|output| {
                 // Different physical monitors can have used the same runtime address.

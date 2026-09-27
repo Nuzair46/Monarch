@@ -1,11 +1,14 @@
+import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TabsContent } from "@/components/ui/tabs";
 import { LayoutPreview } from "@/app/components/layout-preview";
 import { MonitorCard } from "@/app/components/monitor-card";
+import { DisplayProperties } from "./display-properties";
+import { editOutput, layoutError, rebaseLayout } from "@/app/display-editor";
 import { indexedShortcutLabel } from "@/app/utils";
-import type { AppSnapshot, DisplayInfo } from "@/types";
+import type { AppSnapshot, DisplayInfo, Layout } from "@/types";
 
 type MainTabProps = {
   loading: boolean;
@@ -15,7 +18,7 @@ type MainTabProps = {
   hasPendingConfirmation: boolean;
   shortcutsEnabled: boolean;
   displayShortcutBase: string | null;
-  onEdit: () => void;
+  onApplyLayout: (layout: Layout) => Promise<boolean>;
   onRestoreLastLayout: () => void;
   onMakePrimaryRequest: (display: DisplayInfo) => void;
   onToggleRequest: (display: DisplayInfo) => void;
@@ -29,13 +32,35 @@ export function MainTab({
   hasPendingConfirmation,
   shortcutsEnabled,
   displayShortcutBase,
-  onEdit,
+  onApplyLayout,
   onRestoreLastLayout,
   onMakePrimaryRequest,
   onToggleRequest,
 }: MainTabProps) {
+  const [draft, setDraft] = useState<Layout | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const signature = JSON.stringify(snapshot?.layout);
+  useEffect(() => {
+    if (draft) {
+      setDraft(null);
+      if (!actionBusy)
+        setNotice(
+          "The active display layout changed. Review the current arrangement before editing again.",
+        );
+    }
+    setEditing(null);
+  }, [signature]);
   if (loading || !snapshot) {
     return <TabsContent value="main" className="mt-0" />;
+  }
+
+  const layout = draft ?? snapshot.layout;
+  const error = draft ? layoutError(draft, snapshot.capabilities) : null;
+  const locked = actionBusy || hasPendingConfirmation;
+  function change(next: Layout) {
+    setDraft(JSON.stringify(next) === signature ? null : next);
+    setNotice(null);
   }
 
   return (
@@ -46,22 +71,61 @@ export function MainTab({
             <CardHeader className="gap-3 md:flex-row md:items-start md:justify-between">
               <CardTitle className="text-base">Layout Preview</CardTitle>
               <div className="flex flex-wrap items-center justify-end gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={actionBusy || hasPendingConfirmation}
-                  onClick={onEdit}
-                >
-                  Edit displays
-                </Button>
-                <Badge variant="outline">{activeDisplayCount} active</Badge>
+                <Badge variant="outline">
+                  {layout.outputs.filter((o) => o.enabled).length} active
+                </Badge>
                 <Badge variant="secondary">
                   {snapshot.displays.length} detected
                 </Badge>
               </div>
             </CardHeader>
             <CardContent>
-              <LayoutPreview snapshot={snapshot} />
+              <LayoutPreview
+                snapshot={{ ...snapshot, layout }}
+                disabled={locked}
+                onMove={(key, position) =>
+                  change(editOutput(layout, key, { position }))
+                }
+              />
+              <p className="mt-3 text-sm text-muted-foreground">
+                Drag monitors to match your desk. Use arrow keys for small
+                adjustments. Click a monitor in the list to change its
+                properties.
+              </p>
+              {notice && (
+                <p role="status" className="mt-2 text-sm text-muted-foreground">
+                  {notice}
+                </p>
+              )}
+              {error && (
+                <p role="alert" className="mt-2 text-sm text-destructive">
+                  {error}
+                </p>
+              )}
+              <div className="mt-4 flex justify-end gap-2">
+                <Button
+                  variant="outline"
+                  disabled={!draft || locked}
+                  onClick={() => {
+                    setDraft(null);
+                    setNotice(null);
+                  }}
+                >
+                  Discard changes
+                </Button>
+                <Button
+                  disabled={!draft || locked || Boolean(error)}
+                  onClick={() => {
+                    setDraft(null);
+                    setNotice(null);
+                    void onApplyLayout(rebaseLayout(layout)).then((ok) => {
+                      if (!ok) setDraft(layout);
+                    });
+                  }}
+                >
+                  Save layout
+                </Button>
+              </div>
             </CardContent>
           </Card>
 
@@ -93,17 +157,34 @@ export function MainTab({
                     monitorNumber={index + 1}
                     shortcutLabel={shortcutLabel}
                     shortcutsEnabled={shortcutsEnabled}
-                    busy={actionBusy}
+                    busy={actionBusy || Boolean(draft)}
                     hasPendingConfirmation={hasPendingConfirmation}
                     activeDisplayCount={activeDisplayCount}
                     onMakePrimaryRequest={onMakePrimaryRequest}
                     onToggleRequest={onToggleRequest}
+                    onEdit={() => setEditing(display.id_key)}
+                    editDisabled={locked}
                   />
                 );
               })}
             </CardContent>
           </Card>
         </div>
+
+        {editing && (
+          <DisplayProperties
+            key={editing}
+            displayKey={editing}
+            initial={layout}
+            snapshot={snapshot}
+            busy={locked}
+            onClose={() => setEditing(null)}
+            onSave={(next) => {
+              change(next);
+              setEditing(null);
+            }}
+          />
+        )}
 
         <Card className="border-dashed">
           <CardContent className="space-y-2 p-4">

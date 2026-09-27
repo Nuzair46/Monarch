@@ -125,26 +125,15 @@ fn verification_compares_members_not_local_group_names_and_checks_preferences() 
     }
 }
 #[test]
-fn draft_save_retains_disconnected_settings_and_never_applies() {
-    let backend = MockBackend::new(vec![], layout()).unwrap();
-    let store = MemoryConfigStore::default();
-    let mut manager = MonarchDisplayManager::new(backend.clone(), store.clone()).unwrap();
-    let mut draft = cloned();
-    draft.outputs[2].display_id.target_id = 99;
-    draft.outputs[2].display_id.edid_hash = Some(99);
-    draft.outputs[2].display_id.identity = MonitorIdentity {
-        device_path: Some("missing".into()),
-        edid_serial: Some("missing".into()),
-    };
-    draft.outputs[2].hdr_enabled = Some(true);
-    manager
-        .save_profile_layout("Edited".into(), draft.clone())
-        .unwrap();
-    assert_eq!(backend.current_layout().unwrap(), layout());
+fn saving_current_profile_preserves_preferences_without_applying() {
+    let current = cloned();
+    let backend = MockBackend::new(vec![], current.clone()).unwrap();
+    let mut manager =
+        MonarchDisplayManager::new(backend.clone(), MemoryConfigStore::default()).unwrap();
+    manager.save_profile("Desk").unwrap();
+    assert_eq!(backend.current_layout().unwrap(), current);
     assert!(!manager.has_pending_confirmation());
-    assert_eq!(manager.list_profiles()[0].layout, draft);
-    assert!(manager.apply_profile("Edited").is_err());
-    assert_eq!(backend.current_layout().unwrap(), layout());
+    assert_eq!(manager.list_profiles()[0].layout, current);
 }
 #[test]
 fn detach_clone_member_collapses_group_and_reattach_extends_without_overlap() {
@@ -219,15 +208,17 @@ fn every_failed_stage_restores_all_captured_settings_and_failed_recovery_is_expl
 }
 
 #[test]
-fn saved_editor_identity_is_not_replaced_by_a_different_panel_on_the_same_port() {
+fn saved_profile_identity_is_not_replaced_by_a_different_panel_on_the_same_port() {
     let old = layout();
     let mut live = old.clone();
     live.outputs[1].display_id.identity.edid_serial = Some("different-panel".into());
     let backend = MockBackend::new(vec![], live).unwrap();
-    let mut manager = MonarchDisplayManager::new(backend, MemoryConfigStore::default()).unwrap();
-    manager
-        .save_profile_layout("Disconnected".into(), old.clone())
-        .unwrap();
+    let mut config = AppConfig::default();
+    config.profiles.push(Profile {
+        name: "Disconnected".into(),
+        layout: old.clone(),
+    });
+    let mut manager = MonarchDisplayManager::new(backend, MemoryConfigStore::new(config)).unwrap();
     assert_eq!(
         manager.list_profiles()[0].layout.outputs[1].display_id,
         old.outputs[1].display_id

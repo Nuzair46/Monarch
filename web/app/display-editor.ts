@@ -1,4 +1,9 @@
-import type { Layout, OutputConfig, DisplayCapabilities } from "@/types";
+import type {
+  Layout,
+  OutputConfig,
+  DisplayCapabilities,
+  Resolution,
+} from "@/types";
 export const sameSource = (a: OutputConfig, b: OutputConfig) =>
   a.enabled &&
   b.enabled &&
@@ -114,4 +119,92 @@ export function capabilityMatches(
       output.identity.edid_serial !== cap.identity.edid_serial
     )
   );
+}
+
+export function nativeResolution(output: OutputConfig): Resolution {
+  return output.rotation === "portrait" ||
+    output.rotation === "portrait_flipped"
+    ? { width: output.resolution.height, height: output.resolution.width }
+    : output.resolution;
+}
+
+export function resolutionChoices(
+  cap: DisplayCapabilities | undefined,
+): Resolution[] {
+  return [
+    ...new Map(
+      (cap?.modes ?? []).map((m) => [
+        `${m.resolution.width}x${m.resolution.height}`,
+        m.resolution,
+      ]),
+    ).values(),
+  ];
+}
+
+export function refreshChoices(
+  cap: DisplayCapabilities | undefined,
+  output: OutputConfig,
+): number[] {
+  const resolution = nativeResolution(output);
+  return [
+    ...new Set(
+      (cap?.modes ?? [])
+        .filter(
+          (m) =>
+            m.resolution.width === resolution.width &&
+            m.resolution.height === resolution.height,
+        )
+        .map((m) => m.refresh_rate_mhz),
+    ),
+  ].sort((a, b) => a - b);
+}
+
+export function layoutError(
+  layout: Layout,
+  capabilities: DisplayCapabilities[],
+): string | null {
+  const active = layout.outputs.filter((o) => o.enabled);
+  if (!active.length) return "Keep at least one monitor active.";
+  for (const [index, output] of active.entries()) {
+    if (
+      Math.abs(output.position.x) > 1_000_000 ||
+      Math.abs(output.position.y) > 1_000_000
+    )
+      return "Move monitors closer to the desktop origin.";
+    const cap = capabilities.find((c) => capabilityMatches(output, c));
+    if (!cap)
+      return "A monitor is no longer available. Refresh the layout before saving.";
+    if (
+      cap.modes.length &&
+      !refreshChoices(cap, output).some(
+        (rate) => Math.abs(rate - output.refresh_rate_mhz) <= 2,
+      )
+    )
+      return "Choose a supported resolution and refresh rate in the monitor’s properties.";
+    for (const other of active.slice(index + 1)) {
+      if (sameSource(output, other)) continue;
+      if (
+        output.position.x < other.position.x + other.resolution.width &&
+        other.position.x < output.position.x + output.resolution.width &&
+        output.position.y < other.position.y + other.resolution.height &&
+        other.position.y < output.position.y + output.resolution.height
+      )
+        return "Monitors overlap. Drag them apart before saving the layout.";
+    }
+  }
+  return null;
+}
+
+export function rebaseLayout(layout: Layout): Layout {
+  const primary = layout.outputs.find((o) => o.enabled && o.primary);
+  if (!primary) return layout;
+  return {
+    outputs: layout.outputs.map((o) => ({
+      ...o,
+      position: {
+        x: o.position.x - primary.position.x,
+        y: o.position.y - primary.position.y,
+      },
+    })),
+  };
 }

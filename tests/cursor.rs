@@ -52,6 +52,178 @@ fn pair() -> (Layout, Vec<Calibration>) {
     ];
     (l, c)
 }
+
+fn ultrawide_pair() -> (Layout, Vec<Calibration>) {
+    let mut left = output(1, 0, 0);
+    left.resolution = Resolution {
+        width: 2560,
+        height: 1080,
+    };
+    left.scale_percent = Some(100);
+    let mut right = output(2, 2560, 0);
+    right.resolution = Resolution {
+        width: 3440,
+        height: 1440,
+    };
+    right.scale_percent = Some(100);
+    let c = vec![
+        calibration(&left, 800, 340, 0, 0),
+        calibration(&right, 800, 340, 800, 0),
+    ];
+    (
+        Layout {
+            outputs: vec![left, right],
+        },
+        c,
+    )
+}
+
+#[test]
+fn ultrawide_1080p_and_1440p_at_100_percent_align_in_both_directions() {
+    let (mut layout, c) = ultrawide_pair();
+    for primary_on_right in [false, true] {
+        if primary_on_right {
+            layout.outputs[0].position.x = -2560;
+            layout.outputs[0].primary = false;
+            layout.outputs[1].position.x = 0;
+            layout.outputs[1].primary = true;
+        }
+        let seam = layout.outputs[1].position.x;
+        let mapping = Mapping::build(&layout, &c);
+        assert_eq!(mapping.boundary_count(), 1);
+        assert!(mapping.issues.is_empty());
+        for y in (30..1050).step_by(30) {
+            let forward = mapping
+                .map_motion(
+                    Point { x: seam - 10, y },
+                    Point { x: seam + 10, y },
+                    context(),
+                )
+                .unwrap();
+            assert_eq!(forward.y, y * 4 / 3);
+            let reverse = mapping
+                .map_motion(
+                    Point {
+                        x: seam + 10,
+                        y: forward.y,
+                    },
+                    Point {
+                        x: seam - 10,
+                        y: forward.y,
+                    },
+                    context(),
+                )
+                .unwrap();
+            assert_eq!(reverse.y, y);
+        }
+    }
+}
+
+#[test]
+fn ultrawide_dead_end_and_fast_outer_edge_keep_physical_height() {
+    let (layout, c) = ultrawide_pair();
+    let mapping = Mapping::build(&layout, &c);
+    let clipped = mapping
+        .map_motion(
+            Point { x: 2570, y: 1200 },
+            Point { x: 2560, y: 1200 },
+            context(),
+        )
+        .unwrap();
+    assert!(clipped.x < 2560);
+    assert_eq!(clipped.y, 900);
+    let fast = mapping
+        .map_motion(
+            Point { x: 2500, y: 540 },
+            Point { x: 9000, y: 540 },
+            context(),
+        )
+        .unwrap();
+    assert_eq!(fast, Point { x: 5999, y: 720 });
+}
+
+#[test]
+fn ultrawide_offset_panels_align_using_physical_size_not_resolution_or_scale() {
+    let (layout, mut c) = ultrawide_pair();
+    c[0].width_mm = 710;
+    c[0].height_mm = 300;
+    c[0].position_mm.y = 20;
+    c[1].position_mm.x = 710;
+    let mapping = Mapping::build(&layout, &c);
+    assert_eq!(
+        mapping
+            .map_motion(
+                Point { x: 2550, y: 540 },
+                Point { x: 2570, y: 540 },
+                context()
+            )
+            .unwrap()
+            .y,
+        720
+    );
+}
+
+#[test]
+fn gaps_overlaps_and_missing_calibrations_report_why_alignment_is_inactive() {
+    let (layout, mut c) = ultrawide_pair();
+    c[1].position_mm.x += 20;
+    let gap = Mapping::build(&layout, &c);
+    assert_eq!(gap.boundary_count(), 0);
+    assert_eq!(gap.issues.len(), 2);
+    c[1].position_mm.x = 400;
+    let overlap = Mapping::build(&layout, &c);
+    assert_eq!(overlap.surfaces.len(), 0);
+    assert!(overlap.issues.iter().all(|i| i.message.contains("overlap")));
+    let missing = Mapping::build(&layout, &[]);
+    assert_eq!(missing.boundary_count(), 0);
+    assert_eq!(missing.issues.len(), 2);
+}
+
+#[test]
+fn hook_event_sequence_uses_accepted_warps_and_resets_after_bypass() {
+    let (layout, c) = ultrawide_pair();
+    let mapping = Mapping::build(&layout, &c);
+    let mut tracker = MotionTracker::default();
+    assert!(tracker
+        .movement(&mapping, Point { x: 2550, y: 540 }, context())
+        .is_none());
+    let corrected = tracker
+        .movement(&mapping, Point { x: 2570, y: 540 }, context())
+        .unwrap();
+    assert_eq!(corrected.y, 720);
+    tracker.accepted(corrected);
+    assert!(tracker
+        .movement(&mapping, Point { x: 2700, y: 720 }, context())
+        .is_none());
+    let reverse = tracker
+        .movement(&mapping, Point { x: 2550, y: 720 }, context())
+        .unwrap();
+    assert_eq!(reverse.y, 540);
+    tracker.accepted(reverse);
+    for reason in 0..4 {
+        let mut bypass = context();
+        match reason {
+            0 => bypass.injected = true,
+            1 => bypass.control_down = true,
+            2 => bypass.confined = true,
+            _ => bypass.input_desktop_available = false,
+        }
+        assert!(tracker
+            .movement(&mapping, Point { x: 3500, y: 1000 }, bypass)
+            .is_none());
+        // Returning to normal input seeds a fresh origin, not a stale crossing.
+        assert!(tracker
+            .movement(&mapping, Point { x: 2550, y: 540 }, context())
+            .is_none());
+    }
+    assert!(tracker
+        .movement(&mapping, Point { x: 2570, y: 540 }, context())
+        .is_some());
+    // If Windows refuses that correction, native input still proceeds at y=540.
+    assert!(tracker
+        .movement(&mapping, Point { x: 2700, y: 540 }, context())
+        .is_none());
+}
 #[test]
 fn horizontal_mapping_matches_physical_height_and_preserves_interior_movement() {
     let (l, c) = pair();

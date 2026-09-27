@@ -19,7 +19,6 @@ pub enum Operation {
     ApplyLayout(Layout),
     ApplyProfile(String, bool),
     SaveProfile(String),
-    SaveProfileLayout(String, Layout),
     DeleteProfile(String),
     Restore,
     Confirm,
@@ -250,7 +249,6 @@ impl Controller {
                 manager.apply_profile(&name)
             }
             Operation::SaveProfile(name) => manager.save_profile(name),
-            Operation::SaveProfileLayout(name, layout) => manager.save_profile_layout(name, layout),
             Operation::DeleteProfile(name) => manager.delete_profile(&name),
             Operation::Restore => {
                 if manager.has_pending_confirmation() {
@@ -343,6 +341,7 @@ mod tests {
     use super::*;
     fn controller() -> (Controller, Receiver<Request>) {
         Controller::channel(AppSnapshotDto {
+            cursor_status: monarch::cursor::CursorStatus::default(),
             generation: 12,
             displays: Vec::new(),
             layout: super::super::commands::LayoutDto {

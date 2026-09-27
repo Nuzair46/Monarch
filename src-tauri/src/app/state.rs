@@ -88,7 +88,6 @@ pub fn run_app() {
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
             commands::get_display_capabilities,
-            commands::save_profile_layout,
             commands::toggle_display,
             commands::apply_layout,
             commands::save_profile,

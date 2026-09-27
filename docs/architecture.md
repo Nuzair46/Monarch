@@ -50,7 +50,12 @@ Raw `DISPLAYCONFIG_PATH_INFO` and `DISPLAYCONFIG_MODE_INFO` arrays exist only du
 
 Startup reconstructs an unfinished journal as an immediately expired transaction. The worker attempts recovery before ordinary queued actions. Automation from profiles, hotkeys and the tray can auto-confirm only a successful operation. A persistence failure keeps recovery available.
 
-Schema 3 accepts optional HDR/scaling preferences and explicit clone groups. A complete, valid version-2 configuration migrates atomically with compatible defaults and cursor correction off. Original bytes remain in `config.json.v2.bak`; profiles, shortcuts, settings, geometry and pending recovery are retained. Malformed data, unknown fields and other unsupported schema versions keep the existing reset behavior. Filesystem failures remain errors. A missing primary configuration never resurrects a backup. Disconnected monitors do not invalidate saved profiles or recovery journals.
+Monarch 2.0 uses schema 3 for optional HDR/scaling preferences, clone groups and global
+cursor calibration. Configurations and profiles from earlier schemas are reset;
+there is no migration path. Geometry history has its own version 2 and rejects the
+old format. Malformed data and unsupported schemas reset; filesystem failures remain
+errors. Missing primary configuration never resurrects a backup. Valid current-format
+profiles and recovery journals retain disconnected monitors.
 
 Mutators clone state, save, then commit it in memory. File writes flush a unique temporary file before atomic replacement; Windows uses `MoveFileExW` with replacement and write-through. A supported previous config is retained as `config.json.bak` for manual recovery.
 
@@ -72,13 +77,16 @@ Instance mutex and pipe names include the user SID and Windows session ID. The n
 
 A Windows target source check on Linux can compile code and tests with `MONARCH_SKIP_TAURI_BUILD=1`; it does not execute Win32 calls or prove the MSI build. Hardware acceptance remains necessary for GPU/driver behavior, slideshow/disabled backgrounds, mixed adapters, dock changes, localized registry handling and multiple login sessions.
 
-## Editable profiles and capabilities
+## Display editing and capabilities
 
-Display profile editing (schema 3): output preferences include optional HDR, standard
-per-source scaling and layout-local clone groups. `save_profile_layout` persists a
-draft; it never applies displays. Missing optional preferences preserve observed
-state. Version 2 is migrated only after validation, with its original bytes retained
-in `config.json.v2.bak`. Geometry history remains preferences, not capabilities.
+The main preview stages draggable monitor positions. Per-monitor property dialogs
+stage orientation, HDR, scaling, duplication and independent resolution/refresh
+choices in the same draft. Save rebases the primary source to the origin and applies
+through the manager's verified confirmation transaction. Polls do not overwrite an
+unchanged draft; a genuinely changed external layout resets it with an explanation.
+Profiles capture the current layout; there is no saved-profile editing command.
+Missing optional preferences preserve observed state. Geometry history is never
+capability evidence.
 
 The Windows planner chooses one route per target, one common source per clone group,
 and distinct sources for extended surfaces. It submits a complete source-mode table
@@ -101,23 +109,37 @@ only for readable standard ranges, with no custom/global or registry scaling.
 
 Cursor calibration lives in global settings against the same serial/path/connection
 identity policy as profiles. EDID dimensions are offered only after checksum/header
-validation; users can measure and enter dimensions and physical X/Y positions.
+validation; active monitors with valid dimensions are preselected during setup.
+Initial placement follows Windows adjacency using each panel's own physical width
+and height, including left/above-primary displays. Users can drag physical positions
+or enter dimensions and X/Y coordinates. Gaps, overlaps and missing calibration are
+reported; the UI prevents enabling an arrangement with no usable boundary.
 Rotations swap panel dimensions. Clones form one cursor surface, with an explicit
 physical representative (or the first member in stable display order).
 
 `src/cursor.rs` builds physical boundary mappings outside input callbacks. It maps
 crossing points into physical millimeters and then the neighbor's pixels, retaining
 remaining native displacement. Interior movement is untouched. Ambiguous, overlapping,
-missing or invalid calibration produces no correction. DPI percentages do not enter
+missing or invalid calibration produces no correction and an explicit status issue. DPI percentages do not enter
 the mapping because the desktop coordinates are physical pixels.
 
 The Windows low-level hook runs on a dedicated thread with a message loop and a
 per-monitor-aware DPI context. Its callback does no enumeration, persistence, locking
-or allocation. Injected input is ignored, generated movement carries a private tag,
-and Ctrl, cursor confinement or an unavailable input desktop bypass correction.
+or allocation. Injected input is ignored. Cursor corrections use synchronous
+[`SetCursorPos`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setcursorpos)
+in physical pixels; expected warp positions and nonblocking callback state prevent
+feedback loops. Ctrl, cursor confinement or an unavailable input desktop bypass
+correction. Confinement is compared with Windows' actual virtual-screen bounds.
 Input-desktop availability is refreshed on the hook thread outside its callback.
 Epoch checks suspend stale maps immediately on display changes, hot-plug and resume;
 the display worker publishes replacements after apply/rollback. Disable and exit
 unregister the hook. See Microsoft's [LowLevelMouseProc requirements](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc).
+
+The published cursor status includes usable boundaries, calibration issues, input
+events, successful corrections and the current bypass reason. Only a successful
+native warp increments the correction counter. `MotionTracker` is the shared pure
+event-sequence component tested with accepted/refused warps and bypass transitions.
+The calibration and crossing behavior targets the physical crossover model described
+by [LittleBigMouse](https://littlebigmouse.mgth.fr/docs/); no upstream source is vendored.
 
 Hardware acceptance for these paths is tracked in [the Windows checklist](windows-hardware-checklist.md).

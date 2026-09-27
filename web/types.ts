@@ -68,6 +68,7 @@ export type PendingConfirmation = {
 };
 
 export type AppSnapshot = {
+  cursor_status: CursorStatus;
   generation: number;
   displays: DisplayInfo[];
   layout: Layout;
@@ -104,4 +105,16 @@ export type CursorCalibration = {
   height_mm: number;
   position_mm: Position;
   clone_representative: boolean;
+};
+
+export type CursorStatus = {
+  enabled: boolean;
+  running: boolean;
+  platform_supported: boolean;
+  calibrated_monitors: number;
+  boundaries: number;
+  corrected_crossings: number;
+  input_events: number;
+  pause_reason: string | null;
+  issues: { display_key: string | null; message: string }[];
 };

@@ -226,6 +226,17 @@ function buildMockSnapshot(): AppSnapshot {
   normalizeGroups(layout);
   return {
     generation: 0,
+    cursor_status: {
+      enabled: false,
+      running: false,
+      platform_supported: false,
+      calibrated_monitors: 0,
+      boundaries: 0,
+      corrected_crossings: 0,
+      input_events: 0,
+      pause_reason: null,
+      issues: [],
+    },
     displays,
     layout,
     capabilities: displays.map((display, index) => ({
@@ -452,19 +463,4 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
 
 export async function getDisplayCapabilities(): Promise<DisplayCapabilities[]> {
   return deepClone(mockState.capabilities);
-}
-export async function saveProfileLayout(
-  name: string,
-  layout: Layout,
-): Promise<void> {
-  ensureNoPending();
-  name = name.trim();
-  if (!name) throw new Error("Profile name cannot be empty.");
-  const saved = cloneLayout(layout);
-  ensureMockLayoutValid(saved);
-  mockState.profiles = [
-    ...mockState.profiles.filter((p) => p.name !== name),
-    { name, layout: saved },
-  ].sort((a, b) => a.name.localeCompare(b.name));
-  emitMockStateChanged();
 }

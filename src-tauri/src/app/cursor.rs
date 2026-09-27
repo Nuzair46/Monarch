@@ -3,7 +3,11 @@
 #[path = "cursor_windows.rs"]
 mod platform;
 #[cfg(target_os = "windows")]
-pub use platform::{epoch, shutdown, suspend, sync};
+pub use platform::{epoch, shutdown, status, suspend, sync};
+#[cfg(not(target_os = "windows"))]
+pub fn status() -> monarch::cursor::CursorStatus {
+    monarch::cursor::CursorStatus::default()
+}
 #[cfg(not(target_os = "windows"))]
 pub fn epoch() -> u64 {
     0
