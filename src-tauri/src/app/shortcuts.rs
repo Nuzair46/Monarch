@@ -35,22 +35,24 @@ pub fn sync_global_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
         let action = binding.action.clone();
         let label = binding.label.clone();
 
-        if let Err(err) = manager.on_shortcut(shortcut_string.as_str(), move |app_handle, _, event| {
-            if event.state != ShortcutState::Pressed {
-                return;
-            }
+        if let Err(err) =
+            manager.on_shortcut(shortcut_string.as_str(), move |app_handle, _, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
 
-            let app_handle = app_handle.clone();
-            let action = action.clone();
-            std::thread::spawn(move || match action {
-                ShortcutAction::ApplyProfile(name) => {
-                    handle_profile_apply_external_action(&app_handle, &name)
-                }
-                ShortcutAction::ToggleDisplay(display_key) => {
-                    handle_toggle_display_external_action(&app_handle, &display_key)
-                }
-            });
-        }) {
+                let app_handle = app_handle.clone();
+                let action = action.clone();
+                std::thread::spawn(move || match action {
+                    ShortcutAction::ApplyProfile(name) => {
+                        handle_profile_apply_external_action(&app_handle, &name)
+                    }
+                    ShortcutAction::ToggleDisplay(display_key) => {
+                        handle_toggle_display_external_action(&app_handle, &display_key)
+                    }
+                });
+            })
+        {
             let _ = manager.unregister_all();
             return Err(format!(
                 "failed to register global shortcut '{shortcut_string}' for {label}: {err}"
@@ -91,17 +93,18 @@ fn collect_bindings<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<ShortcutBindin
             Some(trimmed.to_string())
         }
     });
-    let display_toggle_shortcut_base = settings
-        .display_toggle_shortcut_base
-        .clone()
-        .and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
+    let display_toggle_shortcut_base =
+        settings
+            .display_toggle_shortcut_base
+            .clone()
+            .and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
     let profile_shortcuts = settings.profile_shortcuts.clone();
     let display_toggle_shortcuts = settings.display_toggle_shortcuts.clone();
 

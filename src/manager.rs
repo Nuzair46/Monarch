@@ -52,6 +52,8 @@ where
 {
     pub fn new(backend: B, store: S) -> Result<Self, ManagerError> {
         let mut config = store.load()?;
+        let current_layout = backend.get_layout()?;
+        let current_displays = backend.list_displays().unwrap_or_default();
         let mut should_persist = false;
         if config
             .settings
@@ -79,13 +81,22 @@ where
         let confirmation_timeout = Duration::from_secs(config.settings.revert_timeout_secs.max(1));
 
         if config.last_known_good_layout.is_none() || config.last_restorable_layout.is_none() {
-            let current_layout = backend.get_layout()?;
             if config.last_known_good_layout.is_none() {
                 config.last_known_good_layout = Some(current_layout.clone());
             }
             if config.last_restorable_layout.is_none() {
-                config.last_restorable_layout = Some(current_layout);
+                config.last_restorable_layout = Some(current_layout.clone());
             }
+            should_persist = true;
+        }
+        if sync_display_fingerprints(&mut config, &current_displays) {
+            should_persist = true;
+        }
+        if migrate_saved_layout_ids_with_fingerprints(
+            &mut config,
+            &current_layout,
+            &current_displays,
+        ) {
             should_persist = true;
         }
         if should_persist {
@@ -270,7 +281,7 @@ where
         let mut current_layout = self.backend.get_layout()?;
         normalize_primary(&mut current_layout);
         target_layout = remap_layout_display_ids(&target_layout, &current_layout);
-        ensure_any_enabled_output_resolves(&target_layout, &current_layout)?;
+        ensure_all_enabled_outputs_resolve(&target_layout, &current_layout)?;
 
         if current_layout == target_layout {
             return Ok(());
@@ -304,7 +315,7 @@ where
         normalize_primary(&mut remapped_target_layout);
         let remapped_target_layout =
             remap_layout_display_ids(&remapped_target_layout, &current_layout);
-        ensure_any_enabled_output_resolves(&remapped_target_layout, &current_layout)?;
+        ensure_all_enabled_outputs_resolve(&remapped_target_layout, &current_layout)?;
         self.backend.apply_layout(remapped_target_layout.clone())?;
         self.pending_confirmation = None;
         self.config.last_restorable_layout = Some(current_layout);
@@ -455,16 +466,177 @@ fn resolve_display_id_for_layout_action(
         }
     }
 
-    let mut matches = layout
-        .outputs
-        .iter()
-        .filter(|output| output.display_id.target_id == requested.target_id);
-    let first = matches.next()?;
-    if matches.next().is_none() {
-        return Some(first.display_id.clone());
+    if requested.edid_hash.is_none() {
+        let mut matches = layout
+            .outputs
+            .iter()
+            .filter(|output| output.display_id.target_id == requested.target_id);
+        let first = matches.next()?;
+        if matches.next().is_none() {
+            return Some(first.display_id.clone());
+        }
     }
 
     None
+}
+
+fn fingerprint_for_display(display_id: &DisplayId, friendly_name: Option<&str>) -> Option<String> {
+    let edid_hash = display_id.edid_hash?;
+    let normalized_name = friendly_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    Some(format!("{edid_hash:016x}:{normalized_name}"))
+}
+
+fn sync_display_fingerprints(config: &mut AppConfig, displays: &[DisplayInfo]) -> bool {
+    let mut changed = false;
+    for display in displays {
+        let fingerprint = fingerprint_for_display(&display.id, Some(&display.friendly_name));
+        let next = crate::model::DisplayFingerprint {
+            display_id: display.id.clone(),
+            friendly_name: display.friendly_name.clone(),
+            edid_fingerprint: fingerprint,
+        };
+
+        if let Some(existing) = config
+            .display_fingerprints
+            .iter_mut()
+            .find(|candidate| candidate.display_id == next.display_id)
+        {
+            if existing != &next {
+                *existing = next;
+                changed = true;
+            }
+        } else {
+            config.display_fingerprints.push(next);
+            changed = true;
+        }
+    }
+
+    if changed {
+        config
+            .display_fingerprints
+            .sort_by(|left, right| left.display_id.cmp(&right.display_id));
+    }
+    changed
+}
+
+fn migrate_saved_layout_ids_with_fingerprints(
+    config: &mut AppConfig,
+    current_layout: &Layout,
+    current_displays: &[DisplayInfo],
+) -> bool {
+    let mut changed = false;
+    let mut remap_profile_layout = |layout: &mut Layout| {
+        let remapped = remap_layout_display_ids_with_fingerprints(
+            layout,
+            current_layout,
+            current_displays,
+            &config.display_fingerprints,
+        );
+        if &remapped != layout {
+            *layout = remapped;
+            changed = true;
+        }
+    };
+
+    for profile in &mut config.profiles {
+        remap_profile_layout(&mut profile.layout);
+    }
+
+    if let Some(layout) = &mut config.last_known_good_layout {
+        remap_profile_layout(layout);
+    }
+    if let Some(layout) = &mut config.last_restorable_layout {
+        remap_profile_layout(layout);
+    }
+
+    changed
+}
+
+fn remap_layout_display_ids_with_fingerprints(
+    desired: &Layout,
+    current: &Layout,
+    current_displays: &[DisplayInfo],
+    fingerprints: &[crate::model::DisplayFingerprint],
+) -> Layout {
+    let mut remapped = remap_layout_display_ids(desired, current);
+    let current_ids: HashSet<DisplayId> = current
+        .outputs
+        .iter()
+        .map(|output| output.display_id.clone())
+        .collect();
+    let mut used: HashSet<DisplayId> = remapped
+        .outputs
+        .iter()
+        .filter(|output| current_ids.contains(&output.display_id))
+        .map(|output| output.display_id.clone())
+        .collect();
+
+    let friendly_by_id: HashMap<DisplayId, String> = current_displays
+        .iter()
+        .map(|display| (display.id.clone(), display.friendly_name.clone()))
+        .collect();
+    let fingerprint_by_id: HashMap<DisplayId, String> = fingerprints
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .edid_fingerprint
+                .as_ref()
+                .map(|fingerprint| (entry.display_id.clone(), fingerprint.clone()))
+        })
+        .collect();
+
+    let mut current_by_fingerprint: HashMap<String, Vec<DisplayId>> = HashMap::new();
+    for output in &current.outputs {
+        let fingerprint = fingerprint_by_id
+            .get(&output.display_id)
+            .cloned()
+            .or_else(|| {
+                let friendly = friendly_by_id.get(&output.display_id).map(String::as_str);
+                fingerprint_for_display(&output.display_id, friendly)
+            });
+        if let Some(fingerprint) = fingerprint {
+            current_by_fingerprint
+                .entry(fingerprint)
+                .or_default()
+                .push(output.display_id.clone());
+        }
+    }
+
+    for output in &mut remapped.outputs {
+        if current_ids.contains(&output.display_id) {
+            continue;
+        }
+
+        let fingerprint = fingerprint_by_id
+            .get(&output.display_id)
+            .cloned()
+            .or_else(|| fingerprint_for_display(&output.display_id, None));
+        let Some(fingerprint) = fingerprint else {
+            continue;
+        };
+        let Some(candidates) = current_by_fingerprint.get(&fingerprint) else {
+            continue;
+        };
+
+        let available: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| !used.contains(*candidate))
+            .cloned()
+            .collect();
+        if available.len() != 1 {
+            continue;
+        }
+
+        let replacement = available[0].clone();
+        used.insert(replacement.clone());
+        output.display_id = replacement;
+    }
+
+    remapped
 }
 
 fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
@@ -514,7 +686,7 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
             }
         }
 
-        if replacement.is_none() {
+        if replacement.is_none() && output.display_id.edid_hash.is_none() {
             // Deterministic fallback for legacy profiles created before EDID hashes were
             // persisted: only remap by target id when there is exactly one unused candidate.
             let candidates = unique_unused_candidates_by_target_id(
@@ -536,7 +708,7 @@ fn remap_layout_display_ids(desired: &Layout, current: &Layout) -> Layout {
     remapped
 }
 
-fn ensure_any_enabled_output_resolves(
+fn ensure_all_enabled_outputs_resolve(
     desired: &Layout,
     current: &Layout,
 ) -> Result<(), ManagerError> {
@@ -546,14 +718,19 @@ fn ensure_any_enabled_output_resolves(
         .map(|output| &output.display_id)
         .collect();
 
-    let any_enabled_resolved = desired
+    if let Some(unresolved) = desired
         .outputs
         .iter()
-        .any(|output| output.enabled && current_ids.contains(&output.display_id));
-
-    if !any_enabled_resolved {
+        .find(|output| output.enabled && !current_ids.contains(&output.display_id))
+    {
+        let edid_hash = unresolved
+            .display_id
+            .edid_hash
+            .map(|value| format!("{value:016x}"))
+            .unwrap_or_else(|| "-".to_string());
         return Err(ManagerError::Validation(format!(
-            "profile/layout does not match any currently-known enabled display on this system"
+            "profile/layout references an unknown display (target_id={}, edid_hash={edid_hash}). re-save the profile on this system",
+            unresolved.display_id.target_id
         )));
     }
 
@@ -828,6 +1005,110 @@ mod tests {
             .iter()
             .all(|output| output.display_id.adapter_luid == 9));
         assert!(!manager.has_pending_confirmation());
+    }
+
+    #[test]
+    fn apply_profile_does_not_fallback_to_wrong_target_when_edid_is_known() {
+        let display_one = DisplayInfo {
+            id: DisplayId {
+                adapter_luid: 9,
+                target_id: 1,
+                edid_hash: Some(1),
+            },
+            friendly_name: "Left".to_string(),
+            is_active: true,
+            is_primary: true,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            refresh_rate_mhz: 60_000,
+        };
+        let display_three_reusing_target = DisplayInfo {
+            id: DisplayId {
+                adapter_luid: 9,
+                target_id: 2,
+                edid_hash: Some(3),
+            },
+            friendly_name: "Ultrawide".to_string(),
+            is_active: false,
+            is_primary: false,
+            resolution: Resolution {
+                width: 3440,
+                height: 1440,
+            },
+            refresh_rate_mhz: 144_000,
+        };
+        let backend = MockBackend::new(
+            vec![display_one.clone(), display_three_reusing_target.clone()],
+            Layout {
+                outputs: vec![
+                    OutputConfig {
+                        display_id: display_one.id.clone(),
+                        enabled: true,
+                        position: Position { x: 0, y: 0 },
+                        resolution: display_one.resolution.clone(),
+                        refresh_rate_mhz: display_one.refresh_rate_mhz,
+                        primary: true,
+                    },
+                    OutputConfig {
+                        display_id: display_three_reusing_target.id.clone(),
+                        enabled: false,
+                        position: Position { x: 1920, y: 0 },
+                        resolution: display_three_reusing_target.resolution.clone(),
+                        refresh_rate_mhz: display_three_reusing_target.refresh_rate_mhz,
+                        primary: false,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let store = MemoryConfigStore::new(AppConfig {
+            profiles: vec![Profile {
+                name: "work".to_string(),
+                layout: Layout {
+                    outputs: vec![
+                        OutputConfig {
+                            display_id: DisplayId {
+                                adapter_luid: 1,
+                                target_id: 1,
+                                edid_hash: Some(1),
+                            },
+                            enabled: true,
+                            position: Position { x: 0, y: 0 },
+                            resolution: Resolution {
+                                width: 1920,
+                                height: 1080,
+                            },
+                            refresh_rate_mhz: 60_000,
+                            primary: true,
+                        },
+                        OutputConfig {
+                            display_id: DisplayId {
+                                adapter_luid: 1,
+                                target_id: 2,
+                                edid_hash: Some(2),
+                            },
+                            enabled: true,
+                            position: Position { x: 1920, y: 0 },
+                            resolution: Resolution {
+                                width: 1920,
+                                height: 1080,
+                            },
+                            refresh_rate_mhz: 60_000,
+                            primary: false,
+                        },
+                    ],
+                },
+            }],
+            ..AppConfig::default()
+        });
+        let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
+
+        let err = manager.apply_profile("work").unwrap_err();
+        assert!(
+            matches!(err, ManagerError::Validation(message) if message.contains("unknown display"))
+        );
     }
 
     #[test]

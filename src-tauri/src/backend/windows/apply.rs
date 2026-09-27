@@ -14,9 +14,10 @@ use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, SetDisplayConfig,
     DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
-    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
-    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_PATH_PERSIST_IF_REQUIRED,
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
+    DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_NO_OPTIMIZATION,
+    SDC_PATH_PERSIST_IF_REQUIRED,
     SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_EXTEND, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
@@ -28,9 +29,7 @@ use windows::Win32::UI::ColorSystem::{
     GetDeviceGammaRamp, SetDeviceGammaRamp, WcsGetCalibrationManagementState,
     WcsSetCalibrationManagementState,
 };
-use windows::Win32::UI::Shell::{
-    DesktopWallpaper, IDesktopWallpaper, DESKTOP_WALLPAPER_POSITION,
-};
+use windows::Win32::UI::Shell::{DesktopWallpaper, IDesktopWallpaper, DESKTOP_WALLPAPER_POSITION};
 
 use super::win32_types::{luid_to_u64, TopologySnapshot};
 
@@ -110,29 +109,11 @@ pub fn apply_layout_against_snapshot(
 }
 
 pub(super) fn force_topology_extend() -> Result<(), ManagerError> {
-    // Flag rules for the SDC_TOPOLOGY_* family, verified with SDC_VALIDATE probes (VALIDATE
-    // applies nothing, so the status is pure flag validation):
-    //
-    //   VALIDATE | TOPOLOGY_EXTEND | ALLOW_CHANGES | SAVE_TO_DATABASE -> 87
-    //   VALIDATE | TOPOLOGY_EXTEND | ALLOW_CHANGES | PATH_PERSIST     -> 87
-    //   VALIDATE | TOPOLOGY_EXTEND | ALLOW_CHANGES                    -> 87
-    //   VALIDATE | TOPOLOGY_EXTEND | PATH_PERSIST                     ->  0 or driver status
-    //   VALIDATE | TOPOLOGY_EXTEND                                    ->  0 or driver status
-    //   VALIDATE | TOPOLOGY_CLONE  | ALLOW_CHANGES                    -> 87
-    //   VALIDATE | TOPOLOGY_CLONE                                     ->  0 or driver status
-    //
-    // Two flags must stay out:
-    //   - SDC_SAVE_TO_DATABASE: documented as "can only be set with
-    //     SDC_USE_SUPPLIED_DISPLAY_CONFIG", which in turn "cannot be set with any
-    //     SDC_TOPOLOGY_XXX flag" -- so it is invalid here by construction.
-    //   - SDC_ALLOW_CHANGES: rejected with every SDC_TOPOLOGY_* flag in practice, even though
-    //     the docs claim it "is allowed with any other valid combination". Trust the probe.
-    //
-    // SDC_PATH_PERSIST_IF_REQUIRED replaces them: a target detached through CCD has its path
-    // persistence turned off, and the extend only considers persisted targets. This flag is
-    // documented to "force path persistence on a target to satisfy the request if necessary",
-    // and is legal with SDC_TOPOLOGY_* (it is only barred from SDC_USE_SUPPLIED_DISPLAY_CONFIG
-    // and SDC_TOPOLOGY_SUPPLIED).
+    // SAVE_TO_DATABASE requires USE_SUPPLIED_DISPLAY_CONFIG, which cannot be combined
+    // with TOPOLOGY_EXTEND. PATH_PERSIST_IF_REQUIRED is valid for this topology request.
+    // Contributor probes also rejected ALLOW_CHANGES with EXTEND on their hardware;
+    // omit it here, without assuming that observation holds for every driver.
+    // A successful call is not proof that every requested display became active.
     let set_display_status = unsafe {
         SetDisplayConfig(
             None,
@@ -691,7 +672,10 @@ fn set_wallpaper_for_monitor(
     let wallpaper_wide = to_wide_null(wallpaper_path);
     unsafe {
         desktop_wallpaper
-            .SetWallpaper(PCWSTR(monitor_wide.as_ptr()), PCWSTR(wallpaper_wide.as_ptr()))
+            .SetWallpaper(
+                PCWSTR(monitor_wide.as_ptr()),
+                PCWSTR(wallpaper_wide.as_ptr()),
+            )
             .is_ok()
     }
 }
