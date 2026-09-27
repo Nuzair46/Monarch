@@ -93,7 +93,13 @@ fn seed_connected_inactive_displays(snapshot: &mut TopologySnapshot, stats: &mut
         .iter()
         .filter_map(|display| display.id.edid_hash)
         .collect::<std::collections::HashSet<_>>();
-    let mut seeded_connectors = std::collections::HashSet::new();
+    // Database-enriched inactive displays also need live alternative routes for attachment.
+    let mut seeded_connectors = snapshot
+        .displays
+        .iter()
+        .filter(|display| !display.is_active)
+        .map(|display| (display.id.adapter_luid, display.id.target_id))
+        .collect::<std::collections::HashSet<_>>();
 
     for path in &all_paths {
         let adapter_luid = luid_to_u64(
@@ -184,7 +190,7 @@ fn seed_connected_inactive_displays(snapshot: &mut TopologySnapshot, stats: &mut
             path.targetInfo.adapterId.LowPart,
         );
         let connector = (adapter_luid, path.targetInfo.id);
-        if !seeded_connectors.contains(&connector) {
+        if !seeded_connectors.contains(&connector) || !path.targetInfo.targetAvailable.as_bool() {
             continue;
         }
         snapshot.attachable.push(AttachablePath {
