@@ -26,6 +26,11 @@ export function AudioOutputSelect({
   activeOnly?: boolean;
   label?: string;
 }) {
+  const devices = [...audio.devices].sort(
+    (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+  );
+  const available = devices.filter((device) => device.available);
+  const unavailable = devices.filter((device) => !device.available);
   const missing = value && !audio.devices.some((device) => device.id === value);
   return (
     <label className="grid min-w-0 gap-1 text-sm">
@@ -40,21 +45,29 @@ export function AudioOutputSelect({
         <option value="">
           {activeOnly ? "Select audio output" : "Leave unchanged"}
         </option>
-        {missing && (
-          <option value={value} disabled>
-            {saved?.name ?? "Saved audio output"} (unavailable)
-          </option>
+        {available.length > 0 && (
+          <optgroup label="Available">
+            {available.map((device) => (
+              <option key={device.id} value={device.id}>
+                {device.name}
+              </option>
+            ))}
+          </optgroup>
         )}
-        {audio.devices.map((device) => (
-          <option
-            key={device.id}
-            value={device.id}
-            disabled={activeOnly && !device.available}
-          >
-            {device.name}
-            {device.available ? "" : " (currently unavailable)"}
-          </option>
-        ))}
+        {(unavailable.length > 0 || missing) && (
+          <optgroup label="Unavailable">
+            {missing && (
+              <option value={value} disabled>
+                {saved?.name ?? "Saved audio output"} (unavailable)
+              </option>
+            )}
+            {unavailable.map((device) => (
+              <option key={device.id} value={device.id} disabled={activeOnly}>
+                {device.name} (unavailable)
+              </option>
+            ))}
+          </optgroup>
+        )}
       </select>
     </label>
   );
