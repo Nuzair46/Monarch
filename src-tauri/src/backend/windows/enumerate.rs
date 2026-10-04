@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::diagnostics;
 use monarch::{DisplayInfo, Layout, ManagerError, OutputConfig, Position, Resolution};
+use windows::core::PCWSTR;
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
@@ -16,6 +17,10 @@ use windows::Win32::Devices::Display::{
     QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS,
 };
 use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplaySettingsExW, DEVMODEW, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION,
+    ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
+};
 
 use super::win32_types::{luid_to_u64, make_display_id, RawTopologySnapshot, TopologySnapshot};
 
@@ -183,6 +188,7 @@ pub(super) fn snapshot_from_raw(
     let mut displays = Vec::<DisplayInfo>::new();
     let mut outputs = Vec::new();
     let mode_map = modes_by_key(&raw.modes);
+    let mut desktop_modes = HashMap::new();
 
     for path in &raw.paths {
         let is_active = path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG != 0;
@@ -216,17 +222,12 @@ pub(super) fn snapshot_from_raw(
             DISPLAYCONFIG_MODE_INFO_TYPE_TARGET.0 as u32,
         );
 
-        let (position, source_resolution) = mode_map
-            .get(&source_key)
-            .map(source_mode_position_and_resolution)
-            .transpose()?
-            .unwrap_or((
-                Position { x: 0, y: 0 },
-                Resolution {
-                    width: 0,
-                    height: 0,
-                },
-            ));
+        let (position, source_resolution) =
+            source_geometry(is_active, mode_map.get(&source_key), || {
+                *desktop_modes
+                    .entry(source_key)
+                    .or_insert_with(|| current_desktop_mode(path))
+            });
 
         let refresh_rate_mhz = mode_map
             .get(&target_key)
@@ -491,12 +492,75 @@ fn modes_by_key(
     map
 }
 
-fn source_mode_position_and_resolution(
-    mode: &DISPLAYCONFIG_MODE_INFO,
-) -> Result<(Position, Resolution), ManagerError> {
+fn current_desktop_mode(path: &DISPLAYCONFIG_PATH_INFO) -> Option<DEVMODEW> {
+    let name = super::apply::source_gdi_device_name(path)?;
+    if name.is_empty() {
+        return None;
+    }
+    let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let mut mode = DEVMODEW {
+        dmSize: size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    unsafe {
+        EnumDisplaySettingsExW(
+            PCWSTR(name.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut mode,
+            ENUM_DISPLAY_SETTINGS_FLAGS(0),
+        )
+        .as_bool()
+        .then_some(mode)
+    }
+}
+
+fn source_geometry(
+    is_active: bool,
+    source_mode: Option<&DISPLAYCONFIG_MODE_INFO>,
+    current_mode: impl FnOnce() -> Option<DEVMODEW>,
+) -> (Position, Resolution) {
+    // Inactive routes can reuse a source that drives a different monitor.
+    if !is_active {
+        return (
+            Position { x: 0, y: 0 },
+            Resolution {
+                width: 0,
+                height: 0,
+            },
+        );
+    }
+    if let Some(mode) = current_mode() {
+        let fields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
+        if mode.dmFields.contains(fields) && mode.dmPelsWidth > 0 && mode.dmPelsHeight > 0 {
+            // GDI current settings describe the actual desktop in physical pixels.
+            // The dimensions already include rotation; swapping them again turns a
+            // portrait desktop into a landscape rectangle. Cache by source so clone
+            // targets share exactly the same desktop surface.
+            let position = unsafe { mode.Anonymous1.Anonymous2.dmPosition };
+            return (
+                Position {
+                    x: position.x,
+                    y: position.y,
+                },
+                Resolution {
+                    width: mode.dmPelsWidth,
+                    height: mode.dmPelsHeight,
+                },
+            );
+        }
+    }
+    let Some(mode) = source_mode else {
+        return (
+            Position { x: 0, y: 0 },
+            Resolution {
+                width: 0,
+                height: 0,
+            },
+        );
+    };
     unsafe {
         let source = mode.Anonymous.sourceMode;
-        Ok((
+        (
             Position {
                 x: source.position.x,
                 y: source.position.y,
@@ -505,7 +569,7 @@ fn source_mode_position_and_resolution(
                 width: source.width,
                 height: source.height,
             },
-        ))
+        )
     }
 }
 
@@ -524,5 +588,123 @@ fn rotation_from_windows(rotation: DISPLAYCONFIG_ROTATION) -> monarch::Rotation 
         3 => monarch::Rotation::LandscapeFlipped,
         4 => monarch::Rotation::PortraitFlipped,
         _ => monarch::Rotation::Landscape,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Devices::Display::DISPLAYCONFIG_SOURCE_MODE;
+    use windows::Win32::Foundation::POINTL;
+    use windows::Win32::Graphics::Gdi::{DEVMODE_DISPLAY_ORIENTATION, DM_DISPLAYORIENTATION};
+
+    fn source_mode() -> DISPLAYCONFIG_MODE_INFO {
+        let mut mode = DISPLAYCONFIG_MODE_INFO {
+            infoType: DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
+            ..Default::default()
+        };
+        mode.Anonymous.sourceMode = DISPLAYCONFIG_SOURCE_MODE {
+            width: 1920,
+            height: 1080,
+            position: POINTL { x: 2560, y: 0 },
+            ..Default::default()
+        };
+        mode
+    }
+
+    fn desktop_mode(width: u32, height: u32, rotation: u32) -> DEVMODEW {
+        let mut mode = DEVMODEW {
+            dmFields: DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYORIENTATION,
+            dmPelsWidth: width,
+            dmPelsHeight: height,
+            ..Default::default()
+        };
+        mode.Anonymous1.Anonymous2.dmPosition = POINTL { x: -1080, y: -480 };
+        mode.Anonymous1.Anonymous2.dmDisplayOrientation = DEVMODE_DISPLAY_ORIENTATION(rotation);
+        mode
+    }
+
+    #[test]
+    fn current_desktop_geometry_preserves_portrait_dimensions_and_negative_offsets() {
+        let source = source_mode();
+        // A natively tall panel can use landscape orientation. Shape comes from
+        // current dimensions, not the rotation enum or an assumed landscape mode.
+        for rotation in 0..4 {
+            let desktop = desktop_mode(1080, 1920, rotation);
+            let (position, resolution) = source_geometry(true, Some(&source), || Some(desktop));
+            assert_eq!(position, Position { x: -1080, y: -480 });
+            assert_eq!(
+                resolution,
+                Resolution {
+                    width: 1080,
+                    height: 1920
+                }
+            );
+            // This is the edge used by placement and mouse transitions.
+            assert_eq!(position.x + resolution.width as i32, 0);
+            assert_eq!(position.y + resolution.height as i32, 1440);
+        }
+    }
+
+    #[test]
+    fn current_desktop_geometry_preserves_landscape_and_square_dimensions() {
+        for (width, height) in [(2560, 1440), (1440, 1440)] {
+            let desktop = desktop_mode(width, height, 0);
+            let (_, resolution) = source_geometry(true, None, || Some(desktop));
+            assert_eq!(resolution, Resolution { width, height });
+        }
+    }
+
+    #[test]
+    fn missing_or_incomplete_current_settings_fall_back_to_displayconfig() {
+        let source = source_mode();
+        let complete = desktop_mode(1080, 1920, 1);
+        let mut incomplete = vec![None];
+        for field in [DM_POSITION, DM_PELSWIDTH, DM_PELSHEIGHT] {
+            let mut mode = complete;
+            mode.dmFields &= !field;
+            incomplete.push(Some(mode));
+        }
+        incomplete.push(Some(desktop_mode(0, 1920, 1)));
+        incomplete.push(Some(desktop_mode(1080, 0, 1)));
+        for desktop in incomplete {
+            assert_eq!(
+                source_geometry(true, Some(&source), || desktop),
+                (
+                    Position { x: 2560, y: 0 },
+                    Resolution {
+                        width: 1920,
+                        height: 1080
+                    }
+                ),
+            );
+        }
+        assert_eq!(
+            source_geometry(true, None, || None),
+            (
+                Position { x: 0, y: 0 },
+                Resolution {
+                    width: 0,
+                    height: 0
+                }
+            ),
+        );
+    }
+
+    #[test]
+    fn detached_routes_never_borrow_an_active_sources_geometry() {
+        let source = source_mode();
+        assert_eq!(
+            source_geometry(false, Some(&source), || panic!(
+                "must not query an inactive source"
+            )),
+            (
+                Position { x: 0, y: 0 },
+                Resolution {
+                    width: 0,
+                    height: 0
+                }
+            ),
+        );
     }
 }
