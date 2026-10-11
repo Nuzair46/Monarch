@@ -84,6 +84,14 @@ beside the remaining desktop. **Detached** keeps the other group members active.
 Profiles save the current confirmed layout and can be applied or deleted. Their
 audio output can be changed independently without recapturing the display layout.
 
+While Monarch is running, connecting or disconnecting displays preserves the
+detached state of monitors already present. For example, if Virtual Desktop adds
+a virtual monitor and Windows reactivates your detached physical monitors,
+Monarch detaches those monitors again while keeping the new virtual display.
+It waits for the connection changes to settle and automatically confirms a
+verified correction. Ordinary Windows display edits remain effective; this does
+not continuously enforce a profile. Restarting Monarch adopts the current layout.
+
 Real-device verification scenarios are listed in the [Windows hardware checklist](docs/windows-hardware-checklist.md).
 
 ## Audio output and profiles
