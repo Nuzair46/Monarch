@@ -150,6 +150,16 @@ where
         layout: Layout,
         audio: Option<AudioDefaults>,
     ) -> Result<(), ManagerError> {
+        self.apply_configuration_checked(layout, audio, None)
+            .map(|_| ())
+    }
+
+    fn apply_configuration_checked(
+        &mut self,
+        layout: Layout,
+        audio: Option<AudioDefaults>,
+        expected: Option<&Layout>,
+    ) -> Result<bool, ManagerError> {
         self.ensure_no_pending_confirmation()?;
         let mut layout = layout;
         layout.normalize_clone_groups();
@@ -157,6 +167,15 @@ where
         normalize_primary(&mut layout);
 
         let (mut layout, current_layout) = self.remap_and_resolve_for_apply(layout)?;
+        if let Some(expected) = expected {
+            let mut expected = expected.clone();
+            normalize_primary(&mut expected);
+            if !crate::connections::same_layout(&expected, &current_layout) {
+                // The desktop changed again while the worker was planning. Do
+                // not overwrite a newly connected display or a user's edit.
+                return Ok(false);
+            }
+        }
         for output in &mut layout.outputs {
             if let Some(current) = current_layout
                 .outputs
@@ -239,7 +258,40 @@ where
             pending.applied_at = Instant::now();
             pending.timeout = self.confirmation_timeout;
         }
-        Ok(())
+        Ok(true)
+    }
+
+    pub(crate) fn correct_connection_change(
+        &mut self,
+        observed: &Layout,
+        mut desired: Layout,
+    ) -> Result<bool, ManagerError> {
+        self.ensure_no_pending_confirmation()?;
+        normalize_primary(&mut desired);
+        let result: Result<bool, ManagerError> = (|| {
+            if !self.apply_configuration_checked(desired.clone(), None, Some(observed))? {
+                return Ok(false);
+            }
+            let actual = self.backend.get_layout()?;
+            let resolved = crate::identity::resolve_layout(&desired, &actual)?;
+            crate::verification::verify_applied_layout(&resolved, &actual)?;
+            self.confirm_layout(actual)?;
+            Ok(true)
+        })();
+        match result {
+            Err(error) if self.has_pending_confirmation() => {
+                // This is an automatic correction, not a user confirmation.
+                // Recover immediately; leave failures due for the watchdog.
+                self.pending_confirmation.as_mut().unwrap().timeout = Duration::ZERO;
+                match self.rollback_pending() {
+                    Ok(()) => Err(ManagerError::ApplyRestored(error.to_string())),
+                    Err(recovery) => Err(ManagerError::RecoveryRequired(format!(
+                        "{error}; recovery failed: {recovery}"
+                    ))),
+                }
+            }
+            result => result,
+        }
     }
 
     pub fn confirm_current_layout(&mut self) -> Result<(), ManagerError> {
@@ -248,6 +300,10 @@ where
         }
 
         let current_layout = self.backend.get_layout()?;
+        self.confirm_layout(current_layout)
+    }
+
+    fn confirm_layout(&mut self, current_layout: Layout) -> Result<(), ManagerError> {
         let mut confirmed_config = self.config.clone();
         confirmed_config.last_known_good_layout = Some(current_layout);
         confirmed_config.pending_recovery = None;
@@ -706,7 +762,7 @@ where
     }
 }
 
-fn normalize_primary(layout: &mut Layout) {
+pub(crate) fn normalize_primary(layout: &mut Layout) {
     layout.normalize_clone_groups();
     let primary = layout
         .outputs

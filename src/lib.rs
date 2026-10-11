@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod backend;
 pub mod capabilities;
+pub mod connections;
 pub mod error;
 pub mod history;
 pub mod identity;

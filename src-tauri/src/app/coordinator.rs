@@ -3,6 +3,7 @@ use super::{
     commands::{snapshot_from_manager, AppSnapshotDto},
     events, shortcuts, startup,
 };
+use monarch::connections::ConnectionMonitor;
 use monarch::watchdog::{poll_confirmation, ConfirmationPoll, ConfirmationWatchdog};
 use monarch::{AppSettings, Layout};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -144,6 +145,8 @@ impl Controller {
         let mut last_color: Option<Option<String>> = None;
         let mut recovery_id = None;
         let mut watchdog = ConfirmationWatchdog::new(Instant::now());
+        let mut connections = ConnectionMonitor::default();
+        let _ = connections.poll(&mut manager, Instant::now());
         loop {
             let pending = manager.pending_confirmation_started_at();
             if pending != recovery_id {
@@ -152,6 +155,7 @@ impl Controller {
             }
             // Recovery gets the worker before any ordinary queued operation.
             if let Some(token) = pending {
+                connections.reset();
                 let result =
                     watchdog.poll(Instant::now(), || poll_confirmation(&mut manager, token));
                 let event = match result {
@@ -172,7 +176,11 @@ impl Controller {
             }
             match receiver.recv_timeout(Duration::from_millis(50)) {
                 Ok(request) => {
+                    connections.reset();
                     let result = self.perform(&app, &mut manager, request.operation);
+                    // Adopt the result of explicit actions, including confirmed
+                    // toggles and rollbacks, before handling their broadcasts.
+                    let _ = connections.poll(&mut manager, Instant::now());
                     if let Err(error) = &result {
                         crate::diagnostics::log(format!("operation:failed:{error}"));
                     }
@@ -188,11 +196,23 @@ impl Controller {
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
+            let refresh_interval = if connections.is_settling() {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(2)
+            };
             if self.refresh.swap(false, Ordering::AcqRel)
-                || last_refresh.elapsed() >= Duration::from_secs(2)
+                || last_refresh.elapsed() >= refresh_interval
             {
                 if self.invalidate.swap(false, Ordering::AcqRel) {
                     let _ = manager.invalidate_backend_cache();
+                }
+                match connections.poll(&mut manager, Instant::now()) {
+                    Ok(true) => crate::diagnostics::log("connections:detached_outputs_restored"),
+                    Err(error) => crate::diagnostics::log(format!(
+                        "connections:correction_skipped_or_failed:{error}"
+                    )),
+                    Ok(false) => {}
                 }
                 if !manager.has_pending_confirmation() {
                     if let Ok(color) = manager.color_state_signature() {
