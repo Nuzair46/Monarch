@@ -32,6 +32,29 @@ The `edid_hash` field is a connection fingerprint, not a complete EDID hash. Dis
 
 Identical panels with missing or duplicated serials cannot be reliably distinguished after arbitrary port swaps. Monarch refuses ambiguous restoration. Reconnect to the saved port or re-save the profile after checking Windows' display arrangement. Indexed shortcut numbers follow the current inventory sorted by serial/path/connection evidence; adding or removing displays can change those numbers. Custom bindings retain monitor-specific keys.
 
+Profiles contain defaulted `display_options` with an `ignore_missing_displays`
+boolean, false by default. Older
+schema-3 profiles without the field retain strict behavior. The core manager
+resolves identities and optionally omits missing saved targets before normalizing
+and validating the effective layout. Unlisted live outputs are not merged.
+If an enabled output is skipped, gap closure connects the surviving groups to the
+primary group using minimum-distance, non-overlapping translations. Group-internal
+offsets and clone membership are preserved. Only the effective apply layout moves;
+the saved profile and exact verification contract remain unchanged. Missing disabled
+outputs do not trigger gap closure.
+Ambiguous and many-to-one matches remain errors. At least one enabled saved
+display must resolve. Explicitly disabled saved outputs override live state.
+Primary fallback and coordinate rebasing are handled
+by ordinary primary normalization; unsupported overlaps remain validation errors.
+The resulting complete layout uses the existing strict native apply, verification
+and recovery contract. Neither the saved layout nor audio policy is modified.
+Option edits persist atomically without applying a layout and are blocked during
+confirmation; overwriting a profile preserves its options.
+Profile creation can supply explicit display options in the same atomic save as
+the layout and audio. Omitting options preserves the existing value on overwrite.
+The removed test-build `preserve_unlisted_displays` boolean is accepted on read
+but discarded and never serialized, so profiles from that build remain loadable.
+
 ## Observations and history
 
 One `QDC_ALL_PATHS` result produces the connected inventory and its active layout. Alternative routes never imply that a monitor is active. Active-only queries verify a completed apply. Every published Windows snapshot has a generation number; profiles/settings/pending recovery are included in the same publication. If enumeration fails, the last observed display state remains published while transaction metadata still updates.

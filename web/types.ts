@@ -49,6 +49,11 @@ export type Profile = {
   name: string;
   layout: Layout;
   audio_output: AudioOutput | null;
+  display_options: ProfileDisplayOptions;
+};
+
+export type ProfileDisplayOptions = {
+  ignore_missing_displays: boolean;
 };
 
 export type AudioOutput = { id: string; name: string };

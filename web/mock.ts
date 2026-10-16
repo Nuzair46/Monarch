@@ -4,9 +4,11 @@ import type {
   AppSnapshot,
   Layout,
   Profile,
+  ProfileDisplayOptions,
   DisplayCapabilities,
 } from "./types";
 import { normalizeGroups } from "@/app/display-editor";
+import { closeDisconnectedGroups } from "@/app/arrangement";
 import type { EventPayloadMap } from "./tauri";
 import {
   DEFAULT_MONITOR_SHORTCUT_BASE,
@@ -72,7 +74,9 @@ function syncDisplaysFromLayout(): void {
   const hdmi = mockState.audio.devices.find(
     (device) => device.id === "display-hdmi",
   )!;
-  hdmi.available = mockState.layout.outputs[2]?.enabled ?? false;
+  hdmi.available = mockState.layout.outputs.find(
+    (output) => output.display_key === mockState.displays[2]?.id_key,
+  )?.enabled ?? false;
   if (!hdmi.available) {
     for (const role of ["console", "multimedia", "communications"] as const) {
       if (mockState.audio.defaults[role] === hdmi.id)
@@ -305,10 +309,11 @@ function buildMockSnapshot(): AppSnapshot {
       unavailable_reason: null,
     },
     profiles: [
-      { name: "Desk", layout: cloneLayout(layout), audio_output: null },
+      { name: "Desk", layout: cloneLayout(layout), audio_output: null, display_options: { ignore_missing_displays: false } },
       {
         name: "Focus",
         audio_output: null,
+        display_options: { ignore_missing_displays: false },
         layout: {
           outputs: layout.outputs.map((output) => ({
             ...output,
@@ -379,7 +384,50 @@ export async function applyProfile(name: string): Promise<void> {
   if (!profile) {
     throw new Error(`Profile not found: ${name}`);
   }
-  replaceMockLayout(profile.layout, profile.audio_output?.id);
+  const layout = cloneLayout(profile.layout);
+  const options = profile.display_options;
+  const currentKeys = new Set(mockState.layout.outputs.map((o) => o.display_key));
+  const skippedEnabled = options.ignore_missing_displays &&
+    layout.outputs.some((o) => o.enabled && !currentKeys.has(o.display_key));
+  if (options.ignore_missing_displays) {
+    layout.outputs = layout.outputs.filter((o) => currentKeys.has(o.display_key));
+  }
+  if (layout.outputs.some((o) => o.enabled && !currentKeys.has(o.display_key))) {
+    throw new Error("Display unavailable; reconnect it before applying.");
+  }
+  if (options.ignore_missing_displays) {
+    if (!layout.outputs.some((o) => o.enabled && currentKeys.has(o.display_key))) {
+      throw new Error("no enabled profile displays are connected; layout was not changed");
+    }
+  }
+  ensureMockLayoutValid(layout);
+  if (skippedEnabled) {
+    const active = layout.outputs.filter((o) => o.enabled);
+    if (active.some((o) => o.resolution.width === 0)) {
+      throw new Error("cannot close gaps after skipping a missing display with automatic monitor geometry; save the profile with explicit resolutions");
+    }
+    const positions = closeDisconnectedGroups(active.map((o) => ({
+      key: o.display_key, label: o.display_key, name: o.display_key,
+      ...o.position, ...o.resolution, primary: o.primary,
+    })));
+    for (const output of active) {
+      const position = positions.find((p) => p.key === output.display_key)!;
+      output.position = { x: position.x, y: position.y };
+    }
+  }
+  const active = layout.outputs.filter((o) => o.enabled);
+  for (const [i, a] of active.entries()) {
+    for (const b of active.slice(i + 1)) {
+      if (a.clone_group && a.clone_group === b.clone_group) continue;
+      if (a.position.x < b.position.x + b.resolution.width &&
+          b.position.x < a.position.x + a.resolution.width &&
+          a.position.y < b.position.y + b.resolution.height &&
+          b.position.y < a.position.y + a.resolution.height) {
+        throw new Error("extended displays overlap; move them apart or choose Duplicate of");
+      }
+    }
+  }
+  replaceMockLayout(layout, profile.audio_output?.id);
   return;
 }
 
@@ -394,6 +442,7 @@ export async function deleteProfile(name: string): Promise<void> {
 export async function saveProfile(
   name: string,
   audioOutputId: string | null = null,
+  displayOptions?: ProfileDisplayOptions,
 ): Promise<void> {
   ensureNoPending();
   const trimmed = name.trim();
@@ -404,6 +453,9 @@ export async function saveProfile(
     name: trimmed,
     layout: cloneLayout(mockState.layout),
     audio_output: resolveAudio(audioOutputId),
+    display_options: { ...(displayOptions ?? findProfile(trimmed)?.display_options ?? {
+      ignore_missing_displays: false,
+    }) },
   };
   const existingIndex = mockState.profiles.findIndex(
     (profile) => profile.name === trimmed,
@@ -507,6 +559,17 @@ function selectAudio(id: string): void {
     );
   mockState.audio.defaults.console = id;
   mockState.audio.defaults.multimedia = id;
+}
+
+export async function setProfileDisplayOptions(
+  name: string,
+  options: ProfileDisplayOptions,
+): Promise<void> {
+  ensureNoPending();
+  const profile = findProfile(name);
+  if (!profile) throw new Error(`Profile not found: ${name}`);
+  profile.display_options = { ...options };
+  emitMockStateChanged();
 }
 
 export async function setProfileAudio(

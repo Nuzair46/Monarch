@@ -154,7 +154,10 @@ pub(super) fn wait_for_verified_layout(desired: &Layout) -> Result<TopologySnaps
         });
         match observed {
             Ok(snapshot) => break snapshot,
-            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(error) if Instant::now() >= deadline => {
+                diagnostics::log(format!("display_config:verification_failed:{error}"));
+                return Err(error);
+            }
             Err(_) => std::thread::sleep(Duration::from_millis(100)),
         }
     };
