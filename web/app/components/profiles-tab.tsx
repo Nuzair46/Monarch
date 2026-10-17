@@ -3,9 +3,10 @@ import { AudioOutputSelect, ProfileAudio } from "./audio-output";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import { TabsContent } from "@/components/ui/tabs";
 import { indexedShortcutLabel } from "@/app/utils";
-import type { AppSnapshot } from "@/types";
+import type { AppSnapshot, ProfileDisplayOptions } from "@/types";
 
 type ProfilesTabProps = {
   loading: boolean;
@@ -16,8 +17,11 @@ type ProfilesTabProps = {
   profileShortcutBase: string | null;
   newProfileName: string;
   newProfileAudio: string | null;
+  newProfileIgnoreMissing: boolean;
+  onNewProfileIgnoreMissingChange: (value: boolean) => void;
   onNewProfileAudioChange: (id: string | null) => void;
   onSaveProfileAudio: (name: string, id: string | null) => void;
+  onSaveProfileDisplayOptions: (name: string, options: ProfileDisplayOptions) => void;
   onNewProfileNameChange: (value: string) => void;
   onSaveCurrentLayout: () => void;
   onApplyProfile: (name: string) => void;
@@ -33,8 +37,11 @@ export function ProfilesTab({
   profileShortcutBase,
   newProfileName,
   newProfileAudio,
+  newProfileIgnoreMissing,
+  onNewProfileIgnoreMissingChange,
   onNewProfileAudioChange,
   onSaveProfileAudio,
+  onSaveProfileDisplayOptions,
   onNewProfileNameChange,
   onSaveCurrentLayout,
   onApplyProfile,
@@ -86,6 +93,21 @@ export function ProfilesTab({
                   onChange={onNewProfileAudioChange}
                   disabled={locked}
                 />
+                <label className="flex items-start gap-2 text-xs">
+                  <Checkbox
+                    checked={newProfileIgnoreMissing}
+                    disabled={locked}
+                    onCheckedChange={(checked) =>
+                      onNewProfileIgnoreMissingChange(checked === true)
+                    }
+                  />
+                  <span>
+                    Ignore missing displays
+                    <span className="block text-muted-foreground">
+                      Apply this profile even when some saved monitors are disconnected.
+                    </span>
+                  </span>
+                </label>
                 <Button
                   type="submit"
                   disabled={locked || !newProfileName.trim()}
@@ -184,6 +206,21 @@ export function ProfilesTab({
                             <Trash2 aria-hidden="true" />
                           </Button>
                         </div>
+                      </div>
+                      <div className="grid gap-2 text-xs">
+                        <label className="flex items-start gap-2">
+                          <Checkbox
+                            checked={profile.display_options.ignore_missing_displays}
+                            disabled={locked}
+                            onCheckedChange={(checked) => onSaveProfileDisplayOptions(profile.name, {
+                              ...profile.display_options,
+                              ignore_missing_displays: checked === true,
+                            })}
+                          />
+                          <span>Ignore missing displays
+                            <span className="block text-muted-foreground">Apply the remaining saved displays when a monitor is disconnected.</span>
+                          </span>
+                        </label>
                       </div>
                       <ProfileAudio
                         profile={profile}

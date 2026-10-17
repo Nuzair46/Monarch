@@ -66,6 +66,7 @@ pub struct ProfileDto {
     pub name: String,
     pub layout: LayoutDto,
     pub audio_output: Option<monarch::AudioOutput>,
+    pub display_options: monarch::ProfileDisplayOptions,
 }
 
 #[derive(Clone, Serialize)]
@@ -138,8 +139,9 @@ pub async fn save_profile<R: Runtime>(
     app: AppHandle<R>,
     name: String,
     audio_output_id: Option<String>,
+    display_options: Option<monarch::ProfileDisplayOptions>,
 ) -> CommandResult<()> {
-    execute(&app, Operation::SaveProfile(name, audio_output_id)).await
+    execute(&app, Operation::SaveProfile(name, audio_output_id, display_options)).await
 }
 
 #[tauri::command]
@@ -149,6 +151,15 @@ pub async fn set_profile_audio<R: Runtime>(
     audio_output_id: Option<String>,
 ) -> CommandResult<()> {
     execute(&app, Operation::ProfileAudio(name, audio_output_id)).await
+}
+
+#[tauri::command]
+pub async fn set_profile_display_options<R: Runtime>(
+    app: AppHandle<R>,
+    name: String,
+    options: monarch::ProfileDisplayOptions,
+) -> CommandResult<()> {
+    execute(&app, Operation::ProfileDisplayOptions(name, options)).await
 }
 
 #[tauri::command]
@@ -339,6 +350,7 @@ fn profile_to_dto(profile: Profile) -> ProfileDto {
         name: profile.name,
         layout: layout_to_dto(&profile.layout),
         audio_output: profile.audio_output,
+        display_options: profile.display_options,
     }
 }
 

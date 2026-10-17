@@ -114,6 +114,35 @@ and verifies the default output before starting confirmation. Revert, timeout, a
 restart recovery restore the captured display settings and previous playback roles.
 Tray/shortcut/CLI profile actions confirm automatically.
 
+Each saved profile has an **Ignore missing displays** option, off by default.
+It applies the remaining saved displays when a monitor (for example, a portable
+monitor) is disconnected. The saved layout is retained for the next time that
+monitor is connected.
+
+Choose the option in **Save current setup**, or toggle it beneath an existing
+profile. Entering an existing profile name loads its saved option for overwriting.
+After a successful save, the creation form resets to the unchecked default.
+The checkbox can be selected before or after typing a new profile name.
+Changes to the option beneath an existing profile are saved
+immediately without changing your desktop, and the option remains selected when
+you overwrite the same profile. It applies equally from the app, tray, shortcuts,
+startup and CLI. Existing profiles keep strict behavior until you opt in.
+Ambiguous monitor identities, overlapping arrangements, and having no connected
+enabled profile display still fail before changing the desktop. Connected displays
+not listed in the profile are not preserved as active. If the saved primary is
+missing, a remaining enabled display becomes primary and coordinates are rebased.
+If skipping an enabled monitor disconnects the remaining arrangement, Monarch
+closes the gaps before applying: the primary group stays fixed and disconnected
+groups move together to the nearest non-overlapping edge, preserving their internal
+arrangement. The saved profile is unchanged; reconnecting all monitors uses its
+original coordinates. Missing disabled monitors do not trigger repositioning.
+If Windows applies different display settings, the error reports the mismatched
+properties with requested and observed values before the previous layout is restored.
+
+This option does not skip unavailable audio devices. If your portable monitor
+provides the profile's audio, select **Leave unchanged** to apply that profile
+without its audio endpoint connected.
+
 Currently unavailable outputs are selectable for profiles, so a detached TV can
 be configured in advance. If an output does not become available, the profile
 change is rolled back with an error; it is never substituted by another similarly

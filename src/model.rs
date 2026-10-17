@@ -266,6 +266,32 @@ pub struct Profile {
     pub layout: Layout,
     #[serde(default)]
     pub audio_output: Option<crate::AudioOutput>,
+    #[serde(default)]
+    pub display_options: ProfileDisplayOptions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ProfileDisplayOptions {
+    pub ignore_missing_displays: bool,
+}
+
+impl<'de> Deserialize<'de> for ProfileDisplayOptions {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct StoredOptions {
+            #[serde(default)]
+            ignore_missing_displays: bool,
+            // Accept the removed test-build option without retaining or emitting it.
+            #[serde(default, rename = "preserve_unlisted_displays")]
+            _removed_option: bool,
+        }
+
+        let stored = StoredOptions::deserialize(deserializer)?;
+        Ok(Self {
+            ignore_missing_displays: stored.ignore_missing_displays,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

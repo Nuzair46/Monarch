@@ -5,6 +5,11 @@ import ts from "typescript";
 
 // Exercise the actual standalone TypeScript modules without a browser or new test dependency.
 function compiledModule(file, imports = {}) {
+  if (file === "web/mock.ts")
+    imports = {
+      "@/app/arrangement": compiledModule("web/app/arrangement.ts"),
+      ...imports,
+    };
   if (file === "web/app/display-editor.ts")
     imports = {
       "./arrangement": compiledModule("web/app/arrangement.ts"),
@@ -31,6 +36,97 @@ function compiledModule(file, imports = {}) {
 const { subscriptions } = await import(
   compiledModule("web/app/subscriptions.ts")
 );
+
+test("missing portable bridge closes the exact Desk gap without changing groups internally", async () => {
+  const { closeDisconnectedGroups, edgesTouch, rectanglesOverlap } = await import(
+    compiledModule("web/app/arrangement.ts")
+  );
+  const monitors = [
+    { key: "main", label: "1", name: "Main", x: 0, y: 0, width: 5120, height: 1440, primary: true },
+    { key: "left", label: "2", name: "Left", x: -197, y: 1445, width: 1920, height: 1080 },
+    { key: "right", label: "3", name: "Right", x: 1723, y: 1445, width: 1690, height: 1056 },
+  ];
+  const result = closeDisconnectedGroups(monitors);
+  assert.deepEqual(result[0], monitors[0]);
+  assert.deepEqual(result.slice(1), monitors.slice(1).map((monitor) => ({ ...monitor, y: 1440 })));
+  assert.equal(monitors[1].y, 1445);
+  assert.ok(edgesTouch(result[0], result[1]));
+  assert.ok(edgesTouch(result[1], result[2]));
+  assert.ok(!rectanglesOverlap(result[0], result[1]));
+  assert.deepEqual(closeDisconnectedGroups(result), result);
+});
+
+test("profile display options default off, save independently, survive overwrite and respect confirmation", async () => {
+  const mock = await import(
+    compiledModule("web/mock.ts", {
+      "@/app/ui": compiledModule("web/app/ui.ts"),
+      "@/app/display-editor": compiledModule("web/app/display-editor.ts"),
+    }) + "#profile-display-options"
+  );
+  const before = await mock.getSnapshot();
+  const defaults = { ignore_missing_displays: false };
+  assert.deepEqual(before.profiles[0].display_options, defaults);
+  const options = { ignore_missing_displays: true };
+  await mock.setProfileDisplayOptions("Focus", options);
+  let saved = await mock.getSnapshot();
+  assert.deepEqual(saved.layout, before.layout);
+  assert.deepEqual(saved.audio, before.audio);
+  assert.deepEqual(saved.profiles.find((p) => p.name === "Focus").display_options, options);
+  await mock.saveProfile("Focus");
+  saved = await mock.getSnapshot();
+  assert.deepEqual(saved.profiles.find((p) => p.name === "Focus").display_options, options);
+  await mock.saveProfile("New");
+  assert.deepEqual((await mock.getSnapshot()).profiles.find((p) => p.name === "New").display_options, defaults);
+  await mock.saveProfile("With option", null, options);
+  assert.deepEqual((await mock.getSnapshot()).profiles.find((p) => p.name === "With option").display_options, options);
+  await mock.saveProfile("With option", null, defaults);
+  assert.deepEqual((await mock.getSnapshot()).profiles.find((p) => p.name === "With option").display_options, defaults);
+  await mock.applyProfile("Focus");
+  await assert.rejects(mock.setProfileDisplayOptions("Focus", defaults), /awaiting confirmation/);
+  await mock.rollbackPending();
+  await assert.rejects(mock.setProfileDisplayOptions("missing", defaults), /not found/);
+});
+
+test("profile option skips disconnected saved monitors without preserving unlisted monitors", async () => {
+  const mock = await import(
+    compiledModule("web/mock.ts", {
+      "@/app/ui": compiledModule("web/app/ui.ts"),
+      "@/app/display-editor": compiledModule("web/app/display-editor.ts"),
+    }) + "#profile-display-application"
+  );
+  const before = await mock.getSnapshot();
+  await mock.saveProfile("Portable");
+  const disconnected = { outputs: before.layout.outputs.filter((_, index) => index !== 1) };
+  await mock.applyLayout(disconnected);
+  await mock.confirmCurrentLayout();
+  await assert.rejects(mock.applyProfile("Portable"), /unavailable/);
+  await mock.setProfileDisplayOptions("Portable", {
+    ignore_missing_displays: true,
+  });
+  await mock.applyProfile("Portable");
+  assert.deepEqual((await mock.getSnapshot()).layout, disconnected);
+  assert.deepEqual((await mock.getSnapshot()).profiles.find((p) => p.name === "Portable").layout, before.layout);
+  await mock.confirmCurrentLayout();
+  await mock.applyLayout(before.layout);
+  await mock.confirmCurrentLayout();
+  await mock.applyProfile("Portable");
+  assert.deepEqual((await mock.getSnapshot()).layout, before.layout);
+  await mock.confirmCurrentLayout();
+  await mock.applyLayout({ outputs: [before.layout.outputs[0]] });
+  await mock.confirmCurrentLayout();
+  await mock.saveProfile("Subset");
+  await mock.applyLayout(before.layout);
+  await mock.confirmCurrentLayout();
+  await mock.setProfileDisplayOptions("Subset", {
+    ignore_missing_displays: true,
+  });
+  await mock.applyProfile("Subset");
+  assert.deepEqual((await mock.getSnapshot()).layout, { outputs: [before.layout.outputs[0]] });
+  await mock.confirmCurrentLayout();
+  await mock.applyProfile("Focus");
+  assert.equal((await mock.getSnapshot()).layout.outputs.filter((o) => o.enabled).length, 1);
+  await mock.rollbackPending();
+});
 
 test("profile audio is saved independently, applied with displays, and reverted on timeout", async () => {
   const mock = await import(

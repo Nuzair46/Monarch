@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.1.0
+
+- Add a per-profile **Ignore missing displays** option, disabled by default.
+  Configure it when saving a layout or edit it on an existing profile.
+  Apply portable-monitor profiles with that monitor disconnected.
+- Remove the experimental **Preserve unlisted displays** option while retaining
+  compatibility with profiles saved by the test build.
+- Keep identity ambiguity, invalid arrangements, unavailable audio, confirmation,
+  and recovery safeguards unchanged. Preserve options when overwriting profiles.
+- Keep the creation checkbox selected while entering or editing a new profile name.
+- Report exact requested-versus-observed settings when display apply verification
+  fails, and record the final failure in diagnostics without relaxing verification.
+- Close gaps left by missing enabled profile monitors, moving disconnected groups
+  together while keeping the primary group and saved profile unchanged.
+
 ## Unreleased
 
 ### Display recovery and identity
