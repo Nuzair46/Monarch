@@ -1,7 +1,6 @@
 [package]
 name = "monarch-desktop"
-version = "2.1.3"
-description = "Monarch - Display Output Manager"
+version = "2.1.0 Display Output Manager"
 authors = ["Codex"]
 edition = "2021"
 
