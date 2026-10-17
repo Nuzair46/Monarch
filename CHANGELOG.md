@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.1.3
+## 2.1.0
 
 - Add a per-profile **Ignore missing displays** option, disabled by default.
   Configure it when saving a layout or edit it on an existing profile.
