@@ -4,6 +4,9 @@
 
 ### Display recovery and identity
 
+- Reattach detached monitors with saved fractional refresh rates and portrait geometry. Retry missing native timings when Windows rejects mode selection, verify the exact requested settings, and restore the prior layout on mismatch (#69, #73).
+- Allow saved modes absent from a detached monitor's partial mode list to reach Windows validation; keep them labeled as saved in the settings dialog (#73).
+- Resolve duplicated EDID serials using saved device paths or connection fingerprints after GPU driver changes, while retaining errors for unresolved ambiguity (#70).
 - Discover connected, disabled monitors from fresh Windows inventory, including after sequential detach operations, restart, and resume.
 - Reconnect the exact requested monitor set using a complete source assignment and verify the observed result before reporting success.
 - Use a shared identity resolver for profiles, toggles, recovery, and remembered geometry. Validated EDID serials can identify a monitor after moving ports; device paths and connection fingerprints provide fallback evidence. Ambiguous matches and conflicting serials fail explicitly.

@@ -295,7 +295,8 @@ export function layoutError(
     if (!cap)
       return "A monitor is no longer available. Refresh the layout before saving.";
     if (
-      cap.modes.length &&
+      output.resolution.width > 0 &&
+      cap.modes_unavailable_reason == null &&
       !refreshChoices(cap, output).some(
         (rate) => Math.abs(rate - output.refresh_rate_mhz) <= 2,
       )

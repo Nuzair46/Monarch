@@ -26,7 +26,7 @@ Native Win32 calls are synchronous and cannot be cancelled safely by the worker.
 
 `DisplayEndpoint(adapter_luid, target_id)` addresses a live Windows target. It is not a permanent physical identity. `MonitorIdentity` retains device-path evidence and a validated EDID serial qualified by manufacturer/product. Invalid EDID headers/checksums, missing serials and failed device queries remain unknown.
 
-The shared resolver first accepts an exact endpoint with agreeing available evidence, then a unique serial, then a unique device path, then a unique connection hash. A known conflicting serial forbids connection-based fallback. A target number alone cannot identify a monitor on another adapter. An active candidate does not win merely because it is active. Multiple candidates return an explicit ambiguous result.
+The shared resolver first accepts an exact endpoint with agreeing available evidence, then a unique serial, then a unique device path, then a unique connection hash. When multiple monitors share a serial, saved device-path evidence (case-insensitive) and then connection hashes narrow that serial's candidates. This allows profiles to survive adapter/target ID changes without choosing a different or unknown serial. A known conflicting serial forbids connection-based fallback. A target number alone cannot identify a monitor on another adapter. An active candidate does not win merely because it is active. Multiple remaining candidates return an explicit ambiguous result.
 
 The `edid_hash` field is a connection fingerprint, not a complete EDID hash. Display keys contain three components: adapter LUID, target number and connection hash (or `-` when unknown). Stored fingerprints associate shortcut keys with monitor evidence. Current-format profiles and recovery layouts resolve their saved evidence against the live inventory at apply time; startup does not rewrite saved profiles. Missing or ambiguous monitors remain in supported configuration so reconnecting hardware can make them usable again.
 
@@ -111,8 +111,20 @@ progressive scan-line ordering for the non-interlaced DXGI mode list. Automatic
 mode requests retain 0/0 refresh and unspecified ordering; unchanged targets retain
 their observed ordering. Windows permits unspecified ordering only with automatic
 refresh ([API requirement](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ne-wingdi-displayconfig_scanline_ordering)).
-The planner submits the source/target mode table
-to `SDC_VALIDATE`, then applies without `SDC_ALLOW_CHANGES`. Rejected requests log
+The planner always writes the requested desktop dimensions and position into source
+modes, including when reusing an active source's pixel format. Raw source dimensions
+must not override observed portrait geometry.
+The planner submits the source/target mode table to `SDC_VALIDATE` first. If Windows
+returns 1610 (`ERROR_BAD_CONFIGURATION`) or 31 (`ERROR_GEN_FAILURE`) and at least one
+active path lacks a target timing, it retries validation with `SDC_ALLOW_CHANGES`
+and uses the successful flags for apply. This lets Windows resolve driver timings
+from rounded saved refresh preferences, as described by
+[SetDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig).
+Complete observed timing tables and unrelated errors do not take this retry.
+The requested layout remains unchanged: post-apply verification still rejects
+substituted modes, positions, orientation, primary, clone, HDR or scaling settings
+and triggers recovery before confirmation. Both preflight and apply use the same
+validation policy. Rejected requests log
 route/mode indices, source rectangles and target timings for diagnosis. Native routing is queried
 again before HDR and DPI setters, and all requested properties (including clone
 membership) are observed before confirmation starts. Failed apply restores captured
@@ -125,7 +137,10 @@ source surfaces cannot overlap or leave gaps, and the primary source is at (0, 0
 Mode lists use DXGI rational refresh rates. A detached target or a cloned source
 cannot supply another target's mode list; only its target-specific preferred mode
 and any observed active mode are offered until it is extended. Windows validates
-the complete combination again at apply. HDR probes the HDR-specific request before
+the complete combination again at apply. The settings dialog and backend both
+defer modes absent from a partial list to native validation, retaining the saved
+resolution and fractional refresh. A complete list still rejects unreported modes.
+HDR probes the HDR-specific request before
 falling back to the older advanced-color request. Scaling is isolated in
 `backend/windows/scaling.rs`: the undocumented -3/-4 device-info requests are used
 only for readable standard ranges, with no custom/global or registry scaling.

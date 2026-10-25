@@ -54,7 +54,7 @@ function RefreshRateField({
     );
     choices.unshift({
       value: String(output.refresh_rate_mhz),
-      label: `${output.refresh_rate_mhz / 1000} Hz (${current ? "current" : "unavailable"})`,
+      label: `${output.refresh_rate_mhz / 1000} Hz (${current ? "current" : cap?.modes_unavailable_reason ? "saved" : "unavailable"})`,
     });
   }
   return (

@@ -41,11 +41,12 @@ pub fn resolve(requested: &DisplayId, current: &Layout) -> Resolution {
             .is_some_and(|serial| id.identity.edid_serial.as_ref() == Some(serial))
     };
     let path_matches = |id: &DisplayId| {
-        requested
-            .identity
-            .device_path
-            .as_ref()
-            .is_some_and(|path| id.identity.device_path.as_ref() == Some(path))
+        requested.identity.device_path.as_ref().is_some_and(|path| {
+            id.identity
+                .device_path
+                .as_ref()
+                .is_some_and(|other| path.eq_ignore_ascii_case(other))
+        })
     };
     let hash_matches =
         |id: &DisplayId| requested.edid_hash.is_some() && requested.edid_hash == id.edid_hash;
@@ -64,7 +65,29 @@ pub fn resolve(requested: &DisplayId, current: &Layout) -> Resolution {
     }
     let serial = matching(&serial_matches);
     if !serial.is_empty() {
-        return unique(serial);
+        // Some panels share an EDID serial. A driver update can change the
+        // adapter LUID without changing their device paths. Refine the serial
+        // candidates using saved connection evidence before declaring ambiguity.
+        // Never escape this set to a different (or unknown) serial.
+        let paths: Vec<_> = serial
+            .iter()
+            .filter(|id| path_matches(id))
+            .cloned()
+            .collect();
+        let candidates = if paths.is_empty() { serial } else { paths };
+        if candidates.len() == 1 {
+            return unique(candidates);
+        }
+        let hashes: Vec<_> = candidates
+            .iter()
+            .filter(|id| hash_matches(id))
+            .cloned()
+            .collect();
+        return unique(if hashes.is_empty() {
+            candidates
+        } else {
+            hashes
+        });
     }
     let paths = matching(&|id| compatible(id) && path_matches(id));
     if !paths.is_empty() {
