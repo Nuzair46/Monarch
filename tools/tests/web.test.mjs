@@ -334,6 +334,41 @@ function duplicate(snapshot, member = 1, target = 0) {
   );
 }
 
+test("reattachment retains saved fractional and portrait modes missing from a partial list", async () => {
+  for (const rotation of ["landscape", "portrait", "portrait_flipped"]) {
+    const snapshot = await fixture();
+    const output = snapshot.layout.outputs[1];
+    output.enabled = false;
+    output.rotation = rotation;
+    output.resolution = rotation === "landscape"
+      ? { width: 2560, height: 1440 }
+      : { width: 1440, height: 2560 };
+    output.refresh_rate_mhz = 100049;
+    const savedMode = structuredClone(output);
+    const cap = snapshot.capabilities[1];
+    cap.modes = [{ resolution: { width: 1920, height: 1080 }, refresh_rate_mhz: 60000 }];
+    cap.modes_unavailable_reason = "Detached target: partial modes";
+    const attached = editor.fitDesktop(editor.changeAttachment(
+      snapshot.layout, output.display_key, "extend", snapshot.capabilities,
+    ));
+    assert.equal(editor.layoutError(attached, snapshot.capabilities), null);
+    const requested = attached.outputs[1];
+    assert.equal(requested.enabled, true);
+    assert.deepEqual(requested.resolution, savedMode.resolution);
+    assert.equal(requested.rotation, savedMode.rotation);
+    assert.equal(requested.refresh_rate_mhz, savedMode.refresh_rate_mhz);
+    assert.equal(snapshot.layout.outputs[1].enabled, false);
+    cap.modes_unavailable_reason = null;
+    assert.match(editor.layoutError(attached, snapshot.capabilities), /resolution and refresh/);
+    cap.modes = [];
+    assert.match(editor.layoutError(attached, snapshot.capabilities), /resolution and refresh/);
+    cap.modes_unavailable_reason = "Detached target: partial modes";
+    cap.identity = { edid_serial: "replacement" };
+    requested.identity = { edid_serial: "original" };
+    assert.match(editor.layoutError(attached, snapshot.capabilities), /no longer available/);
+  }
+});
+
 test("duplication mirrors one desktop while preserving each monitor's supported refresh, HDR and rotation", async () => {
   const snapshot = await fixture();
   snapshot.layout.outputs[0].hdr_enabled = true;

@@ -80,6 +80,67 @@ fn saved_connection_distinguishes_identical_panels() {
 }
 
 #[test]
+fn duplicate_serials_use_saved_paths_after_adapter_and_target_ids_change() {
+    let saved = id(1, 1, Some("duplicated"), Some("PORT-A"));
+    let intended = id(99, 7, Some("duplicated"), Some("port-a"));
+    let twin = id(99, 8, Some("duplicated"), Some("port-b"));
+    for ids in [
+        vec![intended.clone(), twin.clone()],
+        vec![twin, intended.clone()],
+    ] {
+        assert_eq!(
+            identity::resolve(&saved, &inventory(ids)),
+            Match::Resolved(intended.clone())
+        );
+    }
+}
+
+#[test]
+fn duplicate_serials_use_unique_connection_hash_when_paths_are_unavailable() {
+    let saved = id(1, 1, Some("duplicated"), None);
+    let intended = id(99, 7, Some("duplicated"), None);
+    let mut twin = id(99, 8, Some("duplicated"), None);
+    twin.edid_hash = Some(42);
+    assert_eq!(
+        identity::resolve(&saved, &inventory(vec![twin, intended.clone()])),
+        Match::Resolved(intended)
+    );
+}
+
+#[test]
+fn duplicate_serials_do_not_fall_back_to_another_panels_saved_connection() {
+    let saved = id(1, 1, Some("duplicated"), Some("port-a"));
+    let mut twins = vec![
+        id(99, 7, Some("duplicated"), Some("port-b")),
+        id(99, 8, Some("duplicated"), Some("port-c")),
+    ];
+    for twin in &mut twins {
+        twin.edid_hash = None;
+    }
+    for serial in [Some("different"), None] {
+        let mut ids = twins.clone();
+        ids.push(id(99, 9, serial, Some("port-a")));
+        assert_eq!(
+            identity::resolve(&saved, &inventory(ids)),
+            Match::Ambiguous(twins.clone())
+        );
+    }
+}
+
+#[test]
+fn a_shared_device_path_does_not_break_a_duplicate_serial_tie() {
+    let saved = id(1, 1, Some("duplicated"), Some("same-path"));
+    let twins = vec![
+        id(99, 7, Some("duplicated"), Some("same-path")),
+        id(99, 8, Some("duplicated"), Some("same-path")),
+    ];
+    assert_eq!(
+        identity::resolve(&saved, &inventory(twins.clone())),
+        Match::Ambiguous(twins)
+    );
+}
+
+#[test]
 fn known_identity_does_not_degrade_to_target_number_after_query_failure() {
     let mut saved = id(1, 1, Some("panel123"), Some("port-a"));
     saved.edid_hash = None;

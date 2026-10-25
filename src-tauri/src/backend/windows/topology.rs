@@ -152,18 +152,7 @@ impl DisplayBackend for WindowsDisplayBackend {
             &super::capabilities::discover(&connected),
         )?;
         let (paths, modes) = super::apply::plan_layout(layout, &connected)?;
-        use windows::Win32::Devices::Display::*;
-        let status = unsafe {
-            SetDisplayConfig(
-                Some(&paths),
-                Some(&modes),
-                SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG,
-            )
-        };
-        if status != 0 {
-            super::apply::log_rejected_plan(status, &paths, &modes);
-            return Err(super::apply::validation_error(status));
-        }
+        super::apply::validate_plan(&paths, &modes)?;
         Ok(())
     }
 
