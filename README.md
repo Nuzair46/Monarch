@@ -120,7 +120,9 @@ monitor) is disconnected. The saved layout is retained for the next time that
 monitor is connected.
 
 Choose the option in **Save current setup**, or toggle it beneath an existing
-profile. Entering an existing profile name loads its saved option for overwriting.
+profile. Until you edit the checkbox, entering an existing profile name loads its
+saved option for overwriting. An explicit checkbox choice is retained while editing
+the name, including when a new name starts with an existing profile's name.
 After a successful save, the creation form resets to the unchecked default.
 The checkbox can be selected before or after typing a new profile name.
 Changes to the option beneath an existing profile are saved

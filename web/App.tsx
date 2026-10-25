@@ -597,15 +597,7 @@ function App() {
                 "Profile display options saved",
               );
             }}
-            onNewProfileNameChange={(name) => {
-              if (
-                name.trim() !== newProfileName.trim() &&
-                snapshot?.profiles.some((profile) => profile.name === name.trim())
-              ) {
-                setNewProfileIgnoreMissingDraft(null);
-              }
-              setNewProfileName(name);
-            }}
+            onNewProfileNameChange={setNewProfileName}
             onSaveCurrentLayout={() => {
               void handleSaveCurrentLayout();
             }}
