@@ -41,17 +41,52 @@ pub fn verify_applied_layout(desired: &Layout, actual: &Layout) -> Result<(), Ma
     }
     for (key, wanted) in expected {
         let got = &observed[&key];
-        if wanted.rotation.is_some() && wanted.rotation != got.rotation
-            || (wanted.resolution.width > 0
-                && (wanted.position != got.position || wanted.resolution != got.resolution))
-            || wanted.primary != got.primary
-            || (wanted.resolution.width > 0
-                && wanted.refresh_rate_mhz.abs_diff(got.refresh_rate_mhz) > 2)
-            || (wanted.hdr_enabled.is_some() && wanted.hdr_enabled != got.hdr_enabled)
-            || (wanted.scale_percent.is_some() && wanted.scale_percent != got.scale_percent)
-        {
+        let mut differences = Vec::new();
+        if wanted.rotation.is_some() && wanted.rotation != got.rotation {
+            differences.push(format!(
+                "rotation: requested {:?}, observed {:?}", wanted.rotation, got.rotation
+            ));
+        }
+        if wanted.resolution.width > 0 {
+            if wanted.position != got.position {
+                differences.push(format!(
+                    "position: requested ({}, {}), observed ({}, {})",
+                    wanted.position.x, wanted.position.y, got.position.x, got.position.y
+                ));
+            }
+            if wanted.resolution != got.resolution {
+                differences.push(format!(
+                    "resolution: requested {}x{}, observed {}x{}",
+                    wanted.resolution.width, wanted.resolution.height,
+                    got.resolution.width, got.resolution.height
+                ));
+            }
+            if wanted.refresh_rate_mhz.abs_diff(got.refresh_rate_mhz) > 2 {
+                differences.push(format!(
+                    "refresh rate (mHz): requested {}, observed {}",
+                    wanted.refresh_rate_mhz, got.refresh_rate_mhz
+                ));
+            }
+        }
+        if wanted.primary != got.primary {
+            differences.push(format!(
+                "primary: requested {}, observed {}", wanted.primary, got.primary
+            ));
+        }
+        if wanted.hdr_enabled.is_some() && wanted.hdr_enabled != got.hdr_enabled {
+            differences.push(format!(
+                "HDR: requested {:?}, observed {:?}", wanted.hdr_enabled, got.hdr_enabled
+            ));
+        }
+        if wanted.scale_percent.is_some() && wanted.scale_percent != got.scale_percent {
+            differences.push(format!(
+                "scaling (%): requested {:?}, observed {:?}", wanted.scale_percent, got.scale_percent
+            ));
+        }
+        if !differences.is_empty() {
             return Err(ManagerError::Backend(format!(
-                "Windows did not apply the requested placement, primary display, rotation, resolution, refresh rate, HDR or scaling for display {} on adapter {:016x}", key.1, key.0
+                "Windows did not apply the requested settings for display {} on adapter {:016x}: {}",
+                key.1, key.0, differences.join("; ")
             )));
         }
     }
@@ -126,6 +161,49 @@ mod tests {
         let mut actual = desired.clone();
         actual.outputs.reverse();
         actual.outputs[0].refresh_rate_mhz += 1;
+        assert!(verify_applied_layout(&desired, &actual).is_ok());
+    }
+
+    #[test]
+    fn reports_exact_requested_and_observed_properties() {
+        let mut desired = layout();
+        desired.outputs[1].rotation = Some(crate::Rotation::Landscape);
+        desired.outputs[1].hdr_enabled = Some(false);
+        desired.outputs[1].scale_percent = Some(100);
+        let mut actual = desired.clone();
+        let output = &mut actual.outputs[1];
+        output.position.x += 5;
+        output.resolution.width = 1280;
+        output.refresh_rate_mhz = 60_000;
+        output.primary = true;
+        output.rotation = Some(crate::Rotation::Portrait);
+        output.hdr_enabled = Some(true);
+        output.scale_percent = Some(125);
+        let message = verify_applied_layout(&desired, &actual).unwrap_err().to_string();
+        for expected in [
+            "display 2 on adapter 0000000000000001",
+            "position: requested (1920, 0), observed (1925, 0)",
+            "resolution: requested 1920x1080, observed 1280x1080",
+            "refresh rate (mHz): requested 119880, observed 60000",
+            "primary: requested false, observed true",
+            "rotation: requested Some(Landscape), observed Some(Portrait)",
+            "HDR: requested Some(false), observed Some(true)",
+            "scaling (%): requested Some(100), observed Some(125)",
+        ] {
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn unknown_preferences_and_automatic_geometry_remain_unconstrained() {
+        let mut desired = layout();
+        desired.outputs[1].resolution = crate::Resolution { width: 0, height: 0 };
+        let mut actual = layout();
+        actual.outputs[1].rotation = Some(crate::Rotation::Portrait);
+        actual.outputs[1].hdr_enabled = Some(true);
+        actual.outputs[1].scale_percent = Some(125);
+        actual.outputs[1].position.x += 10;
+        actual.outputs[1].refresh_rate_mhz = 60_000;
         assert!(verify_applied_layout(&desired, &actual).is_ok());
     }
 }

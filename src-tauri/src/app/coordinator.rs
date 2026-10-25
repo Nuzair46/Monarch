@@ -19,8 +19,9 @@ pub enum Operation {
     Toggle(String, bool),
     ApplyLayout(Layout),
     ApplyProfile(String, bool),
-    SaveProfile(String, Option<String>),
+    SaveProfile(String, Option<String>, Option<monarch::ProfileDisplayOptions>),
     ProfileAudio(String, Option<String>),
+    ProfileDisplayOptions(String, monarch::ProfileDisplayOptions),
     DeleteProfile(String),
     Restore,
     Confirm,
@@ -254,10 +255,13 @@ impl Controller {
                 auto_confirm = confirm;
                 manager.apply_profile(&name)
             }
-            Operation::SaveProfile(name, id) => manager
+            Operation::SaveProfile(name, id, options) => manager
                 .resolve_audio_output(id.as_deref())
-                .and_then(|audio| manager.save_profile_with_audio(name, audio)),
+                .and_then(|audio| manager.save_profile_with_options(name, audio, options)),
             Operation::ProfileAudio(name, id) => manager.set_profile_audio(&name, id.as_deref()),
+            Operation::ProfileDisplayOptions(name, options) => {
+                manager.set_profile_display_options(&name, options)
+            }
             Operation::DeleteProfile(name) => manager.delete_profile(&name),
             Operation::Restore => {
                 if manager.has_pending_confirmation() {

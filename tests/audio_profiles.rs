@@ -198,6 +198,7 @@ type Manager = MonarchDisplayManager<Backend, Store>;
 fn fixture() -> (Manager, Backend, Store) {
     let config = AppConfig {
         profiles: vec![Profile {
+            display_options: Default::default(),
             name: "TV".into(),
             layout: tv(),
             audio_output: Some(output("tv")),

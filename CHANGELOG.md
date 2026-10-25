@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Profile display options
+
+- Add a per-profile **Ignore missing displays** option, disabled by default.
+  Configure it when saving a layout or edit it on an existing profile.
+  Apply portable-monitor profiles with that monitor disconnected.
+- Remove the experimental **Preserve unlisted displays** option while retaining
+  compatibility with profiles saved by the test build.
+- Keep identity ambiguity, invalid arrangements, unavailable audio, confirmation,
+  and recovery safeguards unchanged. Preserve options when overwriting profiles.
+- Keep an explicit creation-checkbox choice while entering or editing a profile
+  name, including names that start with an existing profile's name.
+- Report exact requested-versus-observed settings when display apply verification
+  fails, and record the final failure in diagnostics without relaxing verification.
+- Close gaps left by missing enabled profile monitors, moving disconnected groups
+  together while keeping the primary group and saved profile unchanged.
+
 ### Display recovery and identity
 
 - Reattach detached monitors with saved fractional refresh rates and portrait geometry. Retry missing native timings when Windows rejects mode selection, verify the exact requested settings, and restore the prior layout on mismatch (#69, #73).

@@ -73,6 +73,40 @@ fn failed_profile_save_preserves_live_profiles() {
 }
 
 #[test]
+fn failed_profile_option_edits_and_overwrites_preserve_memory_and_disk() {
+    let store = store();
+    let backend = MockBackend::new(vec![], layout()).unwrap();
+    let mut manager = MonarchDisplayManager::new(backend.clone(), store.clone()).unwrap();
+    manager.save_profile("Desk").unwrap();
+    let before = store.memory.snapshot().unwrap();
+    let options = ProfileDisplayOptions {
+        ignore_missing_displays: true,
+    };
+    store.fail.store(true, Ordering::Relaxed);
+    assert!(manager
+        .set_profile_display_options("Desk", options)
+        .is_err());
+    for name in ["Desk", "New"] {
+        assert!(manager
+            .save_profile_with_options(name, None, Some(options))
+            .is_err());
+    }
+    assert_eq!(manager.list_profiles(), before.profiles);
+    assert_eq!(store.memory.snapshot().unwrap(), before);
+    assert_eq!(backend.current_layout().unwrap(), layout());
+    assert!(!manager.has_pending_confirmation());
+    store.fail.store(false, Ordering::Relaxed);
+    manager
+        .set_profile_display_options("Desk", options)
+        .unwrap();
+    assert_eq!(manager.list_profiles()[0].display_options, options);
+    assert_eq!(
+        store.memory.snapshot().unwrap().profiles,
+        manager.list_profiles()
+    );
+}
+
+#[test]
 fn failed_settings_save_preserves_live_settings() {
     let store = store();
     let backend = MockBackend::new(vec![], layout()).unwrap();
@@ -307,6 +341,7 @@ fn startup_preserves_saved_profile_when_current_query_temporarily_loses_identity
     current.outputs[0].display_id.identity.edid_serial = None;
     let config = AppConfig {
         profiles: vec![Profile {
+            display_options: Default::default(),
             audio_output: None,
             name: "work".into(),
             layout: saved.clone(),

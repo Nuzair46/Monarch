@@ -412,6 +412,15 @@ where
         name: impl Into<String>,
         audio_output: Option<AudioOutput>,
     ) -> Result<(), ManagerError> {
+        self.save_profile_with_options(name, audio_output, None)
+    }
+
+    pub fn save_profile_with_options(
+        &mut self,
+        name: impl Into<String>,
+        audio_output: Option<AudioOutput>,
+        display_options: Option<crate::ProfileDisplayOptions>,
+    ) -> Result<(), ManagerError> {
         self.ensure_no_pending_confirmation()?;
         if audio_output
             .as_ref()
@@ -435,6 +444,11 @@ where
             name: name.to_string(),
             layout,
             audio_output,
+            display_options: display_options.unwrap_or_else(|| self.config.profiles
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.display_options)
+                .unwrap_or_default()),
         };
 
         let mut next = self.config.clone();
@@ -474,9 +488,49 @@ where
             .cloned()
             .ok_or_else(|| ManagerError::NotFound(format!("profile '{name}'")))?;
 
-        let mut target_layout = profile.layout;
+        let mut target_layout = profile.layout.clone();
         target_layout.ensure_valid()?;
+        let mut skipped_enabled = false;
+        if profile.display_options.ignore_missing_displays {
+            let current = self.backend.get_layout()?;
+            current.ensure_supported()?;
+            let mut used = HashSet::new();
+            let mut outputs = Vec::new();
+            for mut output in target_layout.outputs {
+                match resolve(&output.display_id, &current) {
+                    IdentityResolution::Resolved(id) => {
+                        if !used.insert(id.endpoint()) {
+                            return Err(ManagerError::Validation(
+                                "profile maps multiple displays to the same connected monitor".into(),
+                            ));
+                        }
+                        output.display_id = id;
+                        outputs.push(output);
+                    }
+                    IdentityResolution::Missing => {
+                        skipped_enabled |= output.enabled;
+                    }
+                    IdentityResolution::Ambiguous(_) => {
+                        return Err(ManagerError::Validation(
+                            "display identity is ambiguous; reconnect the intended monitor on its saved port or re-save the profile".into(),
+                        ));
+                    }
+                }
+            }
+            if !outputs
+                .iter()
+                .any(|o| o.enabled && used.contains(&o.display_id.endpoint()))
+            {
+                return Err(ManagerError::Validation(
+                    "no enabled profile displays are connected; layout was not changed".into(),
+                ));
+            }
+            target_layout.outputs = outputs;
+        }
         normalize_primary(&mut target_layout);
+        if skipped_enabled {
+            crate::placement::close_missing_display_gaps(&mut target_layout)?;
+        }
 
         let (target_layout, current_layout) = self.remap_and_resolve_for_apply(target_layout)?;
 
@@ -538,6 +592,21 @@ where
             return Ok(());
         }
         profile.audio_output = self.resolve_audio_output(id)?;
+        self.commit_config(next)
+    }
+
+    pub fn set_profile_display_options(
+        &mut self,
+        name: &str,
+        options: crate::ProfileDisplayOptions,
+    ) -> Result<(), ManagerError> {
+        self.ensure_no_pending_confirmation()?;
+        let mut next = self.config.clone();
+        let profile = next.profiles
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or_else(|| ManagerError::NotFound(format!("profile '{name}'")))?;
+        profile.display_options = options;
         self.commit_config(next)
     }
 
@@ -1391,6 +1460,7 @@ mod tests {
         let profile_layout = sample_layout_on_adapter(1);
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                display_options: Default::default(),
                 audio_output: None,
                 name: "dual".to_string(),
                 layout: profile_layout,
@@ -1477,6 +1547,7 @@ mod tests {
         .unwrap();
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                display_options: Default::default(),
                 audio_output: None,
                 name: "work".to_string(),
                 layout: Layout {
@@ -1668,6 +1739,7 @@ mod tests {
         let backend = MockBackend::new(displays, layout).unwrap();
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                display_options: Default::default(),
                 audio_output: None,
                 name: "dual".to_string(),
                 layout: Layout {
@@ -1716,6 +1788,7 @@ mod tests {
         let backend = MockBackend::new(displays, layout).unwrap();
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                display_options: Default::default(),
                 audio_output: None,
                 name: "unidentified".to_string(),
                 layout: Layout {
@@ -1840,6 +1913,7 @@ mod tests {
         let backend = MockBackend::new(displays, layout).unwrap();
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                display_options: Default::default(),
                 audio_output: None,
                 name: "twins".to_string(),
                 layout: Layout {
@@ -1890,6 +1964,7 @@ mod tests {
             CountingBackend::new(MockBackend::new(sample_displays(), sample_layout()).unwrap());
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                display_options: Default::default(),
                 audio_output: None,
                 name: "PC".to_string(),
                 layout: Layout {
@@ -1932,6 +2007,7 @@ mod tests {
             CountingBackend::new(MockBackend::new(sample_displays(), sample_layout()).unwrap());
         let store = MemoryConfigStore::new(AppConfig {
             profiles: vec![Profile {
+                display_options: Default::default(),
                 audio_output: None,
                 name: "ghost".to_string(),
                 layout: Layout {

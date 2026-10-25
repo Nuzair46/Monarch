@@ -351,11 +351,13 @@ mod tests {
             layout: LayoutDto { outputs: vec![] },
             profiles: vec![
                 ProfileDto {
+                    display_options: Default::default(),
                     audio_output: None,
                     name: "Desk".into(),
                     layout: LayoutDto { outputs: vec![] },
                 },
                 ProfileDto {
+                    display_options: Default::default(),
                     audio_output: None,
                     name: "TV".into(),
                     layout: LayoutDto { outputs: vec![] },

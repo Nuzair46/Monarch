@@ -36,6 +36,7 @@ import {
   rollbackPending,
   saveProfile,
   setProfileAudio,
+  setProfileDisplayOptions,
   toggleDisplay,
   updateSettings,
   type ReleaseUpdateCheckResult,
@@ -59,6 +60,11 @@ function App() {
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [newProfileName, setNewProfileName] = useState("");
   const [newProfileAudio, setNewProfileAudio] = useState<string | null>(null);
+  const [newProfileIgnoreMissingDraft, setNewProfileIgnoreMissingDraft] =
+    useState<boolean | null>(null);
+  const newProfileIgnoreMissing = newProfileIgnoreMissingDraft ??
+    snapshot?.profiles.find((profile) => profile.name === newProfileName.trim())
+      ?.display_options.ignore_missing_displays ?? false;
   const [revertTimeoutInput, setRevertTimeoutInput] = useState("10");
   const [startWithWindowsEnabled, setStartWithWindowsEnabled] = useState(false);
   const [startupProfileName, setStartupProfileName] = useState<string | null>(
@@ -414,9 +420,12 @@ function App() {
 
   async function handleSaveCurrentLayout() {
     await runAction(async () => {
-      await saveProfile(newProfileName.trim(), newProfileAudio);
+      await saveProfile(newProfileName.trim(), newProfileAudio, {
+        ignore_missing_displays: newProfileIgnoreMissing,
+      });
       setNewProfileAudio(null);
       setNewProfileName("");
+      setNewProfileIgnoreMissingDraft(null);
     }, "Profile saved");
   }
 
@@ -573,11 +582,19 @@ function App() {
             }
             newProfileName={newProfileName}
             newProfileAudio={newProfileAudio}
+            newProfileIgnoreMissing={newProfileIgnoreMissing}
+            onNewProfileIgnoreMissingChange={setNewProfileIgnoreMissingDraft}
             onNewProfileAudioChange={setNewProfileAudio}
             onSaveProfileAudio={(name, id) => {
               void runAction(
                 () => setProfileAudio(name, id),
                 "Profile audio saved",
+              );
+            }}
+            onSaveProfileDisplayOptions={(name, options) => {
+              void runAction(
+                () => setProfileDisplayOptions(name, options),
+                "Profile display options saved",
               );
             }}
             onNewProfileNameChange={setNewProfileName}

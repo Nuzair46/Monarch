@@ -9,6 +9,7 @@ import type {
   ConfirmationEvent,
   Layout,
   DisplayCapabilities,
+  ProfileDisplayOptions,
 } from "./types";
 export type EventPayloadMap = {
   "monarch://state-changed": void;
@@ -211,11 +212,20 @@ export async function deleteProfile(name: string): Promise<void> {
 export async function saveProfile(
   name: string,
   audioOutputId: string | null = null,
+  displayOptions?: ProfileDisplayOptions,
 ): Promise<void> {
   if (useWebMock) {
-    return mock.saveProfile(name, audioOutputId);
+    return mock.saveProfile(name, audioOutputId, displayOptions);
   }
-  return invoke("save_profile", { name, audioOutputId });
+  return invoke("save_profile", { name, audioOutputId, displayOptions });
+}
+
+export async function setProfileDisplayOptions(
+  name: string,
+  options: ProfileDisplayOptions,
+): Promise<void> {
+  if (useWebMock) return mock.setProfileDisplayOptions(name, options);
+  return invoke("set_profile_display_options", { name, options });
 }
 
 export async function setProfileAudio(
