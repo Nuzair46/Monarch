@@ -152,6 +152,40 @@ fn saving_current_profile_preserves_preferences_without_applying() {
     assert!(!manager.has_pending_confirmation());
     assert_eq!(manager.list_profiles()[0].layout, current);
 }
+
+#[test]
+fn saved_profiles_resolve_duplicate_serials_after_driver_endpoint_changes() {
+    let mut saved = layout();
+    for output in &mut saved.outputs {
+        output.display_id.identity.edid_serial = Some("shared-serial".into());
+    }
+    let mut live = saved.clone();
+    for output in &mut live.outputs {
+        output.display_id.adapter_luid = 99;
+        output.display_id.target_id += 10;
+    }
+    let expected = live.clone();
+    live.outputs[1].enabled = false;
+    live.outputs[2].enabled = false;
+    live.outputs.reverse();
+    let backend = MockBackend::new(vec![], live.clone()).unwrap();
+    let store = MemoryConfigStore::default();
+    MonarchDisplayManager::new(
+        MockBackend::new(vec![], saved.clone()).unwrap(),
+        store.clone(),
+    )
+    .unwrap()
+    .save_profile("Before driver update")
+    .unwrap();
+    let mut manager = MonarchDisplayManager::new(backend.clone(), store.clone()).unwrap();
+    manager.apply_profile("Before driver update").unwrap();
+    assert_eq!(backend.current_layout().unwrap(), expected);
+    assert!(manager.has_pending_confirmation());
+    assert_eq!(manager.list_profiles()[0].layout, saved);
+    manager.rollback_pending().unwrap();
+    assert_eq!(backend.current_layout().unwrap(), live);
+    assert!(store.snapshot().unwrap().pending_recovery.is_none());
+}
 #[test]
 fn detach_clone_member_collapses_group_and_reattach_extends_without_overlap() {
     let backend = MockBackend::new(vec![], cloned()).unwrap();

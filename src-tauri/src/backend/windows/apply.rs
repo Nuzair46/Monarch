@@ -19,8 +19,9 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
     DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_MODE_INFO_TYPE_TARGET,
     DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE,
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_APPLY,
-    SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, SDC_ALLOW_CHANGES,
+    SDC_APPLY, SDC_NO_OPTIMIZATION, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    SDC_VALIDATE, SET_DISPLAY_CONFIG_FLAGS,
 };
 use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
 use windows::Win32::UI::ColorSystem::{
@@ -115,13 +116,7 @@ pub fn apply_layout_against_snapshot(
     desired.ensure_supported()?;
     let saved_gamma_ramps = capture_active_gamma_ramps(snapshot);
     let (next_paths, next_modes) = plan_layout(desired, snapshot)?;
-    let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG;
-    let status =
-        unsafe { SetDisplayConfig(Some(&next_paths), Some(&next_modes), SDC_VALIDATE | flags) };
-    if status != 0 {
-        log_rejected_plan(status, &next_paths, &next_modes);
-        return Err(validation_error(status));
-    }
+    let flags = validate_plan(&next_paths, &next_modes)?;
     let status = unsafe {
         SetDisplayConfig(
             Some(&next_paths),
@@ -478,6 +473,11 @@ pub(super) fn plan_layout(
                         },
                     },
                 });
+                // GDI's observed desktop dimensions can differ from the raw
+                // source mode (notably for rotated/scaled desktops). Reuse the
+                // pixel format, but always submit the requested source rectangle.
+                mode.Anonymous.sourceMode.width = output.resolution.width;
+                mode.Anonymous.sourceMode.height = output.resolution.height;
                 mode.Anonymous.sourceMode.position = windows::Win32::Foundation::POINTL {
                     x: output.position.x,
                     y: output.position.y,
@@ -510,6 +510,52 @@ pub(super) fn plan_layout(
     }
     reorder_paths_for_desired_priority(&mut paths, &outputs);
     Ok((paths, modes))
+}
+
+pub(super) fn validate_plan(
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+) -> Result<SET_DISPLAY_CONFIG_FLAGS, ManagerError> {
+    validate_plan_with(paths, modes, |flags| unsafe {
+        SetDisplayConfig(Some(paths), Some(modes), flags)
+    })
+}
+
+fn validate_plan_with(
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+    mut validate: impl FnMut(SET_DISPLAY_CONFIG_FLAGS) -> i32,
+) -> Result<SET_DISPLAY_CONFIG_FLAGS, ManagerError> {
+    let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG;
+    let status = validate(SDC_VALIDATE | flags);
+    if status == 0 {
+        return Ok(flags);
+    }
+    log_rejected_plan(status, paths, modes);
+    // Detached/changed modes have no live target timing. Rounded millihertz
+    // preferences are not exact driver rationals, and some drivers reject best
+    // mode selection with ERROR_BAD_CONFIGURATION or ERROR_GEN_FAILURE. Let
+    // Windows resolve those timings, then verify every requested property inside
+    // the existing recovery transaction. Never retry malformed/access errors or
+    // relax a complete set of observed timings.
+    if matches!(status, 1610 | 31)
+        && paths.iter().any(|path| {
+            path.flags & DISPLAYCONFIG_PATH_ACTIVE_FLAG != 0
+                && unsafe { path.targetInfo.Anonymous.modeInfoIdx } == u32::MAX
+        })
+    {
+        let flags = flags | SDC_ALLOW_CHANGES;
+        let retry = validate(SDC_VALIDATE | flags);
+        diagnostics::log(format!(
+            "display_config:timing_resolution_validation:{retry}"
+        ));
+        if retry == 0 {
+            return Ok(flags);
+        }
+        log_rejected_plan(retry, paths, modes);
+        return Err(validation_error(retry));
+    }
+    Err(validation_error(status))
 }
 
 pub(super) fn validation_error(status: i32) -> ManagerError {
@@ -956,6 +1002,200 @@ mod tests {
             });
         }
         snapshot
+    }
+
+    #[test]
+    fn source_rectangles_use_observed_desktop_dimensions_when_raw_modes_differ() {
+        let mut snapshot = active_modes();
+        let output = &mut snapshot.layout.outputs[1];
+        output.resolution = Resolution {
+            width: 1080,
+            height: 1920,
+        };
+        output.rotation = Some(monarch::Rotation::Portrait);
+        snapshot.raw.paths[1].targetInfo.rotation =
+            windows::Win32::Devices::Display::DISPLAYCONFIG_ROTATION_ROTATE90;
+        let (paths, modes) = plan_layout(&snapshot.layout, &snapshot).unwrap();
+        let path = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
+        let source = unsafe {
+            modes[path.sourceInfo.Anonymous.modeInfoIdx as usize]
+                .Anonymous
+                .sourceMode
+        };
+        assert_eq!((source.width, source.height), (1080, 1920));
+        assert_eq!((source.position.x, source.position.y), (1920, 0));
+        assert_eq!(
+            (
+                path.targetInfo.refreshRate.Numerator,
+                path.targetInfo.refreshRate.Denominator
+            ),
+            (60_000, 1001)
+        );
+        let target = unsafe {
+            modes[path.targetInfo.Anonymous.modeInfoIdx as usize]
+                .Anonymous
+                .targetMode
+                .targetVideoSignalInfo
+        };
+        assert_eq!(target.pixelRate, 148_351_648);
+    }
+
+    #[test]
+    fn reattach_retries_missing_timings_with_the_same_source_rectangles() {
+        for status in [1610, 31] {
+            let mut snapshot = active_modes();
+            snapshot.layout.outputs[1].enabled = false;
+            snapshot.raw.paths[1].flags = 0;
+            let mut desired = snapshot.layout.clone();
+            desired.outputs[1].enabled = true;
+            desired.outputs[1].resolution = Resolution {
+                width: 1440,
+                height: 2560,
+            };
+            desired.outputs[1].rotation = Some(monarch::Rotation::Portrait);
+            desired.outputs[1].refresh_rate_mhz = 100_049;
+            let (paths, modes) = plan_layout(&desired, &snapshot).unwrap();
+            let mut calls = Vec::new();
+            let flags = validate_plan_with(&paths, &modes, |flags| {
+                calls.push(flags);
+                if calls.len() == 1 {
+                    status
+                } else {
+                    0
+                }
+            })
+            .unwrap();
+            assert_eq!(
+                calls,
+                vec![
+                    SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+                    SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES,
+                ]
+            );
+            assert_eq!(flags, SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
+            let attached = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
+            let source = unsafe {
+                modes[attached.sourceInfo.Anonymous.modeInfoIdx as usize]
+                    .Anonymous
+                    .sourceMode
+            };
+            assert_eq!((source.width, source.height), (1440, 2560));
+            assert_eq!(
+                (
+                    attached.targetInfo.refreshRate.Numerator,
+                    attached.targetInfo.refreshRate.Denominator
+                ),
+                (100_049, 1000)
+            );
+            assert_eq!(attached.targetInfo.rotation.0, 2);
+        }
+    }
+
+    #[test]
+    fn strict_validation_success_never_enables_mode_changes() {
+        let snapshot = active_modes();
+        let (paths, modes) = plan_layout(&snapshot.layout, &snapshot).unwrap();
+        let flags = validate_plan_with(&paths, &modes, |flags| {
+            assert_eq!(flags, SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG);
+            0
+        })
+        .unwrap();
+        assert_eq!(flags, SDC_USE_SUPPLIED_DISPLAY_CONFIG);
+    }
+
+    #[test]
+    fn validation_does_not_retry_complete_timings_or_unrelated_errors() {
+        for complete in [false, true] {
+            let snapshot = active_modes();
+            let mut desired = snapshot.layout.clone();
+            if !complete {
+                desired.outputs[1].refresh_rate_mhz = 100_049;
+            }
+            let (paths, modes) = plan_layout(&desired, &snapshot).unwrap();
+            for status in [87, 5, 50, 1610, 31] {
+                if !complete && matches!(status, 1610 | 31) {
+                    continue;
+                }
+                let mut calls = 0;
+                let result = validate_plan_with(&paths, &modes, |_| {
+                    calls += 1;
+                    status
+                });
+                assert!(result.is_err());
+                assert_eq!(calls, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_timing_retry_reports_failure_without_additional_attempts() {
+        let snapshot = active_modes();
+        let mut desired = snapshot.layout.clone();
+        desired.outputs[1].refresh_rate_mhz = 100_049;
+        let (paths, modes) = plan_layout(&desired, &snapshot).unwrap();
+        let mut calls = 0;
+        let error = validate_plan_with(&paths, &modes, |_| {
+            calls += 1;
+            if calls == 1 {
+                1610
+            } else {
+                31
+            }
+        })
+        .unwrap_err();
+        assert_eq!(calls, 2);
+        assert!(error.to_string().contains("(31)"));
+    }
+
+    #[test]
+    fn timing_resolution_cannot_silently_reduce_modes_or_change_the_layout() {
+        let snapshot = active_modes();
+        let mut desired = snapshot.layout.clone();
+        desired.outputs[1].refresh_rate_mhz = 100_049;
+        desired.outputs[1].rotation = Some(monarch::Rotation::Portrait);
+        desired.outputs[1].resolution = Resolution {
+            width: 1440,
+            height: 2560,
+        };
+        desired.outputs[1].hdr_enabled = Some(false);
+        desired.outputs[1].scale_percent = Some(125);
+        let (paths, modes) = plan_layout(&desired, &snapshot).unwrap();
+        let flags = validate_plan_with(&paths, &modes, |flags| {
+            if flags.contains(SDC_ALLOW_CHANGES) {
+                0
+            } else {
+                1610
+            }
+        })
+        .unwrap();
+        assert!(flags.contains(SDC_ALLOW_CHANGES));
+        for property in 0..7 {
+            let mut observed = desired.clone();
+            match property {
+                0 => observed.outputs[1].refresh_rate_mhz = 60_000,
+                1 => {
+                    observed.outputs[1].resolution = Resolution {
+                        width: 1080,
+                        height: 1920,
+                    }
+                }
+                2 => observed.outputs[1].rotation = Some(monarch::Rotation::Landscape),
+                3 => observed.outputs[1].position.x += 1,
+                4 => observed.outputs[1].hdr_enabled = Some(true),
+                5 => observed.outputs[1].scale_percent = Some(100),
+                _ => observed.outputs[1].enabled = false,
+            }
+            let mut restored = false;
+            let result = monarch::transaction::apply_with_recovery(
+                || monarch::verification::verify_applied_layout(&desired, &observed),
+                || {
+                    restored = true;
+                    Ok(())
+                },
+            );
+            assert!(result.is_err(), "property {property}");
+            assert!(restored, "property {property}");
+        }
     }
 
     #[test]
