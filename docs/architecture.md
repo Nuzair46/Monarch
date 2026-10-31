@@ -42,6 +42,16 @@ primary group using minimum-distance, non-overlapping translations. Group-intern
 offsets and clone membership are preserved. Only the effective apply layout moves;
 the saved profile and exact verification contract remain unchanged. Missing disabled
 outputs do not trigger gap closure.
+If a target loses identity during preflight, the opt-in profile gets one fresh
+inventory attempt. If it never appears in active enumeration after apply, native
+recovery preserves the unavailable target IDs in a structured error. Only after
+verified desktop/audio restoration and journal cleanup may the manager retry,
+omitting those targets even if connected inventory still lists their cached names.
+The original saved profile is used for each attempt, so gap closure is not cumulative.
+An apply error 31/1610 is classified as unavailable only when a fresh connected
+enumeration confirms missing identity; the status code alone cannot exclude a monitor.
+Other driver errors, ambiguous identities, failed recovery or journal persistence,
+and unavailable requested audio still fail. There is at most one profile retry.
 Ambiguous and many-to-one matches remain errors. At least one enabled saved
 display must resolve. Explicitly disabled saved outputs override live state.
 Primary fallback and coordinate rebasing are handled
@@ -144,6 +154,13 @@ and uses the successful flags for apply. This lets Windows resolve driver timing
 from rounded saved refresh preferences, as described by
 [SetDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig).
 Complete observed timing tables and unrelated errors do not take this retry.
+If a newly attached target, or best-mode selection with `SDC_ALLOW_CHANGES`, has the
+right active set, orientation, refresh and clone membership but different source
+dimensions/positions, Monarch makes one corrective apply using the freshly observed
+target timings and the original requested source rectangles. Both validation and
+apply omit `SDC_ALLOW_CHANGES` on this pass. HDR/scaling are applied afterward and
+full observation still decides success; transposed dimensions are never accepted
+as equivalent or written back into the saved profile.
 The requested layout remains unchanged: post-apply verification still rejects
 substituted modes, positions, orientation, primary, clone, HDR or scaling settings
 and triggers recovery before confirmation. Both preflight and apply use the same

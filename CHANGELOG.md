@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Profile restoration after standby and KVM switching
+
+- Carry unavailable-display identities through verified rollback. Profiles with **Ignore missing displays** retry once with fresh inventory, skipping targets that failed to become identifiable or active during the first apply (#77).
+- After reattachment or Windows best-mode selection substitutes source geometry, retry the requested dimensions and position using fresh active target timings. The corrective apply forbids further substitutions and still verifies all requested settings before confirmation (#76).
+- Log requested display geometry, orientation and refresh alongside native apply/retry failures. Hardware confirmation for the reported KVM and optical-HDMI setups is pending.
+
 ### Profile display options
 
 - Add a per-profile **Ignore missing displays** option, disabled by default.

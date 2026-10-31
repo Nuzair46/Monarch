@@ -114,6 +114,13 @@ pub fn apply_layout_against_snapshot(
     snapshot: &TopologySnapshot,
 ) -> Result<TopologySnapshot, ManagerError> {
     desired.ensure_supported()?;
+    for output in desired.outputs.iter().filter(|o| o.enabled) {
+        diagnostics::log(format!(
+            "display_config:requested:target={:?}:resolution={}x{}:position={},{}:rotation={:?}:refresh={}",
+            output.display_id.endpoint(), output.resolution.width, output.resolution.height,
+            output.position.x, output.position.y, output.rotation, output.refresh_rate_mhz,
+        ));
+    }
     let saved_gamma_ramps = capture_active_gamma_ramps(snapshot);
     let (next_paths, next_modes) = plan_layout(desired, snapshot)?;
     let flags = validate_plan(&next_paths, &next_modes)?;
@@ -125,18 +132,94 @@ pub fn apply_layout_against_snapshot(
         )
     };
     if status != 0 {
+        diagnostics::log(format!("display_config:apply_failed:{status}"));
+        // A monitor may disappear between validation and the driver call. Only
+        // fresh identity evidence can classify this as an unavailable display;
+        // a generic driver failure alone must not make us drop a healthy target.
+        if matches!(status, 31 | 1610) {
+            let fresh = super::enumerate::query_connected_topology()?;
+            monarch::identity::resolve_layout(desired, &fresh.layout)?;
+        }
         return Err(ManagerError::Backend(format!(
             "SetDisplayConfig failed: {status}"
         )));
     }
     // Routing can change when splitting/joining clones; never set DPI on old IDs.
-    let refreshed = wait_for_requested_outputs(desired)?;
+    let mut refreshed = wait_for_requested_outputs(desired)?;
+    let attaching = desired.outputs.iter().filter(|o| o.enabled).any(|output| {
+        !snapshot
+            .layout
+            .outputs
+            .iter()
+            .any(|before| before.enabled && before.display_id == output.display_id)
+    });
+    if attaching || flags.contains(SDC_ALLOW_CHANGES) {
+        let resolved = monarch::identity::resolve_layout(desired, &refreshed.layout)?;
+        if needs_source_mode_retry(&resolved, &refreshed.layout) {
+            // Best-mode selection may attach a KVM/portrait target with a
+            // substituted source size. Now that its live target timing exists,
+            // resubmit the requested desktop rectangle without ALLOW_CHANGES.
+            let (paths, modes) = plan_layout_with_target_timings(&resolved, &refreshed, true)?;
+            apply_exact_source_modes(&paths, &modes, |flags| unsafe {
+                SetDisplayConfig(Some(&paths), Some(&modes), flags)
+            })?;
+            refreshed = wait_for_requested_outputs(desired)?;
+        }
+    }
     apply_preferences(desired, &refreshed)?;
 
     let next_snapshot = wait_for_verified_layout(desired)?;
     best_effort_reload_color_calibration();
     best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
     Ok(next_snapshot)
+}
+
+fn needs_source_mode_retry(desired: &Layout, observed: &Layout) -> bool {
+    let mut comparison = desired.clone();
+    let mut changed = false;
+    for output in comparison.outputs.iter_mut().filter(|o| o.enabled) {
+        let Some(actual) = observed
+            .outputs
+            .iter()
+            .find(|o| o.enabled && o.display_id == output.display_id)
+        else {
+            return false;
+        };
+        if output.resolution.width > 0 {
+            changed |= output.resolution != actual.resolution || output.position != actual.position;
+            output.resolution = actual.resolution.clone();
+            output.position = actual.position.clone();
+            output.primary = actual.primary;
+        }
+        // These preferences have not been applied yet.
+        output.hdr_enabled = None;
+        output.scale_percent = None;
+    }
+    changed && monarch::verification::verify_applied_layout(&comparison, observed).is_ok()
+}
+
+fn apply_exact_source_modes(
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+    mut set: impl FnMut(SET_DISPLAY_CONFIG_FLAGS) -> i32,
+) -> Result<(), ManagerError> {
+    let status = set(SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG);
+    diagnostics::log(format!("display_config:exact_source_validation:{status}"));
+    if status != 0 {
+        log_rejected_plan(status, paths, modes);
+        return Err(validation_error(status));
+    }
+    let status = set(SDC_APPLY
+        | SDC_USE_SUPPLIED_DISPLAY_CONFIG
+        | SDC_SAVE_TO_DATABASE
+        | SDC_NO_OPTIMIZATION);
+    diagnostics::log(format!("display_config:exact_source_apply:{status}"));
+    if status != 0 {
+        return Err(ManagerError::Backend(format!(
+            "SetDisplayConfig exact source retry failed: {status}"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn wait_for_verified_layout(desired: &Layout) -> Result<TopologySnapshot, ManagerError> {
@@ -399,6 +482,14 @@ pub(super) fn plan_layout(
     desired: &Layout,
     snapshot: &TopologySnapshot,
 ) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), ManagerError> {
+    plan_layout_with_target_timings(desired, snapshot, false)
+}
+
+fn plan_layout_with_target_timings(
+    desired: &Layout,
+    snapshot: &TopologySnapshot,
+    retain_target_timing: bool,
+) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), ManagerError> {
     let mut paths = super::recovery::build_recovery_paths(desired, &snapshot.raw.paths)?;
     let outputs = desired_output_index(desired);
     let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = Vec::new();
@@ -411,10 +502,11 @@ pub(super) fn plan_layout(
         let current = snapshot.layout.outputs.iter().find(|o| {
             o.enabled
                 && o.display_id.endpoint() == output.display_id.endpoint()
-                && o.resolution == output.resolution
-                && o.refresh_rate_mhz == output.refresh_rate_mhz
-                && o.rotation.unwrap_or(monarch::Rotation::Landscape)
-                    == output.rotation.unwrap_or(monarch::Rotation::Landscape)
+                && (retain_target_timing || o.resolution == output.resolution)
+                && o.refresh_rate_mhz.abs_diff(output.refresh_rate_mhz) <= 2
+                && ((retain_target_timing && output.rotation.is_none())
+                    || o.rotation.unwrap_or(monarch::Rotation::Landscape)
+                        == output.rotation.unwrap_or(monarch::Rotation::Landscape))
         });
         let active_path = current.and_then(|_| {
             snapshot.raw.paths.iter().find(|p| {
@@ -1038,6 +1130,136 @@ mod tests {
                 .targetVideoSignalInfo
         };
         assert_eq!(target.pixelRate, 148_351_648);
+    }
+
+    #[test]
+    fn exact_source_retry_corrects_transposed_geometry_using_live_target_timings() {
+        let mut observed = active_modes();
+        observed.layout.outputs[1].rotation = Some(monarch::Rotation::Portrait);
+        observed.raw.paths[1].targetInfo.rotation =
+            windows::Win32::Devices::Display::DISPLAYCONFIG_ROTATION_ROTATE90;
+        let mut desired = observed.layout.clone();
+        desired.outputs[1].resolution = Resolution {
+            width: 1080,
+            height: 1920,
+        };
+        // Cover both directions: the retry honors the explicit saved rectangle,
+        // rather than guessing orientation from which side is longer.
+        for reverse in [false, true] {
+            let mut snapshot = observed.clone();
+            let mut wanted = desired.clone();
+            if reverse {
+                std::mem::swap(&mut snapshot.layout, &mut wanted);
+            }
+            assert!(needs_source_mode_retry(&wanted, &snapshot.layout));
+            assert!(
+                monarch::verification::verify_applied_layout(&wanted, &snapshot.layout).is_err()
+            );
+            let (paths, modes) = plan_layout_with_target_timings(&wanted, &snapshot, true).unwrap();
+            let path = paths.iter().find(|p| p.targetInfo.id == 2).unwrap();
+            let source = unsafe {
+                modes[path.sourceInfo.Anonymous.modeInfoIdx as usize]
+                    .Anonymous
+                    .sourceMode
+            };
+            assert_eq!(
+                (source.width, source.height),
+                (
+                    wanted.outputs[1].resolution.width,
+                    wanted.outputs[1].resolution.height
+                )
+            );
+            let signal = unsafe {
+                modes[path.targetInfo.Anonymous.modeInfoIdx as usize]
+                    .Anonymous
+                    .targetMode
+                    .targetVideoSignalInfo
+            };
+            assert_eq!(signal.pixelRate, 148_351_648);
+            assert_eq!(path.targetInfo.rotation.0, 2);
+            assert_eq!(
+                (
+                    path.targetInfo.refreshRate.Numerator,
+                    path.targetInfo.refreshRate.Denominator
+                ),
+                (60_000, 1001)
+            );
+        }
+    }
+
+    #[test]
+    fn source_retry_does_not_mask_other_driver_substitutions() {
+        let mut desired = active_modes().layout;
+        desired.outputs[1].resolution = Resolution {
+            width: 1080,
+            height: 1920,
+        };
+        desired.outputs[1].rotation = Some(monarch::Rotation::Portrait);
+        assert!(!needs_source_mode_retry(&desired, &desired));
+        let mut observed = desired.clone();
+        observed.outputs[1].resolution = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+        for property in 0..4 {
+            let mut changed = observed.clone();
+            match property {
+                0 => changed.outputs[1].enabled = false,
+                1 => changed.outputs[1].rotation = Some(monarch::Rotation::Landscape),
+                2 => changed.outputs[1].refresh_rate_mhz = 30_000,
+                _ => {
+                    for output in &mut changed.outputs {
+                        output.clone_group = Some("clone".into());
+                    }
+                }
+            }
+            assert!(!needs_source_mode_retry(&desired, &changed));
+        }
+    }
+
+    #[test]
+    fn exact_source_retry_never_allows_further_mode_substitution() {
+        let snapshot = active_modes();
+        let mut calls = Vec::new();
+        apply_exact_source_modes(&snapshot.raw.paths, &snapshot.raw.modes, |flags| {
+            calls.push(flags);
+            0
+        })
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+                SDC_APPLY
+                    | SDC_USE_SUPPLIED_DISPLAY_CONFIG
+                    | SDC_SAVE_TO_DATABASE
+                    | SDC_NO_OPTIMIZATION,
+            ]
+        );
+        for failure in [31, 1610, 87] {
+            let mut calls = 0;
+            assert!(
+                apply_exact_source_modes(&snapshot.raw.paths, &snapshot.raw.modes, |_| {
+                    calls += 1;
+                    failure
+                })
+                .is_err()
+            );
+            assert_eq!(calls, 1, "failed validation must not apply");
+        }
+        let mut calls = 0;
+        assert!(
+            apply_exact_source_modes(&snapshot.raw.paths, &snapshot.raw.modes, |_| {
+                calls += 1;
+                if calls == 1 {
+                    0
+                } else {
+                    31
+                }
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 2);
     }
 
     #[test]

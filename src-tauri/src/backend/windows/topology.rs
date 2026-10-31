@@ -146,12 +146,13 @@ impl DisplayBackend for WindowsDisplayBackend {
     }
     fn validate_layout(&self, layout: &Layout) -> Result<(), ManagerError> {
         let connected = query_connected_topology()?;
+        let layout = monarch::identity::resolve_layout(layout, &connected.layout)?;
         monarch::capabilities::validate_transition(
-            layout,
+            &layout,
             &connected.layout,
             &super::capabilities::discover(&connected),
         )?;
-        let (paths, modes) = super::apply::plan_layout(layout, &connected)?;
+        let (paths, modes) = super::apply::plan_layout(&layout, &connected)?;
         super::apply::validate_plan(&paths, &modes)?;
         Ok(())
     }
@@ -172,7 +173,11 @@ impl DisplayBackend for WindowsDisplayBackend {
         let _wallpaper = super::wallpaper::WallpaperState::capture(&previous);
         let gamma = super::apply::capture_active_gamma_ramps(&previous);
         let result = monarch::transaction::apply_with_recovery(
-            || self.apply_layout_inner(layout),
+            || {
+                self.apply_layout_inner(layout).inspect_err(|error| {
+                    diagnostics::log(format!("display_config:transaction_failed:{error}"));
+                })
+            },
             || restore_captured_state(&previous),
         );
         if let Ok(observed) = query_active_only_topology() {
