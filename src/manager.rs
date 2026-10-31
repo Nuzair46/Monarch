@@ -223,7 +223,10 @@ where
         };
         match display_result {
             Ok(()) => {}
-            Err(error @ ManagerError::ApplyRestored(_)) => {
+            Err(
+                error @ (ManagerError::ApplyRestored(_)
+                | ManagerError::DisplaysUnavailableRestored(_)),
+            ) => {
                 if let Some(previous) = &self.config.pending_recovery_audio {
                     self.backend
                         .set_audio_defaults(previous)
@@ -444,11 +447,14 @@ where
             name: name.to_string(),
             layout,
             audio_output,
-            display_options: display_options.unwrap_or_else(|| self.config.profiles
-                .iter()
-                .find(|p| p.name == name)
-                .map(|p| p.display_options)
-                .unwrap_or_default()),
+            display_options: display_options.unwrap_or_else(|| {
+                self.config
+                    .profiles
+                    .iter()
+                    .find(|p| p.name == name)
+                    .map(|p| p.display_options)
+                    .unwrap_or_default()
+            }),
         };
 
         let mut next = self.config.clone();
@@ -488,20 +494,66 @@ where
             .cloned()
             .ok_or_else(|| ManagerError::NotFound(format!("profile '{name}'")))?;
 
+        let result = self.apply_profile_layout(&profile, &[]);
+        if !profile.display_options.ignore_missing_displays {
+            return result;
+        }
+        match result {
+            Err(ManagerError::DisplaysUnavailable(_)) => {
+                // Preflight made no changes. Re-read inventory in case the
+                // monitor disappeared or finished waking between queries.
+                self.backend.invalidate_cache()?;
+                self.apply_profile_layout(&profile, &[])
+            }
+            Err(ManagerError::DisplaysUnavailableRestored(ids)) => {
+                // The native transaction verified recovery and the journal was
+                // cleared. Remember which targets failed to wake even if Windows
+                // still advertises their cached names in connected inventory.
+                self.backend.invalidate_cache()?;
+                self.apply_profile_layout(&profile, &ids)
+            }
+            result => result,
+        }
+    }
+
+    fn apply_profile_layout(
+        &mut self,
+        profile: &Profile,
+        unavailable: &[DisplayId],
+    ) -> Result<(), ManagerError> {
         let mut target_layout = profile.layout.clone();
         target_layout.ensure_valid()?;
         let mut skipped_enabled = false;
         if profile.display_options.ignore_missing_displays {
             let current = self.backend.get_layout()?;
             current.ensure_supported()?;
+            let mut excluded = HashSet::new();
+            for id in unavailable {
+                match resolve(id, &profile.layout) {
+                    IdentityResolution::Resolved(id) => {
+                        excluded.insert(id);
+                    }
+                    _ => {
+                        return Err(ManagerError::Validation(
+                            "cannot safely match an unavailable display to the saved profile"
+                                .into(),
+                        ))
+                    }
+                }
+            }
             let mut used = HashSet::new();
             let mut outputs = Vec::new();
             for mut output in target_layout.outputs {
                 match resolve(&output.display_id, &current) {
                     IdentityResolution::Resolved(id) => {
+                        if excluded.contains(&output.display_id) {
+                            skipped_enabled |= output.enabled;
+                            continue;
+                        }
                         if !used.insert(id.endpoint()) {
                             return Err(ManagerError::Validation(
-                                "profile maps multiple displays to the same connected monitor".into(),
+                                "profile maps multiple displays to the same connected monitor"
+                                    .into(),
                             ));
                         }
                         output.display_id = id;
@@ -602,7 +654,8 @@ where
     ) -> Result<(), ManagerError> {
         self.ensure_no_pending_confirmation()?;
         let mut next = self.config.clone();
-        let profile = next.profiles
+        let profile = next
+            .profiles
             .iter_mut()
             .find(|p| p.name == name)
             .ok_or_else(|| ManagerError::NotFound(format!("profile '{name}'")))?;
@@ -643,47 +696,7 @@ where
         desired: &Layout,
         current: &Layout,
     ) -> Result<(), ManagerError> {
-        let current_ids: HashSet<&DisplayId> = current
-            .outputs
-            .iter()
-            .map(|output| &output.display_id)
-            .collect();
-
-        let Some(unresolved) = desired
-            .outputs
-            .iter()
-            .find(|output| output.enabled && !current_ids.contains(&output.display_id))
-        else {
-            return Ok(());
-        };
-
-        if let IdentityResolution::Ambiguous(candidates) = resolve(&unresolved.display_id, current)
-        {
-            return Err(ManagerError::Validation(format!("display identity is ambiguous ({} candidates); reconnect the intended monitor on its saved port or re-save the profile", candidates.len())));
-        }
-        let edid_hash = unresolved
-            .display_id
-            .edid_hash
-            .map(|value| format!("{value:016x}"))
-            .unwrap_or_else(|| "-".to_string());
-        let friendly = self
-            .backend
-            .list_displays()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|display| {
-                display.id == unresolved.display_id
-                    || (unresolved.display_id.edid_hash.is_some()
-                        && display.id.edid_hash == unresolved.display_id.edid_hash)
-            })
-            .map(|display| format!("'{}' ", display.friendly_name))
-            .unwrap_or_default();
-        // This is NOT an attach failure: the display is not being enumerated at all (powered off,
-        // unplugged, or reported unavailable). Say so, instead of blaming a rescue that never ran.
-        Err(ManagerError::Validation(format!(
-            "display {friendly}(target_id={}, edid_hash={edid_hash}) is not connected right now: Windows does not report it as an available display. turn it on or reconnect it and try again, or re-save the profile without it",
-            unresolved.display_id.target_id
-        )))
+        crate::identity::resolve_layout(desired, current).map(|_| ())
     }
 
     pub fn delete_profile(&mut self, name: &str) -> Result<(), ManagerError> {
@@ -1600,11 +1613,7 @@ mod tests {
         let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
 
         let err = manager.apply_profile("work").unwrap_err();
-        assert!(matches!(
-            err,
-            ManagerError::Validation(message)
-                if message.contains("is not connected right now")
-        ));
+        assert!(matches!(err, ManagerError::DisplaysUnavailable(_)));
     }
 
     fn duplicate_edid_current_state() -> (Vec<DisplayInfo>, Layout, DisplayId, DisplayId) {
@@ -1821,11 +1830,7 @@ mod tests {
         let mut manager = MonarchDisplayManager::new(backend, store).unwrap();
 
         let err = manager.apply_profile("unidentified").unwrap_err();
-        assert!(matches!(
-            err,
-            ManagerError::Validation(message)
-                if message.contains("not connected")
-        ));
+        assert!(matches!(err, ManagerError::DisplaysUnavailable(_)));
     }
 
     #[test]
@@ -1990,7 +1995,7 @@ mod tests {
 
         let err = manager.apply_profile("PC").unwrap_err();
         assert!(
-            matches!(&err, ManagerError::Validation(message) if message.contains("is not connected right now")),
+            matches!(&err, ManagerError::DisplaysUnavailable(_)),
             "expected the not-connected diagnosis, got: {err}"
         );
         assert_eq!(
@@ -2031,11 +2036,7 @@ mod tests {
         let mut manager = MonarchDisplayManager::new(backend.clone(), store).unwrap();
 
         let err = manager.apply_profile("ghost").unwrap_err();
-        assert!(matches!(
-            err,
-            ManagerError::Validation(message)
-                if message.contains("is not connected right now")
-        ));
+        assert!(matches!(err, ManagerError::DisplaysUnavailable(_)));
         assert_eq!(backend.prepare_calls(), 1);
     }
 
