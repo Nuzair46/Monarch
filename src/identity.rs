@@ -116,20 +116,26 @@ pub fn remap_layout(desired: &Layout, current: &Layout) -> Layout {
 /// must not become usable merely because Windows reused its endpoint.
 pub fn resolve_layout(desired: &Layout, current: &Layout) -> Result<Layout, crate::ManagerError> {
     let result = remap_layout(desired, current);
+    let mut missing = Vec::new();
     for output in result.outputs.iter().filter(|o| o.enabled) {
         if !current
             .outputs
             .iter()
             .any(|o| o.display_id == output.display_id)
         {
-            let reason = match resolve(&output.display_id, current) {
-                Resolution::Ambiguous(_) => "ambiguous",
-                _ => "missing or changed",
-            };
-            return Err(crate::ManagerError::Validation(format!(
-                "display identity is {reason}; refresh the inventory before applying"
-            )));
+            if matches!(
+                resolve(&output.display_id, current),
+                Resolution::Ambiguous(_)
+            ) {
+                return Err(crate::ManagerError::Validation(
+                    "display identity is ambiguous; refresh the inventory before applying".into(),
+                ));
+            }
+            missing.push(output.display_id.clone());
         }
+    }
+    if !missing.is_empty() {
+        return Err(crate::ManagerError::DisplaysUnavailable(missing));
     }
     result.ensure_valid()?;
     Ok(result)

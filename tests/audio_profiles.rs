@@ -71,6 +71,7 @@ impl ConfigStore for Store {
 enum Failure {
     Display,
     DisplayRestored,
+    DisplayUnavailableRestored,
     Console,
     Multimedia,
     Verification,
@@ -118,6 +119,12 @@ impl DisplayBackend for Backend {
             return Err(ManagerError::ApplyRestored(
                 "display restored natively".into(),
             ));
+        }
+        if state.failure == Some(Failure::DisplayUnavailableRestored) {
+            state.failure = None;
+            let id = state.layout.outputs[1].display_id.clone();
+            state.layout = previous;
+            return Err(ManagerError::DisplaysUnavailableRestored(vec![id]));
         }
         Ok(())
     }
@@ -335,6 +342,7 @@ fn all_apply_failure_stages_recover_audio_and_displays() {
     for failure in [
         Failure::Display,
         Failure::DisplayRestored,
+        Failure::DisplayUnavailableRestored,
         Failure::Console,
         Failure::Multimedia,
         Failure::Verification,

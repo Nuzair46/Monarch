@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Profile restoration after standby and KVM switching
+
+- Repair old saved portrait profiles that contain unrotated dimensions when a complete live mode list confirms the intended rotated mode. Check before preflight and again after attaching a detached monitor; retain exact verification, saved profile data, and manual/recovery behavior (#76).
+- Capture physical desktop rectangles with per-monitor DPI awareness, with live GDI settings as fallback. Refuse to save unobserved active geometry instead of falling back to potentially unrotated raw timings (#76).
+- Give slow or transiently incomplete post-apply inventory at least one fresh read before declaring a display unavailable.
+- Carry unavailable-display identities through verified rollback. Profiles with **Ignore missing displays** retry once with fresh inventory, skipping targets that failed to become identifiable or active during the first apply (#77).
+- After reattachment or Windows best-mode selection substitutes source geometry, retry the requested dimensions and position using fresh active target timings. The corrective apply forbids further substitutions and still verifies all requested settings before confirmation (#76).
+- Log requested display geometry, orientation and refresh alongside native apply/retry failures. Hardware confirmation for the reported KVM and optical-HDMI setups is pending.
+
 ### Profile display options
 
 - Add a per-profile **Ignore missing displays** option, disabled by default.

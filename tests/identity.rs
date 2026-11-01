@@ -36,6 +36,25 @@ fn inventory(ids: Vec<DisplayId>) -> Layout {
 }
 
 #[test]
+fn missing_targets_are_reported_together_but_never_hide_ambiguity() {
+    let mut saved = inventory(vec![
+        id(1, 1, Some("missing-a"), None),
+        id(1, 2, Some("missing-b"), None),
+    ]);
+    for output in &mut saved.outputs {
+        output.enabled = true;
+    }
+    let error = identity::resolve_layout(&saved, &inventory(vec![])).unwrap_err();
+    assert!(matches!(error, ManagerError::DisplaysUnavailable(ids) if ids.len() == 2));
+    let current = inventory(vec![
+        id(9, 3, Some("missing-b"), None),
+        id(9, 4, Some("missing-b"), None),
+    ]);
+    assert!(matches!(identity::resolve_layout(&saved, &current),
+        Err(ManagerError::Validation(message)) if message.contains("ambiguous")));
+}
+
+#[test]
 fn serial_survives_dock_port_and_adapter_changes() {
     let saved = id(1, 1, Some("ACME:panel123"), Some("port-a"));
     let mut moved = id(99, 7, Some("ACME:panel123"), Some("port-b"));

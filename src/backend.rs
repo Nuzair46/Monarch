@@ -34,6 +34,12 @@ pub trait DisplayBackend {
     fn list_displays(&self) -> Result<Vec<DisplayInfo>, ManagerError>;
     fn get_layout(&self) -> Result<Layout, ManagerError>;
     fn apply_layout(&self, layout: Layout) -> Result<(), ManagerError>;
+    /// Apply a saved profile, permitting portrait geometry repair only when
+    /// fresh, complete capabilities establish the saved dimensions are reversed.
+    /// Backends may need to obtain that evidence after activating detached targets.
+    fn apply_profile_layout(&self, layout: Layout) -> Result<(), ManagerError> {
+        self.apply_layout(layout)
+    }
     fn color_state_signature(&self) -> Result<Option<String>, ManagerError> {
         Ok(None)
     }
