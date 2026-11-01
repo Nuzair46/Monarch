@@ -121,10 +121,36 @@ impl WindowsDisplayBackend {
         reapply_color_calibration_for_active_with_cached_sdr(&cached)
     }
 
-    fn apply_layout_inner(&self, layout: Layout) -> Result<(), ManagerError> {
+    fn apply_transaction(&self, layout: Layout, is_profile: bool) -> Result<(), ManagerError> {
+        layout.ensure_supported()?;
+        let previous = capture_pre_recovery_state()?;
+        previous.layout.ensure_supported()?;
+        let _wallpaper = super::wallpaper::WallpaperState::capture(&previous);
+        let gamma = super::apply::capture_active_gamma_ramps(&previous);
+        let result = monarch::transaction::apply_with_recovery(
+            || {
+                self.apply_layout_inner(layout, is_profile)
+                    .inspect_err(|error| {
+                        diagnostics::log(format!("display_config:transaction_failed:{error}"));
+                    })
+            },
+            || restore_captured_state(&previous),
+        );
+        if let Ok(observed) = query_active_only_topology() {
+            super::apply::best_effort_reload_color_calibration();
+            super::apply::best_effort_restore_gamma_ramps(&observed, &gamma);
+        }
+        result
+    }
+
+    fn apply_layout_inner(&self, layout: Layout, is_profile: bool) -> Result<(), ManagerError> {
         let connected = query_connected_topology()?;
         let desired = monarch::identity::resolve_layout(&layout, &connected.layout)?;
-        let observed = apply_layout_against_snapshot(&desired, &connected)?;
+        let observed = if is_profile {
+            super::apply::apply_profile_layout_against_snapshot(&desired, &connected)?
+        } else {
+            apply_layout_against_snapshot(&desired, &connected)?
+        };
         merge_sdr_gamma_cache(
             &mut self
                 .cache
@@ -167,25 +193,12 @@ impl DisplayBackend for WindowsDisplayBackend {
         Ok(self.snapshot()?.layout)
     }
     fn apply_layout(&self, layout: Layout) -> Result<(), ManagerError> {
-        layout.ensure_supported()?;
-        let previous = capture_pre_recovery_state()?;
-        previous.layout.ensure_supported()?;
-        let _wallpaper = super::wallpaper::WallpaperState::capture(&previous);
-        let gamma = super::apply::capture_active_gamma_ramps(&previous);
-        let result = monarch::transaction::apply_with_recovery(
-            || {
-                self.apply_layout_inner(layout).inspect_err(|error| {
-                    diagnostics::log(format!("display_config:transaction_failed:{error}"));
-                })
-            },
-            || restore_captured_state(&previous),
-        );
-        if let Ok(observed) = query_active_only_topology() {
-            super::apply::best_effort_reload_color_calibration();
-            super::apply::best_effort_restore_gamma_ramps(&observed, &gamma);
-        }
-        result
+        self.apply_transaction(layout, false)
     }
+    fn apply_profile_layout(&self, layout: Layout) -> Result<(), ManagerError> {
+        self.apply_transaction(layout, true)
+    }
+
     fn color_state_signature(&self) -> Result<Option<String>, ManagerError> {
         WindowsDisplayBackend::color_state_signature(self)
     }

@@ -1,0 +1,115 @@
+{
+  "name": "Laptop",
+  "layout": {
+    "outputs": [
+      {
+        "display_id": {
+          "adapter_luid": 1,
+          "target_id": 4611,
+          "edid_hash": 1,
+          "identity": {
+            "device_path": null,
+            "edid_serial": null
+          }
+        },
+        "enabled": true,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "resolution": {
+          "width": 2560,
+          "height": 1440
+        },
+        "refresh_rate_mhz": 143973,
+        "primary": true,
+        "rotation": "landscape",
+        "hdr_enabled": false,
+        "scale_percent": 100,
+        "clone_group": null
+      },
+      {
+        "display_id": {
+          "adapter_luid": 1,
+          "target_id": 4354,
+          "edid_hash": 2,
+          "identity": {
+            "device_path": null,
+            "edid_serial": null
+          }
+        },
+        "enabled": true,
+        "position": {
+          "x": 0,
+          "y": -1440
+        },
+        "resolution": {
+          "width": 2560,
+          "height": 1440
+        },
+        "refresh_rate_mhz": 99946,
+        "primary": false,
+        "rotation": "landscape",
+        "hdr_enabled": false,
+        "scale_percent": 100,
+        "clone_group": null
+      },
+      {
+        "display_id": {
+          "adapter_luid": 2,
+          "target_id": 265988,
+          "edid_hash": 3,
+          "identity": {
+            "device_path": null,
+            "edid_serial": null
+          }
+        },
+        "enabled": true,
+        "position": {
+          "x": -1920,
+          "y": 360
+        },
+        "resolution": {
+          "width": 1920,
+          "height": 1080
+        },
+        "refresh_rate_mhz": 144027,
+        "primary": false,
+        "rotation": "landscape",
+        "hdr_enabled": false,
+        "scale_percent": 100,
+        "clone_group": null
+      },
+      {
+        "display_id": {
+          "adapter_luid": 1,
+          "target_id": 4609,
+          "edid_hash": 4,
+          "identity": {
+            "device_path": null,
+            "edid_serial": null
+          }
+        },
+        "enabled": true,
+        "position": {
+          "x": 2560,
+          "y": 360
+        },
+        "resolution": {
+          "width": 1920,
+          "height": 1080
+        },
+        "refresh_rate_mhz": 100000,
+        "primary": false,
+        "rotation": "portrait",
+        "hdr_enabled": false,
+        "scale_percent": 100,
+        "clone_group": null
+      }
+    ]
+  },
+  "audio_output": null,
+  "display_options": {
+    "ignore_missing_displays": false
+  }
+}

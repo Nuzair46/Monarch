@@ -94,6 +94,14 @@ impl DisplayBackend for SystemDisplayBackend {
         }
     }
 
+    fn apply_profile_layout(&self, layout: Layout) -> Result<(), monarch::ManagerError> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Windows(backend) => backend.apply_profile_layout(layout),
+            Self::Mock(backend) => backend.apply_profile_layout(layout),
+        }
+    }
+
     fn color_state_signature(&self) -> Result<Option<String>, monarch::ManagerError> {
         match self {
             #[cfg(target_os = "windows")]

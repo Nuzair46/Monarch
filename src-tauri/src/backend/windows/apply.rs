@@ -95,16 +95,36 @@ pub(super) fn verify_requested_outputs(
 pub(super) fn wait_for_requested_outputs(
     desired: &Layout,
 ) -> Result<TopologySnapshot, ManagerError> {
+    wait_for_requested_outputs_with(
+        desired,
+        Duration::from_secs(2),
+        super::enumerate::query_active_only_topology,
+    )
+}
+
+fn wait_for_requested_outputs_with(
+    desired: &Layout,
+    timeout: Duration,
+    mut query: impl FnMut() -> Result<TopologySnapshot, ManagerError>,
+) -> Result<TopologySnapshot, ManagerError> {
     // Some drivers publish their new topology a little after SetDisplayConfig succeeds.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = Instant::now() + timeout;
+    let mut retried = false;
     loop {
-        let snapshot = super::enumerate::query_active_only_topology()?;
-        let result = monarch::identity::resolve_layout(desired, &snapshot.layout)
-            .and_then(|resolved| verify_requested_outputs(&resolved, &snapshot.layout));
+        let result = query().and_then(|snapshot| {
+            let resolved = monarch::identity::resolve_layout(desired, &snapshot.layout)?;
+            verify_requested_outputs(&resolved, &snapshot.layout)?;
+            Ok(snapshot)
+        });
         match result {
-            Ok(()) => return Ok(snapshot),
-            Err(error) if std::time::Instant::now() >= deadline => return Err(error),
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error) if retried && Instant::now() >= deadline => return Err(error),
+            Err(_) => {
+                // A slow EDID query can consume the entire settling interval.
+                // Still obtain one fresh snapshot before declaring a target lost.
+                retried = true;
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 }
@@ -112,6 +132,21 @@ pub(super) fn wait_for_requested_outputs(
 pub fn apply_layout_against_snapshot(
     desired: &Layout,
     snapshot: &TopologySnapshot,
+) -> Result<TopologySnapshot, ManagerError> {
+    apply_layout(desired, snapshot, false)
+}
+
+pub(super) fn apply_profile_layout_against_snapshot(
+    desired: &Layout,
+    snapshot: &TopologySnapshot,
+) -> Result<TopologySnapshot, ManagerError> {
+    apply_layout(desired, snapshot, true)
+}
+
+fn apply_layout(
+    desired: &Layout,
+    snapshot: &TopologySnapshot,
+    is_profile: bool,
 ) -> Result<TopologySnapshot, ManagerError> {
     desired.ensure_supported()?;
     for output in desired.outputs.iter().filter(|o| o.enabled) {
@@ -146,6 +181,9 @@ pub fn apply_layout_against_snapshot(
     }
     // Routing can change when splitting/joining clones; never set DPI on old IDs.
     let mut refreshed = wait_for_requested_outputs(desired)?;
+    let desired = prepare_activated_layout(desired, &refreshed.layout, is_profile, || {
+        super::capabilities::discover(&refreshed)
+    })?;
     let attaching = desired.outputs.iter().filter(|o| o.enabled).any(|output| {
         !snapshot
             .layout
@@ -154,24 +192,46 @@ pub fn apply_layout_against_snapshot(
             .any(|before| before.enabled && before.display_id == output.display_id)
     });
     if attaching || flags.contains(SDC_ALLOW_CHANGES) {
-        let resolved = monarch::identity::resolve_layout(desired, &refreshed.layout)?;
-        if needs_source_mode_retry(&resolved, &refreshed.layout) {
+        if needs_source_mode_retry(&desired, &refreshed.layout) {
             // Best-mode selection may attach a KVM/portrait target with a
             // substituted source size. Now that its live target timing exists,
             // resubmit the requested desktop rectangle without ALLOW_CHANGES.
-            let (paths, modes) = plan_layout_with_target_timings(&resolved, &refreshed, true)?;
+            let (paths, modes) = plan_layout_with_target_timings(&desired, &refreshed, true)?;
             apply_exact_source_modes(&paths, &modes, |flags| unsafe {
                 SetDisplayConfig(Some(&paths), Some(&modes), flags)
             })?;
-            refreshed = wait_for_requested_outputs(desired)?;
+            refreshed = wait_for_requested_outputs(&desired)?;
         }
     }
-    apply_preferences(desired, &refreshed)?;
+    apply_preferences(&desired, &refreshed)?;
 
-    let next_snapshot = wait_for_verified_layout(desired)?;
+    let next_snapshot = wait_for_verified_layout(&desired)?;
     best_effort_reload_color_calibration();
     best_effort_restore_gamma_ramps(&next_snapshot, &saved_gamma_ramps);
     Ok(next_snapshot)
+}
+
+fn prepare_activated_layout(
+    desired: &Layout,
+    observed: &Layout,
+    is_profile: bool,
+    capabilities: impl FnOnce() -> Vec<monarch::capabilities::DisplayCapabilities>,
+) -> Result<Layout, ManagerError> {
+    let mut desired = monarch::identity::resolve_layout(desired, observed)?;
+    if is_profile && monarch::profile_geometry::needs_mode_evidence(&desired) {
+        let repaired = monarch::profile_geometry::repair(&desired, &capabilities())?;
+        for (saved, corrected) in desired.outputs.iter().zip(&repaired.outputs) {
+            if saved.resolution != corrected.resolution {
+                diagnostics::log(format!(
+                    "display_config:profile_portrait_repaired:target={:?}:saved={}x{}:desktop={}x{}",
+                    saved.display_id.endpoint(), saved.resolution.width, saved.resolution.height,
+                    corrected.resolution.width, corrected.resolution.height,
+                ));
+            }
+        }
+        desired = repaired;
+    }
+    Ok(desired)
 }
 
 fn needs_source_mode_retry(desired: &Layout, observed: &Layout) -> bool {
@@ -1130,6 +1190,86 @@ mod tests {
                 .targetVideoSignalInfo
         };
         assert_eq!(target.pixelRate, 148_351_648);
+    }
+
+    #[test]
+    fn activated_profile_repairs_the_reported_dimensions_before_exact_retry() {
+        let saved: monarch::Profile = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/issue_76_profile.json"
+        )))
+        .unwrap();
+        let mut observed = saved.layout.clone();
+        observed.outputs[3].resolution = Resolution {
+            width: 1080,
+            height: 1920,
+        };
+        let cap = monarch::capabilities::DisplayCapabilities {
+            display_id: saved.layout.outputs[3].display_id.clone(),
+            modes: vec![monarch::capabilities::DisplayMode {
+                resolution: Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                refresh_rate_mhz: 100_000,
+            }],
+            modes_unavailable_reason: None,
+            hdr_supported: false,
+            hdr_enabled: Some(false),
+            hdr_unavailable_reason: None,
+            scale_percent: Some(100),
+            scale_percentages: vec![100],
+            scaling_unavailable_reason: None,
+        };
+        let manual = prepare_activated_layout(&saved.layout, &observed, false, || {
+            panic!("manual apply must not reinterpret source dimensions")
+        })
+        .unwrap();
+        assert_eq!(manual, saved.layout);
+        assert!(needs_source_mode_retry(&manual, &observed));
+        let profile =
+            prepare_activated_layout(&saved.layout, &observed, true, || vec![cap.clone()]).unwrap();
+        assert_eq!(profile, observed);
+        assert!(!needs_source_mode_retry(&profile, &observed));
+        monarch::verification::verify_applied_layout(&profile, &observed).unwrap();
+        let mut partial = cap;
+        partial.modes_unavailable_reason = Some("partial modes".into());
+        assert_eq!(
+            prepare_activated_layout(&saved.layout, &observed, true, || vec![partial]).unwrap(),
+            saved.layout
+        );
+    }
+
+    #[test]
+    fn slow_or_failed_first_inventory_still_gets_one_fresh_snapshot() {
+        let desired = layout(&[1, 2]);
+        for unreadable_geometry in [false, true] {
+            let mut queries = 0;
+            let observed = wait_for_requested_outputs_with(&desired, Duration::ZERO, || {
+                queries += 1;
+                if queries == 1 {
+                    if unreadable_geometry {
+                        Err(ManagerError::Backend("desktop geometry not ready".into()))
+                    } else {
+                        Ok(snapshot(&[1]))
+                    }
+                } else {
+                    Ok(snapshot(&[1, 2]))
+                }
+            })
+            .unwrap();
+            assert_eq!(queries, 2);
+            assert_eq!(observed.layout, desired);
+        }
+        let mut queries = 0;
+        let error = wait_for_requested_outputs_with(&desired, Duration::ZERO, || {
+            queries += 1;
+            Ok(snapshot(&[1]))
+        })
+        .err()
+        .unwrap();
+        assert_eq!(queries, 2);
+        assert!(matches!(error, ManagerError::DisplaysUnavailable(_)));
     }
 
     #[test]

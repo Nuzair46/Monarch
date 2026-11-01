@@ -150,7 +150,7 @@ where
         layout: Layout,
         audio: Option<AudioDefaults>,
     ) -> Result<(), ManagerError> {
-        self.apply_configuration_checked(layout, audio, None)
+        self.apply_configuration_checked(layout, audio, None, false)
             .map(|_| ())
     }
 
@@ -159,6 +159,7 @@ where
         layout: Layout,
         audio: Option<AudioDefaults>,
         expected: Option<&Layout>,
+        is_profile: bool,
     ) -> Result<bool, ManagerError> {
         self.ensure_no_pending_confirmation()?;
         let mut layout = layout;
@@ -217,7 +218,11 @@ where
         self.commit_config(next)?;
         self.pending_confirmation = Some(PendingConfirmation::new(current_layout, Duration::ZERO));
         let display_result = if display_changed || audio.is_none() {
-            self.backend.apply_layout(layout)
+            if is_profile {
+                self.backend.apply_profile_layout(layout)
+            } else {
+                self.backend.apply_layout(layout)
+            }
         } else {
             Ok(())
         };
@@ -272,7 +277,7 @@ where
         self.ensure_no_pending_confirmation()?;
         normalize_primary(&mut desired);
         let result: Result<bool, ManagerError> = (|| {
-            if !self.apply_configuration_checked(desired.clone(), None, Some(observed))? {
+            if !self.apply_configuration_checked(desired.clone(), None, Some(observed), false)? {
                 return Ok(false);
             }
             let actual = self.backend.get_layout()?;
@@ -584,7 +589,15 @@ where
             crate::placement::close_missing_display_gaps(&mut target_layout)?;
         }
 
-        let (target_layout, current_layout) = self.remap_and_resolve_for_apply(target_layout)?;
+        let (mut target_layout, current_layout) =
+            self.remap_and_resolve_for_apply(target_layout)?;
+
+        if crate::profile_geometry::needs_mode_evidence(&target_layout) {
+            target_layout = crate::profile_geometry::repair(
+                &target_layout,
+                &self.backend.get_display_capabilities()?,
+            )?;
+        }
 
         target_layout.ensure_supported()?;
         current_layout.ensure_supported()?;
@@ -596,7 +609,8 @@ where
             return Ok(());
         }
 
-        self.apply_configuration(target_layout, audio)
+        self.apply_configuration_checked(target_layout, audio, None, true)
+            .map(|_| ())
     }
 
     pub fn audio_snapshot(&self) -> Result<AudioSnapshot, ManagerError> {

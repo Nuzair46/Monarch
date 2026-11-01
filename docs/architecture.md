@@ -52,6 +52,16 @@ An apply error 31/1610 is classified as unavailable only when a fresh connected
 enumeration confirms missing identity; the status code alone cannot exclude a monitor.
 Other driver errors, ambiguous identities, failed recovery or journal persistence,
 and unavailable requested audio still fail. There is at most one profile retry.
+Old saved profiles may contain unrotated target dimensions alongside portrait
+orientation (the supplied #76 profile stores 1920×1080 instead of 1080×1920).
+For enabled extended portrait outputs only, a complete live mode list can establish
+that the transposed target mode is unsupported while the saved unrotated dimensions
+are supported at the same refresh rate. The effective profile then uses rotated
+desktop dimensions and closes resulting gaps. This happens before preflight when
+full modes are available, or after activation inside native recovery for detached
+targets. Partial lists, clone sources, valid custom/native-portrait modes and
+unrelated mismatches do not permit repair. The saved profile is retained until the
+user saves it again; manual layout requests and recovery never use this policy.
 Ambiguous and many-to-one matches remain errors. At least one enabled saved
 display must resolve. Explicitly disabled saved outputs override live state.
 Primary fallback and coordinate rebasing are handled
@@ -147,6 +157,12 @@ refresh ([API requirement](https://learn.microsoft.com/en-us/windows/win32/api/w
 The planner always writes the requested desktop dimensions and position into source
 modes, including when reusing an active source's pixel format. Raw source dimensions
 must not override observed portrait geometry.
+Enumeration reads `GetMonitorInfoW` desktop bounds by GDI source name under a
+temporary per-monitor DPI-aware thread context, restoring the caller's context
+afterward. Live `EnumDisplaySettingsExW` geometry is the fallback. If neither live
+read succeeds, enumeration fails rather than saving raw timing dimensions as an
+observed desktop. Post-apply settling retries transient read errors and always
+allows one fresh snapshot even if the first slow driver query consumed its interval.
 The planner submits the source/target mode table to `SDC_VALIDATE` first. If Windows
 returns 1610 (`ERROR_BAD_CONFIGURATION`) or 31 (`ERROR_GEN_FAILURE`) and at least one
 active path lacks a target timing, it retries validation with `SDC_ALLOW_CHANGES`
@@ -160,7 +176,9 @@ dimensions/positions, Monarch makes one corrective apply using the freshly obser
 target timings and the original requested source rectangles. Both validation and
 apply omit `SDC_ALLOW_CHANGES` on this pass. HDR/scaling are applied afterward and
 full observation still decides success; transposed dimensions are never accepted
-as equivalent or written back into the saved profile.
+as equivalent or written back into the saved profile. Profile-only compatibility
+repair, when supported by complete live mode evidence as described above, runs
+before deciding whether that corrective pass is needed.
 The requested layout remains unchanged: post-apply verification still rejects
 substituted modes, positions, orientation, primary, clone, HDR or scaling settings
 and triggers recovery before confirmation. Both preflight and apply use the same
